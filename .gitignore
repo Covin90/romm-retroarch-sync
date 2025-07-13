@@ -1,0 +1,90 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/AppDir/
+build/RomM-*.AppImage
+build/*.zsync
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDE and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.vs/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Application specific
+*.log
+config.ini
+cache/
+temp/
+
+# Build artifacts
+AppDir/
+*.AppImage
+*.zsync
+appimagetool*
+
+# Screenshots (except assets)
+screenshot_*.png
+screen_*.png
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# User configuration and data
+.config/
+user_data/
+local_settings.ini
+
+# Development tools
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Distribution and packaging
+*.deb
+*.rpm
+*.tar.gz
+*.zip
+releases/
