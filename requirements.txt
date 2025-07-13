@@ -1,0 +1,11 @@
+# Core dependencies for RomM-RetroArch Sync
+requests>=2.28.0
+watchdog>=3.0.0
+cryptography>=3.4.8
+
+# GTK4 and GObject bindings (system-provided, listed for reference)
+# PyGObject>=3.42.0
+
+# Optional: Development and testing dependencies
+# pytest>=7.0.0
+# flake8>=4.0.0
