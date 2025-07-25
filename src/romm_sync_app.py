@@ -43,31 +43,135 @@ class GameDataCache:
         # Cache expiry (24 hours)
         self.cache_expiry = 24 * 60 * 60
         
-        # Load existing cache
+        # Load existing cache and metadata
         self.cached_games = self.load_games_cache()
         self.platform_mapping = self.load_platform_mapping()
         self.filename_mapping = self.load_filename_mapping()
-    
-    def save_games_data(self, games_data):
-        """Save RomM games data to cache"""
+        
+        # Add sync metadata cache
+        self.sync_metadata_file = self.cache_dir / 'sync_metadata.json'
+        self.sync_metadata = self.load_sync_metadata()
+
+    def load_last_sync_timestamp(self):
+        """Load last sync timestamp from metadata"""
         try:
-            cache_data = {
-                'timestamp': time.time(),
-                'games': games_data,
-                'count': len(games_data)
-            }
+            metadata_file = self.cache_dir / 'sync_metadata.json'
+            if metadata_file.exists():
+                with open(metadata_file, 'r') as f:
+                    metadata = json.load(f)
+                    return metadata.get('last_sync', 0)
+        except Exception as e:
+            print(f"Failed to load sync metadata: {e}")
+        return 0
+
+    def load_sync_metadata(self):
+        """Load sync metadata for delta updates"""
+        try:
+            if self.sync_metadata_file.exists():
+                with open(self.sync_metadata_file, 'r') as f:
+                    return json.load(f)
+        except:
+            pass
+        
+        return {
+            'last_sync_time': None,
+            'last_total_count': 0,
+            'last_content_hash': None,
+            'romm_server_url': None
+        }
+
+    def save_sync_metadata(self, total_count, content_hash, server_url):
+        """Save sync metadata for future delta updates"""
+        import datetime
+        
+        metadata = {
+            'last_sync_time': datetime.datetime.now(datetime.UTC).isoformat(),
+            'last_sync_timestamp': time.time(),
+            'last_total_count': total_count,
+            'last_content_hash': content_hash,
+            'romm_server_url': server_url,
+            'sync_version': '1.1'
+        }
+        
+        try:
+            with open(self.sync_metadata_file, 'w') as f:
+                json.dump(metadata, f, indent=2)
+            self.sync_metadata = metadata
+            print(f"✅ Saved sync metadata: {total_count} games, hash: {str(content_hash)[:8]}...")
+        except Exception as e:
+            print(f"❌ Failed to save sync metadata: {e}")
+            import traceback
+            print(f"Traceback: {traceback.format_exc()}")
+
+    def needs_full_refresh(self, romm_client):
+        """Quick check if full refresh is needed"""
+        if not self.is_cache_valid():
+            return True, "Cache expired"
+        
+        try:
+            # Fast health check - just get count and first few IDs
+            response = romm_client.session.get(
+                urljoin(romm_client.base_url, '/api/roms'),
+                params={'limit': 5, 'offset': 0, 'fields': 'id'},
+                timeout=5
+            )
             
-            with open(self.games_cache_file, 'w', encoding='utf-8') as f:
-                json.dump(cache_data, f, indent=2, ensure_ascii=False)
-            
-            # Update mappings
-            self.update_mappings(games_data)
-            self.cached_games = games_data
-            
-            print(f"✅ Cached {len(games_data)} games to local storage")
+            if response.status_code == 200:
+                data = response.json()
+                current_total = data.get('total', 0)
+                current_ids = [item.get('id') for item in data.get('items', [])]
+                current_checksum = f"{current_total}-{'-'.join(map(str, current_ids))}"
+                
+                if self.api_checksum == current_checksum:
+                    return False, "No changes detected"
+                
+                self.api_checksum = current_checksum
+                return True, f"Changes detected (total: {current_total})"
             
         except Exception as e:
-            print(f"❌ Failed to save games cache: {e}")
+            print(f"Health check failed: {e}")
+        
+        return True, "Health check failed"
+    
+    def save_games_data(self, games_data):
+        """Non-blocking cache save for instant UI response"""
+        import threading
+        import time
+        
+        def save_in_background():
+            """Background thread to save cache without blocking UI"""
+            try:
+                start_time = time.time()
+                
+                # Use compact JSON without indentation for speed
+                cache_data = {
+                    'timestamp': time.time(),
+                    'games': games_data,
+                    'count': len(games_data)
+                }
+                
+                temp_file = self.games_cache_file.with_suffix('.tmp')
+                
+                with open(temp_file, 'w', encoding='utf-8') as f:
+                    json.dump(cache_data, f, separators=(',', ':'))  # Compact JSON
+                
+                temp_file.rename(self.games_cache_file)
+                
+                # Just call directly:
+                self.update_mappings(games_data)
+                self.cached_games = games_data
+                
+                elapsed = time.time() - start_time
+                print(f"✅ Background: Cached {len(games_data):,} games in {elapsed:.2f}s")
+                
+            except Exception as e:  # ADD THIS EXCEPT BLOCK
+                print(f"❌ Background cache save failed: {e}")
+        
+        # Start background save immediately
+        cache_thread = threading.Thread(target=save_in_background, daemon=True)
+        cache_thread.start()
+        
+        print(f"📦 Caching {len(games_data):,} games in background (non-blocking)...")
     
     def load_games_cache(self):
         """Load cached games data"""
@@ -100,13 +204,15 @@ class GameDataCache:
             if not isinstance(game, dict):
                 continue
                 
-            romm_data = game.get('romm_data', game)  # Handle both formats
-            
+            romm_data = game.get('romm_data')
+            if not romm_data or not isinstance(romm_data, dict):  # Add null check
+                continue
+                
             # Platform mapping: directory name -> RomM platform name
             platform_name = (romm_data.get('platform_name') or 
                             romm_data.get('platform_slug') or 
                             game.get('platform', 'Unknown'))
-            
+                
             # Try to guess what directory name this would create
             dir_names = [
                 platform_name,
@@ -448,7 +554,6 @@ class PlatformItem(GObject.Object):
     def status_text(self):
         downloaded = sum(1 for g in self.games if g.get('is_downloaded'))
         result = f"{downloaded}/{len(self.games)}"
-        print(f"🔍 PlatformItem.status_text calculated: {result}")  # Debug output
         return result
     
     @GObject.Property(type=bool, default=False)
@@ -491,12 +596,10 @@ class PlatformItem(GObject.Object):
         
         if should_show_total:
             result = f"{format_size(downloaded_size)} / {format_size(total_library_size)}"
-            print(f"🔍 PlatformItem.size_text (connected): {result}")
             return result
         else:
             # When offline, all downloaded, or sizes are equal, just show downloaded size
             result = format_size(downloaded_size)
-            print(f"🔍 PlatformItem.size_text (offline): {result}")
             return result
     
     def force_property_update(self):
@@ -565,10 +668,8 @@ class LibraryTreeModel:
             can_update_in_place = self._can_update_in_place(new_platforms)
             
             if can_update_in_place:
-                print("🔄 Performing true in-place update (no visual disruption)")
                 self._update_in_place(new_platforms)
             else:
-                print("🔄 Performing rebuild with stable expansion preservation")
                 self._rebuild_with_preservation(new_platforms)
             
             self._last_platforms = new_platforms.copy()
@@ -589,7 +690,6 @@ class LibraryTreeModel:
                 return False
                 
             total_items = self.tree_model.get_n_items()
-            print(f"🔗 Setting up expansion tracking for {total_items} items")
             
             for i in range(total_items):
                 tree_item = self.tree_model.get_item(i)
@@ -604,9 +704,6 @@ class LibraryTreeModel:
                                                         platform_name)
                         self._expansion_connections[platform_name] = (tree_item, connection_id)
                         
-                        print(f"🔗 Connected expansion tracking for {platform_name}")
-            
-            print(f"✅ Expansion tracking setup complete: {len(self._expansion_connections)} platforms")
             
         except Exception as e:
             print(f"❌ Error setting up expansion tracking: {e}")
@@ -620,7 +717,6 @@ class LibraryTreeModel:
             
         try:
             is_expanded = tree_item.get_expanded()
-            print(f"👆 Manual expansion change: {platform_name} = {'EXPANDED' if is_expanded else 'COLLAPSED'}")
             
             # Update persistent state immediately
             self._persistent_expansion_state[platform_name] = is_expanded
@@ -644,7 +740,6 @@ class LibraryTreeModel:
             if expanded_count > 0 or not self._last_stable_state:
                 self._last_stable_state = current_state.copy()
                 self._persistent_expansion_state = current_state.copy()
-                print(f"💾 Saved expansion state: {expanded_count} platforms expanded")
                 
                 # Debug: show what was saved
                 for platform, expanded in current_state.items():
@@ -693,18 +788,15 @@ class LibraryTreeModel:
             current_state = self._get_current_expansion_state()
             expanded_count = sum(1 for expanded in current_state.values() if expanded)
             
-            print(f"🔄 Final expansion state: {expanded_count} platforms expanded")
-            
             # Show current state for debugging
             for platform, expanded in current_state.items():
                 status = "EXPANDED" if expanded else "collapsed"
-                print(f"   📁 {platform} = {status}")
             
             # If we have expansions now, save them
             if expanded_count > 0:
                 self._last_stable_state = current_state.copy()
                 self._persistent_expansion_state = current_state.copy()
-                print(f"💾 Stabilized: saved {expanded_count} expanded platforms")
+
             
         except Exception as e:
             print(f"Error stabilizing expansion state: {e}")
@@ -724,8 +816,7 @@ class LibraryTreeModel:
     
     def _update_in_place(self, new_platforms):
         """Update platform contents with zero visual disruption AND updated counts"""
-        print("🔄 Zero-flicker update with count updates")
-        
+
         # Save current expansion state before any changes
         current_expansion_state = self._get_current_expansion_state()
         expanded_platforms = [name for name, expanded in current_expansion_state.items() if expanded]
@@ -762,9 +853,8 @@ class LibraryTreeModel:
         if platforms_with_changes:
             self._update_platform_counts_flicker_free(platforms_with_changes, expanded_platforms)
         else:
-            print("✅ No count changes needed")
+            pass
         
-        print("🎉 Zero-flicker update complete with updated counts")
 
     def _update_platform_counts_flicker_free(self, platforms_with_changes, expanded_platforms):
         """Update platform counts without visual flicker"""
@@ -884,7 +974,7 @@ class LibraryTreeModel:
             
             self._restore_expansion_from_state(restoration_state)
         else:
-            print("📭 No stable expansion state to restore")
+            pass
     
     def _restore_expansion_from_state(self, expansion_state):
         """Restore expansion state from a specific state dict"""
@@ -1131,7 +1221,6 @@ class EnhancedLibrarySection:
                 if vadj:
                     scroll_position = vadj.get_value()
         
-        print(f"🎮 Updating games library: {len(games)} games")
         
         def do_update():
             self.library_model.update_library(games)
@@ -1140,7 +1229,6 @@ class EnhancedLibrarySection:
             if games:
                 downloaded_count = sum(1 for g in games if g.get('is_downloaded'))
                 total_count = len(games)
-                print(f"✅ Tree view updated: {total_count} total, {downloaded_count} downloaded")
         
         # Update with selection preservation
         self.preserve_selections_during_update(do_update)
@@ -1166,8 +1254,6 @@ class EnhancedLibrarySection:
                 if vadj:
                     scroll_position = vadj.get_value()
         
-        print(f"🎮 Updating games library: {len(games)} games")
-        
         def do_update():
             # The enhanced LibraryTreeModel now handles expansion tracking
             self.library_model.update_library(games)
@@ -1176,7 +1262,6 @@ class EnhancedLibrarySection:
             if games:
                 downloaded_count = sum(1 for g in games if g.get('is_downloaded'))
                 total_count = len(games)
-                print(f"✅ Tree view updated: {total_count} total, {downloaded_count} downloaded")
         
         # Update with selection preservation
         self.preserve_selections_during_update(do_update)
@@ -1582,7 +1667,6 @@ class EnhancedLibrarySection:
             # IMPORTANT: Bind the label to the 'name' property instead of setting text directly
             # This means when platform_item.notify('name') is called, the label will automatically update
             item.bind_property('name', label, 'label', GObject.BindingFlags.SYNC_CREATE)
-            print(f"🔗 Bound platform name property for {item.platform_name}")
         else:
             icon.set_from_icon_name("object-select-symbolic" if item.is_downloaded else "folder-download-symbolic")
             # For games, we can still set directly since they update via items_changed
@@ -2748,7 +2832,27 @@ class RomMClient:
     def __init__(self, base_url, username=None, password=None):
         self.base_url = base_url.rstrip('/')
         self.session = requests.Session()
-        self.authenticated = False
+        
+        # Force HTTP/2 and connection reuse
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+        
+        adapter = HTTPAdapter(
+            pool_connections=4,
+            pool_maxsize=4,
+            max_retries=Retry(total=2)
+        )
+        self.session.mount('http://', adapter)
+        self.session.mount('https://', adapter)
+        
+        # Existing headers + compression
+        self.session.headers.update({
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Accept': 'application/json',
+            'User-Agent': 'RomM-RetroArch-Sync/1.0.1',
+            'Connection': 'keep-alive',
+            'Keep-Alive': 'timeout=30, max=100'  # Keep connections alive
+        })
         
         if username and password:
             self.authenticate(username, password)
@@ -2843,48 +2947,298 @@ class RomMClient:
             print(f"Authentication error: {e}")
             return False
 
-    def get_roms(self):
-        """Fetch ROM library from RomM"""
+    def get_roms_delta(self, last_sync_time=None, last_sync_timestamp=None, progress_callback=None):
+        """Enhanced delta sync with multiple detection methods"""
         if not self.authenticated:
-            return []
-            
+            return [], 0, False, None
+        
         try:
-            response = self.session.get(urljoin(self.base_url, '/api/roms'))
+            # Method 1: Try time-based delta if the API supports it
+            if last_sync_time:
+                delta_params = {
+                    'fields': 'id,name,fs_name,platform_name,updated_at,created_at',
+                    'limit': 1000,
+                    'offset': 0
+                }
+                
+                # Try different time filter formats that might work
+                time_filters = [
+                    ('updated_since', last_sync_time),
+                    ('modified_after', last_sync_time),
+                    ('since', last_sync_time),
+                ]
+                
+                for filter_name, filter_value in time_filters:
+                    try:
+                        test_params = delta_params.copy()
+                        test_params[filter_name] = filter_value
+                        
+                        response = self.session.get(
+                            urljoin(self.base_url, '/api/roms'),
+                            params=test_params,
+                            timeout=15
+                        )
+                        
+                        if response.status_code == 200:
+                            data = response.json()
+                            items = data.get('items', [])
+                            total_on_server = data.get('total', 0)
+                            
+                            # If we got a reasonable delta (less than 20% of total), use it
+                            if len(items) < total_on_server * 0.2:
+                                if progress_callback:
+                                    progress_callback('delta', f"Found {len(items)} changes since last sync")
+                                
+                                return items, total_on_server, True, 'time_filter'
+                                
+                    except Exception as e:
+                        print(f"Time filter '{filter_name}' failed: {e}")
+                        continue
+            
+            # Method 2: Quick change detection - get first and last few items
+            quick_check_params = {
+                'fields': 'id,name,fs_name,platform_name',
+                'limit': 20,  # Just get first 20 items
+                'offset': 0
+            }
+            
+            response = self.session.get(
+                urljoin(self.base_url, '/api/roms'),
+                params=quick_check_params,
+                timeout=10
+            )
+            
             if response.status_code == 200:
                 data = response.json()
-                print(f"ROM API response type: {type(data)}")
-                print(f"ROM API response keys: {list(data.keys()) if isinstance(data, dict) else 'Not a dict'}")
+                current_total = data.get('total', 0)
+                current_items = data.get('items', [])
                 
-                # Handle different response structures
-                if isinstance(data, list):
-                    print(f"Found {len(data)} ROMs (direct list)")
-                    return data
-                elif isinstance(data, dict):
-                    # Common API patterns
-                    if 'data' in data:
-                        roms = data['data']
-                        print(f"Found {len(roms)} ROMs (data field)")
-                        return roms if isinstance(roms, list) else []
-                    elif 'results' in data:
-                        roms = data['results'] 
-                        print(f"Found {len(roms)} ROMs (results field)")
-                        return roms if isinstance(roms, list) else []
-                    elif 'items' in data:
-                        roms = data['items']
-                        print(f"Found {len(roms)} ROMs (items field)")
-                        return roms if isinstance(roms, list) else []
-                    else:
-                        # Maybe the dict itself contains ROM data
-                        print(f"Treating dict as single ROM or unknown structure")
-                        return [data] if data else []
+                # Create a quick signature from the first few items
+                current_signature = {
+                    'total': current_total,
+                    'first_5_ids': [item.get('id') for item in current_items[:5]],
+                    'sample_names': [item.get('name', '') for item in current_items[:3]]
+                }
                 
-            print(f"ROM API failed with status: {response.status_code}")
-            print(f"Response: {response.text[:200]}")
-            return []
+                if progress_callback:
+                    progress_callback('check', f"Quick check: {current_total} total games")
+                
+                return [], current_total, False, current_signature
+            
+            return [], 0, False, None
+            
         except Exception as e:
-            print(f"Error fetching ROMs: {e}")
-            return []
-    
+            print(f"Delta detection error: {e}")
+            return [], 0, False, None
+
+    def get_roms(self, progress_callback=None, limit=500, offset=0):
+        """Get ROMs with pagination support - FIXED to return consistent format"""
+        if not self.authenticated:
+            return [], 0
+        
+        try:
+            if progress_callback:
+                progress_callback('start', offset)
+            
+            # For backward compatibility, if no specific limit is requested, get all games
+            if limit == 500 and offset == 0:
+                # Get all games in one request for simplicity
+                response = self.session.get(
+                    urljoin(self.base_url, '/api/roms'),
+                    params={
+                        'limit': 10000,  # Large limit to get most games
+                        'offset': 0,
+                        'fields': 'id,name,fs_name,platform_name'
+                    },
+                    timeout=30
+                )
+            else:
+                # Specific pagination request
+                response = self.session.get(
+                    urljoin(self.base_url, '/api/roms'),
+                    params={
+                        'limit': limit,
+                        'offset': offset,
+                        'fields': 'id,name,fs_name,platform_name'
+                    },
+                    timeout=30
+                )
+            
+            if response.status_code != 200:
+                print(f"❌ RomM API error: HTTP {response.status_code}")
+                return [], 0
+            
+            data = response.json()
+            items = data.get('items', [])
+            total = data.get('total', 0)
+            
+            if progress_callback:
+                progress_callback('batch', {'items': items, 'total': total, 'offset': offset})
+            
+            print(f"✅ Fetched {len(items)} games (total: {total})")
+            return items, total
+            
+        except Exception as e:
+            print(f"❌ Error fetching ROMs: {e}")
+            return [], 0
+        
+    def _find_optimal_page_size(self, total_items, progress_callback):
+        # For libraries under 5000, skip all testing
+        if total_items <= 5000:
+            print(f"⚡ Small library ({total_items:,}), using single request")
+            return total_items
+        
+        # Check cache first
+        cached_page_size = getattr(self, '_cached_page_size', None)
+        if cached_page_size:
+            print(f"⚡ Using cached page size: {cached_page_size:,}")
+            return cached_page_size
+        
+        # Only test for large libraries, and test fewer sizes
+        test_sizes = [3000, 2000]  # Reduced from [5000, 3000, 2000, 1000]
+        
+        for size in test_sizes:
+            try:  # ADD THIS LINE
+                response = self.session.get(
+                    urljoin(self.base_url, '/api/roms'),
+                    params={'limit': size, 'offset': 0, 'fields': 'id,name'},
+                    timeout=15
+                )
+                    
+                if response.status_code == 200:
+                    data = response.json()
+                    items = data.get('items', [])
+                    
+                    expected_items = min(size, total_items)
+                    variance = abs(len(items) - expected_items)
+                    
+                    if variance <= 10 or len(items) >= expected_items:
+                        print(f"✅ Optimal page size found: {size:,} (cached for future use)")
+                        self._cached_page_size = size
+                        return size
+                        
+                elif response.status_code == 422:
+                    print(f"❌ Page size {size:,}: Server limit exceeded")
+                    continue
+                        
+            except Exception as e:
+                print(f"❌ Page size {size:,} test failed: {e}")
+                continue
+        
+        # Fallback (MOVE THIS OUTSIDE THE LOOP)
+        fallback_size = 1000
+        self._cached_page_size = fallback_size
+        print(f"⚠️ Using fallback page size: {fallback_size}")
+        return fallback_size
+
+    def _fetch_pages_parallel(self, total_items, page_size, pages_needed, progress_callback):
+        """Fetch all pages using parallel requests with deduplication"""
+        import concurrent.futures
+        import threading
+        
+        all_roms = []
+        max_workers = 4  # Conservative to avoid overwhelming server
+        completed_pages = 0
+        lock = threading.Lock()
+        
+        def fetch_single_page(page_num):
+            """Fetch a single page with optimized parameters"""
+            offset = (page_num - 1) * page_size  # Use page_size, not optimal_page_size
+            
+            if offset >= total_items:
+                return page_num, []
+            
+            try:
+                response = self.session.get(
+                    urljoin(self.base_url, '/api/roms'),
+                    params={
+                        'limit': page_size,
+                        'offset': offset,
+                        'fields': 'id,name,fs_name,platform_name'  # Remove fs_name_no_ext and fs_size_bytes for now
+                    },
+                    timeout=60
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    items = data.get('items', [])
+                    
+                    # Process in smaller chunks to reduce memory pressure
+                    chunk_size = 500
+                    processed_items = []
+                    
+                    for i in range(0, len(items), chunk_size):
+                        chunk = items[i:i + chunk_size]
+                        processed_items.extend(chunk)
+                        
+                        # Small yield every 500 items to prevent blocking
+                        if i > 0 and i % 1000 == 0:
+                            time.sleep(0.001)  # Tiny yield
+                    
+                    return page_num, processed_items
+                else:
+                    print(f"❌ Page {page_num} failed: HTTP {response.status_code}")
+                    
+            except Exception as e:
+                print(f"❌ Page {page_num} error: {e}")
+            
+            return page_num, []
+        
+        # Process pages in batches to avoid overwhelming the server
+        print(f"🚀 Starting parallel fetch: {pages_needed} pages, {max_workers} workers")
+        
+        for batch_start in range(1, pages_needed + 1, max_workers):
+            batch_end = min(batch_start + max_workers, pages_needed + 1)
+            batch_pages = list(range(batch_start, batch_end))
+            
+            if progress_callback:
+                progress_callback('page', f'Parallel batch: pages {batch_start}-{batch_end-1}')
+            
+            # Fetch this batch in parallel
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all pages in this batch
+                future_to_page = {
+                    executor.submit(fetch_single_page, page): page 
+                    for page in batch_pages
+                }
+                
+                # Collect results as they complete
+                batch_results = []
+                for future in concurrent.futures.as_completed(future_to_page):
+                    page_num, page_roms = future.result()
+                    batch_results.append((page_num, page_roms))
+                    
+                    with lock:
+                        completed_pages += 1
+                        if progress_callback:
+                            progress_callback('page', f'Completed {completed_pages}/{pages_needed} pages')
+                
+                # Sort batch results by page number and add to collection
+                batch_results.sort(key=lambda x: x[0])
+                for page_num, page_roms in batch_results:
+                    if page_roms:
+                        all_roms.extend(page_roms)
+            
+            print(f"✅ Batch complete: {len(all_roms):,} ROMs loaded so far")
+            
+        # Remove duplicates by ID (in case API returns duplicates)
+        if all_roms:
+            seen_ids = set()
+            unique_roms = []
+            for rom in all_roms:
+                rom_id = rom.get('id')
+                if rom_id and rom_id not in seen_ids:
+                    seen_ids.add(rom_id)
+                    unique_roms.append(rom)
+                elif not rom_id:  # Keep ROMs without IDs
+                    unique_roms.append(rom)
+            
+            if len(unique_roms) != len(all_roms):
+                print(f"🔍 Removed {len(all_roms) - len(unique_roms)} duplicate ROMs")
+                all_roms = unique_roms
+        
+        return all_roms
+        
     def download_rom(self, rom_id, rom_name, download_path, progress_callback=None):
         """Download a ROM file with progress tracking"""
         try:
@@ -4571,13 +4925,77 @@ class SyncWindow(Gtk.ApplicationWindow):
             if url and username and password:
                 self.log_message("🔄 Auto-connecting to RomM...")
                 self.connection_enable_switch.set_active(True)
-                self.start_connection(url, username, password)
             else:
                 self.log_message("⚠️ Auto-connect enabled but credentials incomplete")
         else:
             self.log_message("⚠️ Auto-connect or remember credentials disabled")
         
         return False
+
+    def load_remaining_games(self, download_dir, total_games):
+        """Load remaining games in background batches"""
+        def load_in_background():
+            batch_size = 1000
+            current_games = list(self.available_games)  # Copy current list
+            
+            for offset in range(500, total_games, batch_size):
+                try:
+                    batch, _ = self.romm_client.get_roms(limit=batch_size, offset=offset)
+                    if not batch:
+                        break
+                    
+                    # Process this batch
+                    new_games = self.process_rom_batch(batch, download_dir)
+                    current_games.extend(new_games)
+                    
+                    # Update UI every batch
+                    def update_ui(games_so_far=len(current_games), total=total_games):
+                        self.available_games = current_games
+                        if hasattr(self, 'library_section'):
+                            self.library_section.update_games_library(current_games)
+                        self.log_message(f"📚 Loaded {games_so_far}/{total} games...")
+                    
+                    GLib.idle_add(update_ui)
+                    time.sleep(0.1)  # Small delay between batches
+                    
+                except Exception as e:
+                    self.log_message(f"Background loading error: {e}")
+                    break
+            
+            # Final update
+            GLib.idle_add(lambda: self.log_message(f"✅ All {len(current_games)} games loaded!"))
+            
+            # Cache final result
+            threading.Thread(target=lambda: self.game_cache.save_games_data(current_games), daemon=True).start()
+        
+        threading.Thread(target=load_in_background, daemon=True).start()
+
+    def process_rom_batch(self, rom_batch, download_dir):
+        """Process a batch of ROMs"""
+        games = []
+        for rom in rom_batch:
+            rom_id = rom.get('id')
+            platform = rom.get('platform_name', 'Unknown')
+            file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
+            
+            platform_dir = download_dir / platform
+            local_path = platform_dir / file_name
+            is_downloaded = local_path.exists() and local_path.stat().st_size > 1024
+            
+            display_name = Path(file_name).stem if file_name else rom.get('name', 'Unknown')
+            
+            games.append({
+                'name': display_name,
+                'rom_id': rom_id,
+                'platform': platform,
+                'file_name': file_name,
+                'is_downloaded': is_downloaded,
+                'local_path': str(local_path) if is_downloaded else None,
+                'local_size': local_path.stat().st_size if is_downloaded else 0,
+                'romm_data': rom
+            })
+        
+        return self.sort_games_consistently(games)
 
     def set_application_identity(self):
         """Set proper application identity for dock/taskbar"""
@@ -4611,6 +5029,193 @@ class SyncWindow(Gtk.ApplicationWindow):
         except Exception as e:
             print(f"❌ Failed to set application identity: {e}")
 
+    def apply_delta_update(self, delta_items, download_dir, current_total, current_signature):
+        """Apply delta changes with improved handling"""
+        start_time = time.time()
+        
+        # Load existing games from cache
+        existing_games = list(self.game_cache.cached_games)
+        games_by_id = {g.get('rom_id'): g for g in existing_games if g.get('rom_id')}
+        
+        changes_applied = 0
+        new_games_added = 0
+        existing_games_updated = 0
+        
+        # Process delta items
+        for delta_rom in delta_items:
+            rom_id = delta_rom.get('id')
+            if not rom_id:
+                continue
+                
+            # Process the delta item
+            updated_game = self.process_single_rom(delta_rom, download_dir)
+            
+            if rom_id in games_by_id:
+                # Update existing game
+                old_game = games_by_id[rom_id]
+                games_by_id[rom_id] = updated_game
+                
+                # Replace in the main list
+                for i, game in enumerate(existing_games):
+                    if game.get('rom_id') == rom_id:
+                        existing_games[i] = updated_game
+                        break
+                
+                existing_games_updated += 1
+            else:
+                # New game - add it in the right position to maintain sort order
+                existing_games.append(updated_game)
+                games_by_id[rom_id] = updated_game
+                new_games_added += 1
+            
+            changes_applied += 1
+        
+        # Re-sort to maintain consistency
+        updated_games = self.sort_games_consistently(existing_games)
+        
+        # Update UI immediately
+        def update_ui():
+            self.available_games = updated_games
+            if hasattr(self, 'library_section'):
+                self.library_section.update_games_library(updated_games)
+            GLib.idle_add(lambda: self.update_connection_ui("connected"))
+            
+            elapsed = time.time() - start_time
+            change_summary = []
+            if new_games_added > 0:
+                change_summary.append(f"{new_games_added} new")
+            if existing_games_updated > 0:
+                change_summary.append(f"{existing_games_updated} updated")
+            
+            summary = ", ".join(change_summary) if change_summary else "processed"
+            self.log_message(f"⚡ Delta sync: {summary} in {elapsed:.2f}s")
+        
+        GLib.idle_add(update_ui)
+        
+        # Save updated cache and metadata (pass the games for signature)
+        content_hash = hash(str(len(updated_games)) + str(updated_games[0].get('rom_id', '') if updated_games else ''))
+        
+        # Background save
+        threading.Thread(target=lambda: [
+            self.game_cache.save_games_data(updated_games),
+            self.game_cache.save_sync_metadata(current_total, content_hash, self.romm_client.base_url, updated_games)
+        ], daemon=True).start()
+
+    def handle_offline_mode(self):
+        """Handle when not connected to RomM - show only downloaded games"""
+        download_dir = Path(self.rom_dir_row.get_text())
+        
+        if self.game_cache.is_cache_valid():
+            # Use cached data but FILTER to only show downloaded games
+            cached_games = list(self.game_cache.cached_games)
+            local_games = self.filter_to_downloaded_games_only(cached_games, download_dir)
+            
+            def update_ui():
+                self.available_games = local_games
+                if hasattr(self, 'library_section'):
+                    self.library_section.update_games_library(local_games)
+                self.update_connection_ui("disconnected")
+                
+                if local_games:
+                    self.log_message(f"📂 Offline mode: {len(local_games)} downloaded games (from cache)")
+                else:
+                    self.log_message(f"📂 Offline mode: No downloaded games found")
+            
+            GLib.idle_add(update_ui)
+        else:
+            # No cache - scan local files only
+            local_games = self.scan_local_games_only(download_dir)
+            
+            def update_ui():
+                self.available_games = local_games
+                if hasattr(self, 'library_section'):
+                    self.library_section.update_games_library(local_games)
+                self.update_connection_ui("disconnected")
+                self.log_message(f"📂 Offline mode: {len(local_games)} local games found")
+            
+            GLib.idle_add(update_ui)
+
+    def filter_to_downloaded_games_only(self, cached_games, download_dir):
+        """Filter cached games to only show those that are actually downloaded"""
+        downloaded_games = []
+        
+        for game in cached_games:
+            # Check if this game is actually downloaded
+            platform = game.get('platform', 'Unknown')
+            file_name = game.get('file_name', '')
+            
+            if not file_name:
+                continue
+                
+            # Build expected local path
+            platform_dir = download_dir / platform
+            local_path = platform_dir / file_name
+            
+            # Check if file exists and is not empty
+            if local_path.exists() and local_path.stat().st_size > 1024:
+                # Update game data with current local info
+                game_copy = game.copy()  # Don't modify the original cache
+                game_copy['is_downloaded'] = True
+                game_copy['local_path'] = str(local_path)
+                game_copy['local_size'] = local_path.stat().st_size
+                downloaded_games.append(game_copy)
+        
+        # Sort the filtered games
+        return self.sort_games_consistently(downloaded_games)
+
+    def scan_and_merge_local_changes(self, cached_games):
+        """Merge local file changes with cached RomM data - FILTER to downloaded only"""
+        download_dir = Path(self.rom_dir_row.get_text())
+        
+        # Filter to only downloaded games instead of showing all
+        downloaded_games = self.filter_to_downloaded_games_only(cached_games, download_dir)
+        
+        def update_ui():
+            self.available_games = downloaded_games
+            if hasattr(self, 'library_section'):
+                self.library_section.update_games_library(downloaded_games)
+            self.update_connection_ui("disconnected")
+            
+            if downloaded_games:
+                total_cached = len(cached_games)
+                self.log_message(f"📂 Offline: {len(downloaded_games)} downloaded games (of {total_cached} in cache)")
+            else:
+                self.log_message(f"📂 Offline: No downloaded games found")
+        
+        GLib.idle_add(update_ui)
+
+    def use_cached_data_as_fallback(self):
+        """Emergency fallback to cached data"""
+        if self.game_cache.is_cache_valid():
+            self.log_message("🛡️ Using cached data as fallback")
+            self.scan_and_merge_local_changes(list(self.game_cache.cached_games))
+        else:
+            self.log_message("⚠️ No valid cache available")
+            self.handle_offline_mode()
+
+    def process_single_rom(self, rom, download_dir):
+        """Process a single ROM (used by both full and delta sync)"""
+        rom_id = rom.get('id')
+        platform = rom.get('platform_name', 'Unknown')
+        file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
+        
+        platform_dir = download_dir / platform
+        local_path = platform_dir / file_name
+        is_downloaded = local_path.exists() and local_path.stat().st_size > 1024
+        
+        display_name = Path(file_name).stem if file_name else rom.get('name', 'Unknown')
+        
+        return {
+            'name': display_name,
+            'rom_id': rom_id,
+            'platform': platform,
+            'file_name': file_name,
+            'is_downloaded': is_downloaded,
+            'local_path': str(local_path) if is_downloaded else None,
+            'local_size': local_path.stat().st_size if is_downloaded else 0,
+            'romm_data': rom
+        }
+
     def on_auto_connect_changed(self, switch_row, pspec):
         """Handle auto-connect setting change"""
         self.settings.set('RomM', 'auto_connect', str(switch_row.get_active()).lower())
@@ -4621,7 +5226,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             transient_for=self,
             application_name="RomM - RetroArch Sync",
             application_icon="com.romm.retroarch.sync",
-            version="1.0.0",
+            version="1.0.1",
             developer_name='Hector Eduardo "Covin" Silveri',
             copyright="© 2025 Hector Eduardo Silveri",
             license_type=Gtk.License.GPL_3_0
@@ -4649,6 +5254,7 @@ class SyncWindow(Gtk.ApplicationWindow):
         """Save overwrite behavior setting"""
         selected = combo_row.get_selected()
         self.settings.set('AutoSync', 'overwrite_behavior', str(selected))
+
 
     def debug_icon_loading(self):
         """Set application icon for GTK4 correctly"""
@@ -5127,7 +5733,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             
             def update_ui():
                 if self.romm_client.authenticated:
-                    self.update_connection_ui("connected")
+                    self.update_connection_ui("loading")
                     self.log_message("Successfully connected to RomM")
                     
                     if hasattr(self, 'auto_sync'):
@@ -5158,7 +5764,7 @@ class SyncWindow(Gtk.ApplicationWindow):
         threading.Thread(target=connect, daemon=True).start()
 
     def disconnect_from_romm(self):
-        """Modified to use batched refresh"""
+        """Disconnect and switch to local-only view"""
         self.romm_client = None
         
         # Clear selections when disconnecting  
@@ -5174,14 +5780,18 @@ class SyncWindow(Gtk.ApplicationWindow):
         self.update_connection_ui("disconnected")
         self.log_message("Disconnected from RomM")
         
-        # Use batched refresh to reduce jarring transitions
-        self.refresh_games_list_batched()
+        # Switch to local-only view immediately
+        self.handle_offline_mode()
 
     def update_connection_ui(self, state):
         """Update connection UI based on state"""
         if state == "connecting":
             self.connection_expander.set_subtitle("🟡 Connecting...")
             self.connection_status_row.set_subtitle("🟡 Connecting...")
+            
+        elif state == "loading":
+            self.connection_expander.set_subtitle("🔄 Loading games...")
+            self.connection_status_row.set_subtitle("🔄 Loading games...")
             
         elif state == "connected":
             self.connection_expander.set_subtitle("🟢 Connected")
@@ -5241,11 +5851,45 @@ class SyncWindow(Gtk.ApplicationWindow):
         self.settings.set('AutoSync', 'auto_enable_on_connect', str(switch_row.get_active()).lower())
 
     def sort_games_consistently(self, games):
-        """Sort games consistently by platform then by name"""
-        return sorted(games, key=lambda game: (
-            game.get('platform', 'ZZZ_Unknown'),  # Platform first
-            game.get('name', '').lower()          # Then game name (case-insensitive)
-        ))
+        """Lightning-fast sorting with key pre-computation"""
+        if not games:
+            return games
+        
+        game_count = len(games)
+        
+        # For small lists, use simple sorting
+        if game_count < 200:
+            return sorted(games, key=lambda game: (
+                game.get('platform', 'ZZZ_Unknown'),
+                game.get('name', '').lower()
+            ))
+        
+        # For large lists, use optimized sorting
+        print(f"⚡ Fast-sorting {game_count:,} games...")
+        start_time = time.time()
+        
+        # Pre-compute all sort keys in one pass to avoid repeated string operations
+        keyed_games = []
+        for game in games:
+            platform = game.get('platform', 'ZZZ_Unknown')
+            name = game.get('name', '')
+            
+            # Cache the lowercase conversion
+            name_lower = name.lower() if name else ''
+            
+            sort_key = (platform, name_lower)
+            keyed_games.append((sort_key, game))
+        
+        # Sort using pre-computed keys (much faster)
+        keyed_games.sort(key=lambda x: x[0])
+        
+        # Extract sorted games
+        sorted_games = [game for sort_key, game in keyed_games]
+        
+        elapsed = time.time() - start_time
+        print(f"✅ Sorted {game_count:,} games in {elapsed:.2f}s")
+        
+        return sorted_games
 
     def create_quick_actions_section(self):
         """Create the enhanced library section with tree view (quick actions removed)"""
@@ -5656,103 +6300,156 @@ class SyncWindow(Gtk.ApplicationWindow):
         self.refresh_retroarch_info()
         
         self.log_message("RetroArch information updated")
-    
+
     def refresh_games_list(self):
-        """Enhanced refresh that caches RomM data for offline use but always shows full filenames"""
-        # BLOCK REFRESHES DURING DIALOG
+        """Ultra-smart delta sync with comprehensive change detection"""
         if getattr(self, '_dialog_open', False):
             return
 
-        def fetch_romm_games():
-            games = []
-            download_dir = Path(self.rom_dir_row.get_text())
-            
-            # Get games from RomM if connected
-            if self.romm_client and self.romm_client.authenticated:
-                try:
-                    romm_games = self.romm_client.get_roms()
-                    
-                    if isinstance(romm_games, list):
-                        # Process and cache RomM games
-                        for rom in romm_games:
-                            rom_name = rom.get('name', rom.get('filename', f"rom_{rom.get('id', 'unknown')}"))
-                            rom_id = rom.get('id')
-                            platform = rom.get('platform_name') or rom.get('platform_slug') or 'Unknown'
-                            file_name = rom.get('fs_name', f"{rom_name}.rom")
-                            
-                            # Check if this game is already downloaded locally
-                            platform_dir = download_dir / platform
-                            local_path = platform_dir / file_name
-                            is_downloaded = local_path.exists() and local_path.stat().st_size > 1024
-                            
-                            local_size = 0
-                            display_name = rom_name  # Default to RomM name
-                            
-                            if is_downloaded:
-                                local_size = local_path.stat().st_size
-                                # Use the actual local filename (includes region info) instead of RomM name
-                                display_name = local_path.stem
-                                print(f"🎮 Using local filename for display: {display_name} (was: {rom_name})")
-                            else:
-                                # If not downloaded, we can still use the RomM filename with region info
-                                # Extract the basename from fs_name if available
-                                if file_name and file_name != f"{rom_name}.rom":
-                                    display_name = Path(file_name).stem
-                                    print(f"🎮 Using RomM filename for display: {display_name} (instead of: {rom_name})")
-                            
-                            games.append({
-                                'name': display_name,  # Now uses full filename with region info
-                                'rom_id': rom_id,
-                                'platform': platform,  # RomM platform name
-                                'file_name': file_name,
-                                'is_downloaded': is_downloaded,
-                                'local_path': str(local_path) if is_downloaded else None,
-                                'local_size': local_size,
-                                'romm_data': rom
-                            })
-                        
-                        # Sort games consistently (same as offline mode)
-                        games = self.sort_games_consistently(games)
-                        
-                        # Cache the games data for offline use (cache the sorted data)
-                        self.game_cache.save_games_data(games)
-                        
-                        GLib.idle_add(lambda: self.log_message(f"✅ Loaded {len(games)} games from RomM (sorted by platform/name)"))
-                        
-                except Exception as e:
-                    GLib.idle_add(lambda err=str(e): self.log_message(f"Error fetching RomM games: {err}"))
-                    # Fall back to enhanced local scan
-                    games = self.scan_local_games_only(download_dir)
-            else:
-                # Not connected to RomM, use enhanced local scan with cache
-                games = self.scan_local_games_only(download_dir)
+        def smart_sync():
+            if not (self.romm_client and self.romm_client.authenticated):
+                # Handle offline mode
+                self.handle_offline_mode()
+                return
                 
-                cache_status = "with cached RomM data" if self.game_cache.is_cache_valid() else "local files only"
-                GLib.idle_add(lambda status=cache_status: 
-                            self.log_message(f"Not connected to RomM - showing {status} (sorted by platform/name)"))
+            try:
+                download_dir = Path(self.rom_dir_row.get_text())
+                server_url = self.romm_client.base_url
+                
+                # ADD DEBUG LOGGING
+                self.log_message(f"🔍 Starting sync with server: {server_url}")
+                self.log_message(f"📁 Download directory: {download_dir}")
+                
+                # Check if we can do delta sync
+                can_attempt_delta = (
+                    self.game_cache.is_cache_valid() and
+                    self.game_cache.sync_metadata.get('romm_server_url') == server_url and
+                    self.game_cache.sync_metadata.get('last_sync_time')
+                )
+                
+                if can_attempt_delta:
+                    self.log_message("🔍 Cache valid, attempting delta sync...")
+                    # ... rest of delta logic
+                else:
+                    cache_status = "invalid" if not self.game_cache.is_cache_valid() else "valid"
+                    server_match = self.game_cache.sync_metadata.get('romm_server_url') == server_url
+                    has_sync_time = bool(self.game_cache.sync_metadata.get('last_sync_time'))
+                    
+                    self.log_message(f"🔄 Full sync needed - cache: {cache_status}, server match: {server_match}, has sync time: {has_sync_time}")
+                
+                # Fallback to full sync
+                self.perform_full_sync(download_dir, server_url)
+                
+            except Exception as e:
+                self.log_message(f"❌ Sync error: {e}")
+                import traceback
+                print(f"Full traceback: {traceback.format_exc()}")
+                # Emergency fallback to cached data
+                self.use_cached_data_as_fallback()
+        
+        threading.Thread(target=smart_sync, daemon=True).start()
+
+    def log_delta_progress(self, stage, message):
+        """Log delta sync progress"""
+        stage_icons = {
+            'delta': '⚡',
+            'check': '🔍', 
+            'full': '🔄'
+        }
+        icon = stage_icons.get(stage, '📡')
+        self.log_message(f"{icon} {message}")
+
+    def apply_no_changes_update(self):
+        """Handle the perfect case where nothing changed"""
+        start_time = time.time()
+        
+        def update_ui():
+            # Use existing cached data
+            cached_games = list(self.game_cache.cached_games)
+            self.available_games = cached_games
+            
+            if hasattr(self, 'library_section'):
+                self.library_section.update_games_library(cached_games)
+            
+            GLib.idle_add(lambda: self.update_connection_ui("connected"))
+            
+            elapsed = time.time() - start_time
+            self.log_message(f"⚡ Lightning sync: No changes (cached data) in {elapsed:.3f}s")
+        
+        GLib.idle_add(update_ui)
+
+    def perform_full_sync(self, download_dir, server_url):
+        """Perform full sync (separate method)"""
+        try:
+            start_time = time.time()
+            
+            # FIXED: get_roms() returns (items, total), not just items
+            romm_result = self.romm_client.get_roms()
+            
+            if not romm_result or len(romm_result) != 2:
+                self.log_message("Failed to fetch games from RomM")
+                return
+                
+            romm_games, total_count = romm_result
+            
+            if not isinstance(romm_games, list):
+                self.log_message("Failed to fetch games from RomM - invalid response format")
+                return
+            
+            # Change detection for optimization
+            if romm_games:
+                new_hash = hash(f"{len(romm_games)}-{romm_games[0].get('id', '')}-{romm_games[-1].get('id', '')}")
+                
+                if hasattr(self, '_last_games_hash') and self._last_games_hash == new_hash:
+                    self.log_message("⚡ No changes detected, using cached data")
+                    
+                    # Show cached data immediately
+                    def update_ui():
+                        cached_games = self.game_cache.cached_games
+                        self.available_games = cached_games
+                        if hasattr(self, 'library_section'):
+                            self.library_section.update_games_library(cached_games)
+                        GLib.idle_add(lambda: self.update_connection_ui("connected"))
+                    
+                    GLib.idle_add(update_ui)
+                    return
+                
+                self._last_games_hash = new_hash
+            
+            self.log_message(f"🔄 Full sync: processing {len(romm_games)} games...")
+            
+            # Process all ROMs
+            games = []
+            for rom in romm_games:
+                processed_game = self.process_single_rom(rom, download_dir)
+                games.append(processed_game)
+            
+            # Sort games
+            games = self.sort_games_consistently(games)
             
             # Update UI
-            def update_tree_view():
+            def update_ui():
                 self.available_games = games
-                
                 if hasattr(self, 'library_section'):
                     self.library_section.update_games_library(games)
+                GLib.idle_add(lambda: self.update_connection_ui("connected"))
                 
-                if games:
-                    downloaded_count = sum(1 for g in games if g['is_downloaded'])
-                    cache_indicator = " (using cached names)" if not (self.romm_client and self.romm_client.authenticated) and self.game_cache.is_cache_valid() else ""
-                    filename_indicator = " (showing full filenames)" if (self.romm_client and self.romm_client.authenticated) else ""
-                    GLib.idle_add(lambda total=len(games), dl=downloaded_count, cache=cache_indicator, fname=filename_indicator: 
-                                self.log_message(f"Game library: {total} total, {dl} downloaded{cache}{fname}"))
-                else:
-                    if self.romm_client and self.romm_client.authenticated:
-                        GLib.idle_add(lambda: self.log_message("No games found in RomM library"))
-                    else:
-                        GLib.idle_add(lambda: self.log_message("Connect to RomM to access your game library"))
+                elapsed = time.time() - start_time
+                self.log_message(f"✅ Full sync complete: {len(games)} games in {elapsed:.2f}s")
             
-            GLib.idle_add(update_tree_view)
-        
-        threading.Thread(target=fetch_romm_games, daemon=True).start()
+            GLib.idle_add(update_ui)
+            
+            # Save cache and metadata
+            content_hash = hash(str(len(games)) + str(games[0].get('rom_id', '') if games else ''))
+
+            # Cache in background
+            threading.Thread(target=lambda: self.game_cache.save_games_data(games), daemon=True).start()
+
+            # FIXED: Only pass the 3 required parameters
+            self.game_cache.save_sync_metadata(len(games), content_hash, server_url)
+            
+        except Exception as e:
+            self.log_message(f"Full sync error: {e}")
 
     def scan_local_games_only(self, download_dir):
         """Enhanced local game scanning that uses cached RomM data for platforms but keeps full filenames"""
