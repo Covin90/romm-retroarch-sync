@@ -2849,7 +2849,7 @@ class RomMClient:
         self.session.headers.update({
             'Accept-Encoding': 'gzip, deflate, br',
             'Accept': 'application/json',
-            'User-Agent': 'RomM-RetroArch-Sync/1.0.1',
+            'User-Agent': 'RomM-RetroArch-Sync/1.0.3',
             'Connection': 'keep-alive',
             'Keep-Alive': 'timeout=30, max=100'  # Keep connections alive
         })
@@ -2997,7 +2997,7 @@ class RomMClient:
             
             # Method 2: Quick change detection - get first and last few items
             quick_check_params = {
-                'fields': 'id,name,fs_name,platform_name',
+                'fields': 'id,name,fs_name,platform_name,platform_slug',
                 'limit': 20,  # Just get first 20 items
                 'offset': 0
             }
@@ -3032,26 +3032,14 @@ class RomMClient:
             return [], 0, False, None
 
     def get_roms(self, progress_callback=None, limit=500, offset=0):
-        """Get ROMs with pagination support - FIXED to return consistent format"""
+        """Get ROMs with pagination support - FIXED to fetch ALL games"""
         if not self.authenticated:
             return [], 0
         
         try:
-            if progress_callback:
-                progress_callback('start', offset)
-            
-            # For backward compatibility, if no specific limit is requested, get all games
+            # For backward compatibility, if no specific limit is requested, fetch ALL games
             if limit == 500 and offset == 0:
-                # Get all games in one request for simplicity
-                response = self.session.get(
-                    urljoin(self.base_url, '/api/roms'),
-                    params={
-                        'limit': 10000,  # Large limit to get most games
-                        'offset': 0,
-                        'fields': 'id,name,fs_name,platform_name'
-                    },
-                    timeout=30
-                )
+                return self._fetch_all_games_chunked(progress_callback)
             else:
                 # Specific pagination request
                 response = self.session.get(
@@ -3059,28 +3047,97 @@ class RomMClient:
                     params={
                         'limit': limit,
                         'offset': offset,
-                        'fields': 'id,name,fs_name,platform_name'
+                        'fields': 'id,name,fs_name,platform_name,platform_slug'
                     },
-                    timeout=30
+                    timeout=60
                 )
-            
-            if response.status_code != 200:
-                print(f"❌ RomM API error: HTTP {response.status_code}")
-                return [], 0
-            
-            data = response.json()
-            items = data.get('items', [])
-            total = data.get('total', 0)
-            
-            if progress_callback:
-                progress_callback('batch', {'items': items, 'total': total, 'offset': offset})
-            
-            print(f"✅ Fetched {len(items)} games (total: {total})")
-            return items, total
+                
+                if response.status_code != 200:
+                    print(f"❌ RomM API error: HTTP {response.status_code}")
+                    return [], 0
+                
+                data = response.json()
+                items = data.get('items', [])
+                total = data.get('total', 0)
+                
+                if progress_callback:
+                    progress_callback('batch', {'items': items, 'total': total, 'offset': offset})
+                
+                return items, total
             
         except Exception as e:
             print(f"❌ Error fetching ROMs: {e}")
             return [], 0
+
+    def _fetch_all_games_chunked(self, progress_callback):
+        """Fetch all games in chunks with progress updates"""
+        all_games = []
+        chunk_size = 2000
+        offset = 0
+        total_games = None
+        chunk_number = 0
+        total_chunks = None
+        
+        while True:
+            try:
+                chunk_number += 1
+                
+                if progress_callback:
+                    if total_chunks:
+                        progress_callback('chunk', f'🔄 Loading chunk {chunk_number}/{total_chunks}...')
+                    else:
+                        progress_callback('chunk', f'🔄 Loading chunk {chunk_number}...')
+                
+                response = self.session.get(
+                    urljoin(self.base_url, '/api/roms'),
+                    params={
+                        'limit': chunk_size,
+                        'offset': offset,
+                        'fields': 'id,name,fs_name,platform_name,platform_slug'
+                    },
+                    timeout=60
+                )
+                
+                if response.status_code != 200:
+                    print(f"❌ RomM API error: HTTP {response.status_code}")
+                    break
+                
+                data = response.json()
+                items = data.get('items', [])
+                
+                if total_games is None:
+                    total_games = data.get('total', 0)
+                    total_chunks = (total_games + chunk_size - 1) // chunk_size  # Ceiling division
+                    print(f"📚 Fetching {total_games:,} games in {total_chunks} chunks of {chunk_size:,}...")
+                
+                if not items:
+                    break
+                
+                all_games.extend(items)
+                
+                if progress_callback:
+                    progress_callback('batch', {
+                        'items': items, 
+                        'total': total_games, 
+                        'offset': offset,
+                        'chunk_number': chunk_number,
+                        'total_chunks': total_chunks,
+                        'accumulated_games': list(all_games)  # Send all games so far
+                    })
+                
+                print(f"✅ Chunk {chunk_number}/{total_chunks}: {len(all_games):,}/{total_games:,} games")
+                
+                if len(items) < chunk_size:
+                    break
+                    
+                offset += chunk_size
+                
+            except Exception as e:
+                print(f"❌ Error fetching chunk {chunk_number}: {e}")
+                break
+        
+        print(f"✅ Completed: fetched {len(all_games):,} total games")
+        return all_games, len(all_games)
         
     def _find_optimal_page_size(self, total_items, progress_callback):
         # For libraries under 5000, skip all testing
@@ -3154,7 +3211,7 @@ class RomMClient:
                     params={
                         'limit': page_size,
                         'offset': offset,
-                        'fields': 'id,name,fs_name,platform_name'  # Remove fs_name_no_ext and fs_size_bytes for now
+                        'fields': 'id,name,fs_name,platform_name,platform_slug'  # Remove fs_name_no_ext and fs_size_bytes for now
                     },
                     timeout=60
                 )
@@ -3787,7 +3844,7 @@ class RomMClient:
             return self.upload_save(rom_id, save_type, file_path)
 
     def upload_save_and_get_id(self, rom_id, save_type, file_path, emulator=None):
-        """Upload save file and return the created save state ID and timestamp"""
+        """Upload save file using existing server filename for saves, new timestamp for states"""
         try:
             file_path = Path(file_path)
             
@@ -3797,7 +3854,7 @@ class RomMClient:
             else:
                 endpoint = f'/api/{save_type}?rom_id={rom_id}'
             
-            upload_url = urljoin(self.base_url, endpoint)  # <- ADD THIS LINE
+            upload_url = urljoin(self.base_url, endpoint)
             
             # Use correct field names
             if save_type == 'states':
@@ -3807,15 +3864,27 @@ class RomMClient:
             else:
                 return None, None
 
-            # Generate RomM-style filename with timestamp
             original_basename = file_path.stem
             file_extension = file_path.suffix
             
-            import datetime
-            now = datetime.datetime.now()
-            timestamp = now.strftime("%Y-%m-%d %H-%M-%S-%f")[:-3]
-            
-            romm_filename = f"{original_basename} [{timestamp}]{file_extension}"
+            if save_type == 'saves':
+                # REUSE EXISTING SERVER FILENAME FOR SAVES
+                existing_filename = self.get_existing_save_filename(rom_id, save_type)
+                if existing_filename:
+                    romm_filename = existing_filename  # Use exact server filename
+                    print(f"♻️ Reusing server filename: {romm_filename}")
+                else:
+                    # No existing save, create new with timestamp
+                    import datetime
+                    now = datetime.datetime.now()
+                    timestamp = now.strftime("%Y-%m-%d %H-%M-%S-%f")[:-3]
+                    romm_filename = f"{original_basename} [{timestamp}]{file_extension}"
+            else:
+                # States: Always new timestamp
+                import datetime
+                now = datetime.datetime.now()
+                timestamp = now.strftime("%Y-%m-%d %H-%M-%S-%f")[:-3]
+                romm_filename = f"{original_basename} [{timestamp}]{file_extension}"
             
             with open(file_path, 'rb') as f:
                 files = {file_field_name: (romm_filename, f.read(), 'application/octet-stream')}
@@ -3847,6 +3916,22 @@ class RomMClient:
         except Exception as e:
             print(f"Error uploading save and getting ID: {e}")
             return None, None
+
+    def get_existing_save_filename(self, rom_id, save_type):
+        """Get filename of existing save/state on server"""
+        try:
+            response = self.session.get(urljoin(self.base_url, f'/api/roms/{rom_id}'), timeout=5)
+            if response.status_code == 200:
+                rom_data = response.json()
+                files = rom_data.get(f'user_{save_type}', [])
+                if files and isinstance(files, list):
+                    # Return filename of most recent file
+                    latest_file = max(files, key=lambda f: f.get('updated_at', ''), default=None)
+                    if latest_file:
+                        return latest_file.get('file_name')
+        except:
+            pass
+        return None
 
     def upload_screenshot_for_save_state(self, rom_id, save_state_id, save_type, save_file_path, thumbnail_path):
         """Upload screenshot and link it to a specific save state"""
@@ -5194,12 +5279,14 @@ class SyncWindow(Gtk.ApplicationWindow):
             self.handle_offline_mode()
 
     def process_single_rom(self, rom, download_dir):
-        """Process a single ROM (used by both full and delta sync)"""
+        """Process a single ROM with short directory names but full display names"""
         rom_id = rom.get('id')
-        platform = rom.get('platform_name', 'Unknown')
+        platform_display_name = rom.get('platform_name', 'Unknown')  # Full name for tree view
+        platform_slug = rom.get('platform_slug', platform_display_name)  # Short name for directories
         file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
         
-        platform_dir = download_dir / platform
+        # Use short platform slug for local directory structure
+        platform_dir = download_dir / platform_slug  # e.g., "snes" instead of "Super Nintendo Entertainment System"
         local_path = platform_dir / file_name
         is_downloaded = local_path.exists() and local_path.stat().st_size > 1024
         
@@ -5208,7 +5295,8 @@ class SyncWindow(Gtk.ApplicationWindow):
         return {
             'name': display_name,
             'rom_id': rom_id,
-            'platform': platform,
+            'platform': platform_display_name,  # Tree view shows full name
+            'platform_slug': platform_slug,     # Keep slug for reference
             'file_name': file_name,
             'is_downloaded': is_downloaded,
             'local_path': str(local_path) if is_downloaded else None,
@@ -5226,7 +5314,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             transient_for=self,
             application_name="RomM - RetroArch Sync",
             application_icon="com.romm.retroarch.sync",
-            version="1.0.1",
+            version="1.0.3",
             developer_name='Hector Eduardo "Covin" Silveri',
             copyright="© 2025 Hector Eduardo Silveri",
             license_type=Gtk.License.GPL_3_0
@@ -5805,6 +5893,11 @@ class SyncWindow(Gtk.ApplicationWindow):
             self.connection_expander.set_subtitle("🔴 Disconnected")
             self.connection_status_row.set_subtitle("🔴 Disconnected")
 
+    def update_connection_ui_with_message(self, message):
+        """Update connection UI with custom message"""
+        self.connection_expander.set_subtitle(message)
+        self.connection_status_row.set_subtitle(message)       
+
     def create_status_section(self):
         """Status section is now combined with connection section, so this is empty"""
         # This method is now empty since we moved everything to create_connection_section
@@ -6379,80 +6472,82 @@ class SyncWindow(Gtk.ApplicationWindow):
         GLib.idle_add(update_ui)
 
     def perform_full_sync(self, download_dir, server_url):
-        """Perform full sync (separate method)"""
+        """Perform full sync with live updates"""
         try:
             start_time = time.time()
             
-            # FIXED: get_roms() returns (items, total), not just items
-            romm_result = self.romm_client.get_roms()
+            def progress_handler(stage, data):
+                if stage == 'chunk':
+                    # Update connection status with chunk progress
+                    GLib.idle_add(lambda msg=data: self.update_connection_ui_with_message(msg))
+                elif stage == 'batch':
+                    # Process and show games after each chunk
+                    chunk_games = data.get('accumulated_games', [])
+                    chunk_num = data.get('chunk_number', 0)
+                    total_chunks = data.get('total_chunks', 0)
+                    
+                    if chunk_games:
+                        # Process games
+                        processed_games = []
+                        for rom in chunk_games:
+                            processed_game = self.process_single_rom(rom, download_dir)
+                            processed_games.append(processed_game)
+                        
+                        # Sort games
+                        processed_games = self.sort_games_consistently(processed_games)
+                        
+                        # Update UI with current progress
+                        def update_ui():
+                            self.available_games = processed_games
+                            if hasattr(self, 'library_section'):
+                                self.library_section.update_games_library(processed_games)
+                            
+                            if total_chunks > 1:
+                                status_msg = f"🔄 Loaded chunk {chunk_num}/{total_chunks} ({len(processed_games):,} games)"
+                            else:
+                                status_msg = f"🔄 Loaded {len(processed_games):,} games"
+                            self.update_connection_ui_with_message(status_msg)
+                        
+                        GLib.idle_add(update_ui)
+            
+            # Fetch with progress handler
+            romm_result = self.romm_client.get_roms(progress_callback=progress_handler)
             
             if not romm_result or len(romm_result) != 2:
                 self.log_message("Failed to fetch games from RomM")
                 return
                 
-            romm_games, total_count = romm_result
+            final_games, total_count = romm_result
             
-            if not isinstance(romm_games, list):
-                self.log_message("Failed to fetch games from RomM - invalid response format")
-                return
-            
-            # Change detection for optimization
-            if romm_games:
-                new_hash = hash(f"{len(romm_games)}-{romm_games[0].get('id', '')}-{romm_games[-1].get('id', '')}")
-                
-                if hasattr(self, '_last_games_hash') and self._last_games_hash == new_hash:
-                    self.log_message("⚡ No changes detected, using cached data")
-                    
-                    # Show cached data immediately
-                    def update_ui():
-                        cached_games = self.game_cache.cached_games
-                        self.available_games = cached_games
-                        if hasattr(self, 'library_section'):
-                            self.library_section.update_games_library(cached_games)
-                        GLib.idle_add(lambda: self.update_connection_ui("connected"))
-                    
-                    GLib.idle_add(update_ui)
-                    return
-                
-                self._last_games_hash = new_hash
-            
-            self.log_message(f"🔄 Full sync: processing {len(romm_games)} games...")
-            
-            # Process all ROMs
+            # Final processing and UI update
             games = []
-            for rom in romm_games:
+            for rom in final_games:
                 processed_game = self.process_single_rom(rom, download_dir)
                 games.append(processed_game)
             
-            # Sort games
             games = self.sort_games_consistently(games)
             
-            # Update UI
-            def update_ui():
+            def final_update():
                 self.available_games = games
                 if hasattr(self, 'library_section'):
                     self.library_section.update_games_library(games)
-                GLib.idle_add(lambda: self.update_connection_ui("connected"))
+                self.update_connection_ui("connected")
                 
                 elapsed = time.time() - start_time
-                self.log_message(f"✅ Full sync complete: {len(games)} games in {elapsed:.2f}s")
+                self.log_message(f"✅ Full sync complete: {len(games):,} games in {elapsed:.2f}s")
             
-            GLib.idle_add(update_ui)
+            GLib.idle_add(final_update)
             
-            # Save cache and metadata
+            # Save cache in background
             content_hash = hash(str(len(games)) + str(games[0].get('rom_id', '') if games else ''))
-
-            # Cache in background
             threading.Thread(target=lambda: self.game_cache.save_games_data(games), daemon=True).start()
-
-            # FIXED: Only pass the 3 required parameters
             self.game_cache.save_sync_metadata(len(games), content_hash, server_url)
             
         except Exception as e:
             self.log_message(f"Full sync error: {e}")
 
     def scan_local_games_only(self, download_dir):
-        """Enhanced local game scanning that uses cached RomM data for platforms but keeps full filenames"""
+        """Enhanced local game scanning that handles both slug and full platform names"""
         games = []
         
         if not download_dir.exists():
@@ -6464,32 +6559,27 @@ class SyncWindow(Gtk.ApplicationWindow):
             if file_path.is_file() and file_path.suffix.lower() in rom_extensions:
                 directory_name = file_path.parent.name if file_path.parent != download_dir else "Unknown"
                 
-                # Always use the full filename for the game name (includes region info, etc.)
                 game_name = file_path.stem
                 
-                # Use cache to get proper platform name and ROM data
-                platform_name = self.game_cache.get_platform_name(directory_name)
+                # Use cache to get proper platform name (handles both slug and full names)
+                platform_display_name = self.game_cache.get_platform_name(directory_name)
                 
-                # Try to get additional ROM data from cache (for functionality, not display name)
+                # Try to get additional ROM data from cache
                 game_info = self.game_cache.get_game_info(file_path.name)
                 
                 if game_info:
-                    # Use cached platform name and ROM data, but keep full filename as display name
-                    platform_name = game_info['platform']  # Override with RomM platform name
+                    platform_display_name = game_info['platform']  # Use cached full platform name
                     rom_id = game_info['rom_id']
                     romm_data = game_info['romm_data']
-                    
-                    print(f"📂 Using cached platform for {file_path.name}: {game_name} ({platform_name})")
                 else:
-                    # Fallback - no ROM data available
                     rom_id = None
                     romm_data = None
-                    print(f"📁 No cache data for {file_path.name}, using filename: {game_name} ({platform_name})")
                 
                 games.append({
-                    'name': game_name,  # This is now always the full filename
+                    'name': game_name,
                     'rom_id': rom_id,
-                    'platform': platform_name,  # This uses cached RomM platform name when available
+                    'platform': platform_display_name,  # Full name for tree view
+                    'platform_slug': directory_name,    # Actual directory name used
                     'file_name': file_path.name,
                     'is_downloaded': True,
                     'local_path': str(file_path),
@@ -6497,10 +6587,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                     'romm_data': romm_data
                 })
         
-        # Sort games consistently
-        games = self.sort_games_consistently(games)
-        
-        return games
+        return self.sort_games_consistently(games)
 
     def on_refresh_games_list(self, button):
         """Refresh games list button handler"""
@@ -6789,6 +6876,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                 rom_name = game['name']
                 rom_id = game['rom_id']
                 platform = game['platform']
+                platform_slug = game.get('platform_slug', platform)
                 file_name = game['file_name']
                 
                 # Track current download for progress updates
@@ -6814,7 +6902,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                 
                 # Get download directory and create platform directory
                 download_dir = Path(self.rom_dir_row.get_text())
-                platform_dir = download_dir / platform
+                platform_dir = download_dir / platform_slug
                 platform_dir.mkdir(parents=True, exist_ok=True)
                 download_path = platform_dir / file_name
                 
@@ -7633,15 +7721,11 @@ class AutoSyncManager:
         self.log(f"📝 Detected change: {relative_path}")
     
     def process_save_upload(self, file_path):
-        """Process a queued save file upload with thumbnail support using NEW method"""
+        """Process a queued save file upload with smart timestamp comparison using NEW method"""
         try:
             file_path = Path(file_path)
             if not file_path.exists():
                 return
-            
-            # ADD THIS DEBUG - CHECK ORIGINAL FILE TIME
-            original_mtime = file_path.stat().st_mtime
-            original_dt = datetime.datetime.fromtimestamp(original_mtime, tz=datetime.timezone.utc)
             
             # Find matching ROM for this save file
             rom_id = self.find_rom_id_for_save_file(file_path)
@@ -7661,6 +7745,20 @@ class AutoSyncManager:
                 self.log(f"⚠️ Unknown save file type: {file_path.suffix}")
                 return
 
+            # SMART TIMESTAMP COMPARISON
+            local_mtime = file_path.stat().st_mtime
+            server_timestamp = self.get_server_save_timestamp(rom_id, save_type)
+            
+            if server_timestamp and server_timestamp > local_mtime + 60:  # Server is >1min newer
+                self.log(f"⏭️ Server has newer {file_path.name}, skipping upload")
+                return
+            elif server_timestamp:
+                time_diff = local_mtime - server_timestamp
+                if time_diff > 60:  # Local is >1min newer
+                    self.log(f"📊 Local {file_path.name} is {time_diff:.1f}s newer, uploading...")
+                else:
+                    self.log(f"⚖️ {file_path.name} timestamps similar, uploading anyway...")
+
             # Find emulator from file path
             emulator = None
             if file_path.parent.name not in ['saves', 'states']:
@@ -7676,7 +7774,6 @@ class AutoSyncManager:
             success = self.romm_client.upload_save_with_thumbnail(rom_id, save_type, file_path, thumbnail_path, emulator)
             
             if success:
-                
                 if thumbnail_path:
                     msg = f"✅ Auto-uploaded {file_path.name} with screenshot 📸"
                     self.log(msg)
@@ -7692,7 +7789,45 @@ class AutoSyncManager:
                 
         except Exception as e:
             self.log(f"❌ Upload error for {file_path}: {e}")
-    
+
+    def get_server_save_timestamp(self, rom_id, save_type):
+        """Get timestamp of latest save/state on server"""
+        try:
+            from urllib.parse import urljoin
+            import datetime
+            
+            response = self.romm_client.session.get(
+                urljoin(self.romm_client.base_url, f'/api/roms/{rom_id}'),
+                timeout=5
+            )
+            if response.status_code == 200:
+                rom_data = response.json()
+                files = rom_data.get(f'user_{save_type}', [])
+                if files and isinstance(files, list):
+                    # Get latest file timestamp
+                    latest_timestamp = 0
+                    for file_item in files:
+                        if isinstance(file_item, dict):
+                            for field in ['updated_at', 'created_at']:
+                                if field in file_item:
+                                    try:
+                                        # Parse ISO timestamp
+                                        timestamp_str = file_item[field]
+                                        if timestamp_str.endswith('Z'):
+                                            timestamp_str = timestamp_str.replace('Z', '+00:00')
+                                        dt = datetime.datetime.fromisoformat(timestamp_str)
+                                        if dt.tzinfo is None:
+                                            dt = dt.replace(tzinfo=datetime.timezone.utc)
+                                        ts = dt.timestamp()
+                                        if ts > latest_timestamp:
+                                            latest_timestamp = ts
+                                    except:
+                                        pass
+                    return latest_timestamp if latest_timestamp > 0 else None
+        except:
+            pass
+        return None
+
     def find_rom_id_for_save_file(self, file_path):
         """Find ROM ID by matching save filename to game library"""
         try:
@@ -7847,7 +7982,7 @@ class AutoSyncManager:
                 return None
 
             def should_download_file(local_path, server_file, file_type):
-                """Determine if we should download based on user preference and timestamps - FIXED VERSION"""
+                """Determine if we should download based on metadata timestamps only"""
                 if not local_path.exists():
                     return True, f"Local {file_type} doesn't exist"
                 
@@ -7857,58 +7992,48 @@ class AutoSyncManager:
                 if overwrite_behavior == "Always download from server":
                     return True, f"User preference: always download from server"
                 
-                # FIXED: Proper timezone handling for timestamp comparison
+                # Get local file timestamp
                 local_mtime = local_path.stat().st_mtime
+                local_dt = datetime.datetime.fromtimestamp(local_mtime, tz=datetime.timezone.utc)
                 
-                # Get timezone offset and convert properly
-                import time
-                timezone_offset = time.timezone if not time.daylight else time.altzone
-                local_dt = datetime.datetime.fromtimestamp(local_mtime - timezone_offset, tz=datetime.timezone.utc)
-                
-                # Try multiple server timestamp fields
+                # Get server timestamp from API metadata ONLY (ignore filename)
                 server_timestamp = None
-                timestamp_source = None
-                raw_server_timestamp_str = None
-
-                for field in ['updated_at', 'created_at', 'modified_at', 'timestamp']:
-                    if field in server_file:
-                        raw_server_timestamp_str = server_file[field]
-                        server_timestamp = parse_timestamp(server_file[field])
-                        if server_timestamp:
-                            timestamp_source = field
+                for field in ['updated_at', 'created_at', 'modified_at']:
+                    if field in server_file and server_file[field]:
+                        try:
+                            timestamp_str = server_file[field]
+                            if timestamp_str.endswith('Z'):
+                                timestamp_str = timestamp_str.replace('Z', '+00:00')
+                            server_dt = datetime.datetime.fromisoformat(timestamp_str)
+                            if server_dt.tzinfo is None:
+                                server_dt = server_dt.replace(tzinfo=datetime.timezone.utc)
+                            server_timestamp = server_dt.timestamp()
                             break
-
-                # If no server timestamp, try filename
+                        except:
+                            continue
+                
                 if not server_timestamp:
-                    filename = server_file.get('file_name', '')
-                    raw_server_timestamp_str = f"filename: {filename}"
-                    server_timestamp = parse_timestamp(filename)
-                    timestamp_source = "filename"
-
-                if not server_timestamp:
-                    self.log(f"  ⚠️ Cannot determine server {file_type} timestamp - skipping download")
-                    return False, f"No server timestamp available for {file_type}"
-
-                # FIXED: Convert server timestamp to timezone-aware datetime in UTC
+                    self.log(f"  ⚠️ No server metadata timestamp for {file_type} - skipping")
+                    return False, f"No server timestamp available"
+                
                 server_dt = datetime.datetime.fromtimestamp(server_timestamp, tz=datetime.timezone.utc)
-
-                # FIXED: Format timestamps consistently (both in UTC for comparison)
+                time_diff = (local_dt - server_dt).total_seconds()
+                
                 local_str = local_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
                 server_str = server_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
-
-                # FIXED: Compare the timezone-aware datetime objects directly
-                time_diff = (local_dt - server_dt).total_seconds()
-
+                
+                self.log(f"  📊 {file_type.title()} timestamp comparison:")
+                self.log(f"     Local:  {local_str}")
+                self.log(f"     Server: {server_str}")
+                
                 if overwrite_behavior == "Smart (prefer newer)":
                     if time_diff >= -60:  # Local is newer or within 1 minute
-                        self.log(f"  📊 {file_type.title()} comparison result:")
-                        self.log(f"     → Local is newer/equivalent, keeping local {file_type}")
+                        self.log(f"     → Local is newer/equivalent, keeping local")
                         return False, f"Local {file_type} is newer ({time_diff:.1f}s difference)"
                     else:
-                        self.log(f"  📊 {file_type.title()} comparison result:")
                         self.log(f"     → Server is newer, downloading")
                         return True, f"Server {file_type} is newer ({-time_diff:.1f}s newer)"
-                
+                            
                 elif overwrite_behavior == "Ask each time":
 
                     # Ask user in main thread

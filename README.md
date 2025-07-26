@@ -8,7 +8,7 @@ A desktop application for managing your retro game library by syncing ROMs, save
 
 <div align="center">
 
-[![Download](https://img.shields.io/github/v/release/Covin90/romm-retroarch-sync?style=for-the-badge&logo=github&label=Download%20v1.0.1)](https://github.com/Covin90/romm-retroarch-sync/releases/download/v1.0.0/RomM-RetroArch-Sync-v1.0.0.AppImage)
+[![Download](https://img.shields.io/github/v/release/Covin90/romm-retroarch-sync?style=for-the-badge&logo=github&label=Download%20v1.0.3)](https://github.com/Covin90/romm-retroarch-sync/releases/download/v1.0.3/RomM-RetroArch-Sync-v1.0.3.AppImage)
 
 **[All Releases](https://github.com/Covin90/romm-retroarch-sync/releases)** • **[Issues](https://github.com/Covin90/romm-retroarch-sync/issues)**
 

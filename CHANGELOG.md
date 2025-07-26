@@ -1,6 +1,15 @@
 # Changelog
 
-## [1.0.1] - 2025-01-27
+## [1.0.3] - 2025-07-26
+
+### Fixed
+- Fixed again RomM API pagination
+- Fixed save state sync behaviour
+
+### Added
+- Added visual feedback while loading library
+
+## [1.0.1] - 2025-07-25
 
 ### Fixed
 - Fixed RomM API pagination - now loads ALL games from large libraries instead of just the first ~50 games
