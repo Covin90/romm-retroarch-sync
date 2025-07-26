@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.5] - 2025-07-26
+
+### Added
+- Sorting by Alphabetical / Downloaded
+- Showing All / Downloaded only
+- Parallelized fetching algorithm
+
+### Tweaked
+- Improved visual feedback while loading library
+
 ## [1.0.3] - 2025-07-26
 
 ### Fixed

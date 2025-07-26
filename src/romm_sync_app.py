@@ -47,91 +47,6 @@ class GameDataCache:
         self.cached_games = self.load_games_cache()
         self.platform_mapping = self.load_platform_mapping()
         self.filename_mapping = self.load_filename_mapping()
-        
-        # Add sync metadata cache
-        self.sync_metadata_file = self.cache_dir / 'sync_metadata.json'
-        self.sync_metadata = self.load_sync_metadata()
-
-    def load_last_sync_timestamp(self):
-        """Load last sync timestamp from metadata"""
-        try:
-            metadata_file = self.cache_dir / 'sync_metadata.json'
-            if metadata_file.exists():
-                with open(metadata_file, 'r') as f:
-                    metadata = json.load(f)
-                    return metadata.get('last_sync', 0)
-        except Exception as e:
-            print(f"Failed to load sync metadata: {e}")
-        return 0
-
-    def load_sync_metadata(self):
-        """Load sync metadata for delta updates"""
-        try:
-            if self.sync_metadata_file.exists():
-                with open(self.sync_metadata_file, 'r') as f:
-                    return json.load(f)
-        except:
-            pass
-        
-        return {
-            'last_sync_time': None,
-            'last_total_count': 0,
-            'last_content_hash': None,
-            'romm_server_url': None
-        }
-
-    def save_sync_metadata(self, total_count, content_hash, server_url):
-        """Save sync metadata for future delta updates"""
-        import datetime
-        
-        metadata = {
-            'last_sync_time': datetime.datetime.now(datetime.UTC).isoformat(),
-            'last_sync_timestamp': time.time(),
-            'last_total_count': total_count,
-            'last_content_hash': content_hash,
-            'romm_server_url': server_url,
-            'sync_version': '1.1'
-        }
-        
-        try:
-            with open(self.sync_metadata_file, 'w') as f:
-                json.dump(metadata, f, indent=2)
-            self.sync_metadata = metadata
-            print(f"✅ Saved sync metadata: {total_count} games, hash: {str(content_hash)[:8]}...")
-        except Exception as e:
-            print(f"❌ Failed to save sync metadata: {e}")
-            import traceback
-            print(f"Traceback: {traceback.format_exc()}")
-
-    def needs_full_refresh(self, romm_client):
-        """Quick check if full refresh is needed"""
-        if not self.is_cache_valid():
-            return True, "Cache expired"
-        
-        try:
-            # Fast health check - just get count and first few IDs
-            response = romm_client.session.get(
-                urljoin(romm_client.base_url, '/api/roms'),
-                params={'limit': 5, 'offset': 0, 'fields': 'id'},
-                timeout=5
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                current_total = data.get('total', 0)
-                current_ids = [item.get('id') for item in data.get('items', [])]
-                current_checksum = f"{current_total}-{'-'.join(map(str, current_ids))}"
-                
-                if self.api_checksum == current_checksum:
-                    return False, "No changes detected"
-                
-                self.api_checksum = current_checksum
-                return True, f"Changes detected (total: {current_total})"
-            
-        except Exception as e:
-            print(f"Health check failed: {e}")
-        
-        return True, "Health check failed"
     
     def save_games_data(self, games_data):
         """Non-blocking cache save for instant UI response"""
@@ -1044,6 +959,8 @@ class EnhancedLibrarySection:
         self.filtered_games = []
         self.search_text = ""
         self.game_progress = {}  # rom_id -> progress_info
+        self.show_downloaded_only = False # Filter state
+        self.sort_downloaded_first = False  # Sort mode state
 
     def apply_filters(self, games):
         """Apply both platform and search filters to games list"""
@@ -1065,7 +982,195 @@ class EnhancedLibrarySection:
                             if self.search_text in game.get('name', '').lower() or 
                                 self.search_text in game.get('platform', '').lower()]
         
+        # Apply downloaded filter   
+        if self.show_downloaded_only:
+            filtered_games = [game for game in filtered_games if game.get('is_downloaded', False)]
+
         return filtered_games
+
+    def on_toggle_sort(self, button):
+        """Toggle between alphabetical and download-status sorting"""
+        self.sort_downloaded_first = not self.sort_downloaded_first
+        
+        if self.sort_downloaded_first:
+            button.set_icon_name("view-sort-descending-symbolic")
+            button.set_tooltip_text("Sort: Alphabetical")
+        else:
+            button.set_icon_name("view-sort-ascending-symbolic")
+            button.set_tooltip_text("Sort: Downloaded")
+        
+        # Sort in-place by reordering existing GameItem objects
+        for i in range(self.library_model.root_store.get_n_items()):
+            platform_item = self.library_model.root_store.get_item(i)
+            if isinstance(platform_item, PlatformItem):
+                # Get filtered games first (respect current filter state)
+                if self.show_downloaded_only:
+                    games_to_sort = [g for g in platform_item.games if g.get('is_downloaded', False)]
+                else:
+                    games_to_sort = platform_item.games
+
+                # Sort the filtered games
+                if self.sort_downloaded_first:
+                    games_to_sort.sort(key=lambda g: (not g.get('is_downloaded', False), g.get('name', '').lower()))
+                else:
+                    games_to_sort.sort(key=lambda g: g.get('name', '').lower())
+
+                # Create sorted GameItem list from filtered games
+                sorted_game_items = [GameItem(game) for game in games_to_sort]
+                
+                # Use splice to replace all items at once (prevents scroll reset)
+                n_items = platform_item.child_store.get_n_items()
+                if n_items > 0:
+                    platform_item.child_store.splice(0, n_items, sorted_game_items)
+                else:
+                    for game_item in sorted_game_items:
+                        platform_item.child_store.append(game_item)
+        
+        # Update filtered_games
+        self.filtered_games = []
+        for i in range(self.library_model.root_store.get_n_items()):
+            platform_item = self.library_model.root_store.get_item(i)
+            if isinstance(platform_item, PlatformItem):
+                self.filtered_games.extend(platform_item.games)
+
+    def on_toggle_filter(self, button):
+            """Toggle between showing all games and only downloaded games with no flicker."""
+            # 1. Save the current UI state before making changes
+            scroll_position = 0
+            if hasattr(self, 'column_view'):
+                # Get the parent ScrolledWindow to access its adjustment
+                scrolled_window = self.column_view.get_parent()
+                if scrolled_window:
+                    vadj = scrolled_window.get_vadjustment()
+                    if vadj:
+                        scroll_position = vadj.get_value()
+            
+            # Save the expansion state of the tree
+            expansion_state = self.library_model._get_current_expansion_state()
+            
+            # 2. Freeze the UI to prevent intermediate redraws
+            # This is the key to preventing flicker.
+            self.library_model.root_store.freeze_notify()
+            if hasattr(self, 'column_view'):
+                self.column_view.freeze_notify()
+            
+            try:
+                # 3. Perform all data and state updates
+                self.show_downloaded_only = not self.show_downloaded_only
+                
+                if self.show_downloaded_only:
+                    button.set_icon_name("starred-symbolic") # Use a "filled" icon for active filter
+                    button.set_tooltip_text("Show all games")
+                else:
+                    button.set_icon_name("folder-symbolic") # Use an "outline" icon for inactive
+                    button.set_tooltip_text("Show downloaded only")
+                
+                # Work directly with existing platform items (no redundant filtering)
+                for i in range(self.library_model.root_store.get_n_items()):
+                    platform_item = self.library_model.root_store.get_item(i)
+                    if isinstance(platform_item, PlatformItem):
+                        # Apply download filter only
+                        if self.show_downloaded_only:
+                            filtered_platform_games = [g for g in platform_item.games if g.get('is_downloaded', False)]
+                        else:
+                            filtered_platform_games = platform_item.games
+                        
+                        # Apply current sort
+                        if self.sort_downloaded_first:
+                            filtered_platform_games.sort(key=lambda g: (not g.get('is_downloaded', False), g.get('name', '').lower()))
+                        else:
+                            filtered_platform_games.sort(key=lambda g: g.get('name', '').lower())
+                        
+                        # Update child store in-place
+                        filtered_game_items = [GameItem(game) for game in filtered_platform_games]
+                        n_items = platform_item.child_store.get_n_items()
+                        if n_items > 0:
+                            platform_item.child_store.splice(0, n_items, filtered_game_items)
+                        else:
+                            for game_item in filtered_game_items:
+                                platform_item.child_store.append(game_item)
+
+                # Update filtered_games for other components
+                self.filtered_games = []
+                for i in range(self.library_model.root_store.get_n_items()):
+                    platform_item = self.library_model.root_store.get_item(i)
+                    if isinstance(platform_item, PlatformItem):
+                        self.filtered_games.extend(platform_item.games if not self.show_downloaded_only 
+                                                else [g for g in platform_item.games if g.get('is_downloaded', False)])
+                
+            finally:
+                # 4. Thaw notifications. This triggers a single, batched UI update.
+                # The 'finally' block ensures this runs even if an error occurs.
+                self.library_model.root_store.thaw_notify()
+                if hasattr(self, 'column_view'):
+                    self.column_view.thaw_notify()
+            
+            # 5. Restore the UI state after the update has been processed
+            # We use a short timeout to ensure this runs after the UI has redrawn.
+            def restore_state():
+                self.library_model._restore_expansion_from_state(expansion_state)
+                
+                if hasattr(self, 'column_view'):
+                    scrolled_window = self.column_view.get_parent()
+                    if scrolled_window:
+                        vadj = scrolled_window.get_vadjustment()
+                        if vadj:
+                            # Restore the scroll position smoothly
+                            vadj.set_value(scroll_position)
+                return False # Ensures the function only runs once
+            
+            GLib.timeout_add(50, restore_state)
+
+    def sort_games_consistently(self, games):
+        """Lightning-fast sorting with key pre-computation"""
+        if not games:
+            return games
+        
+        # Check if we should sort by download status first  
+        sort_downloaded_first = getattr(self, 'sort_downloaded_first', False)
+        
+        game_count = len(games)
+        
+        # For small lists, use simple sorting
+        if game_count < 200:
+            if sort_downloaded_first:
+                return sorted(games, key=lambda game: (
+                    game.get('platform', 'ZZZ_Unknown'),
+                    not game.get('is_downloaded', False),  # Downloaded first (False sorts before True)
+                    game.get('name', '').lower()
+                ))
+            else:
+                return sorted(games, key=lambda game: (
+                    game.get('platform', 'ZZZ_Unknown'),
+                    game.get('name', '').lower()
+                ))
+        
+        # For large lists, use optimized sorting with download status
+        print(f"⚡ Fast-sorting {game_count:,} games...")
+        start_time = time.time()
+        
+        keyed_games = []
+        for game in games:
+            platform = game.get('platform', 'ZZZ_Unknown')
+            name = game.get('name', '')
+            name_lower = name.lower() if name else ''
+            
+            if sort_downloaded_first:
+                is_downloaded = game.get('is_downloaded', False)
+                sort_key = (platform, not is_downloaded, name_lower)  # Downloaded first
+            else:
+                sort_key = (platform, name_lower)
+            
+            keyed_games.append((sort_key, game))
+        
+        # Sort using pre-computed keys
+        keyed_games.sort(key=lambda x: x[0])
+        sorted_games = [game for sort_key, game in keyed_games]
+        
+        elapsed = time.time() - start_time
+        print(f"✅ Sorted {game_count:,} games in {elapsed:.2f}s")
+        
+        return sorted_games
 
     def update_game_progress(self, rom_id, progress_info):
         """Update progress for a specific game"""
@@ -1519,7 +1624,19 @@ class EnhancedLibrarySection:
         collapse_btn.set_tooltip_text("Collapse all platforms")
         collapse_btn.connect('clicked', self.on_collapse_all)
         view_box.append(collapse_btn)
-        
+
+        # Sort toggle button (between collapse and filter)
+        self.sort_btn = Gtk.Button.new_from_icon_name("view-sort-ascending-symbolic")
+        self.sort_btn.set_tooltip_text("Sort: Downloaded")
+        self.sort_btn.connect('clicked', self.on_toggle_sort)
+        view_box.append(self.sort_btn)
+
+        # Filter toggle button
+        self.filter_btn = Gtk.Button.new_from_icon_name("folder-symbolic")
+        self.filter_btn.set_tooltip_text("Show downloaded only")
+        self.filter_btn.connect('clicked', self.on_toggle_filter)
+        view_box.append(self.filter_btn)
+                
         # Refresh button
         refresh_btn = Gtk.Button.new_from_icon_name("view-refresh-symbolic")
         refresh_btn.set_tooltip_text("Refresh library")
@@ -2043,13 +2160,12 @@ class EnhancedLibrarySection:
         """Handle search text changes"""
         self.search_text = search_entry.get_text().lower().strip()
         
-        # Apply combined filters (platform + search)
         filtered_games = self.apply_filters(self.parent.available_games)
-        self.library_model.update_library(filtered_games)
-        self.filtered_games = filtered_games
+        sorted_games = self.sort_games_consistently(filtered_games)
+        self.library_model.update_library(sorted_games)
+        self.filtered_games = sorted_games
         
-        # Auto-expand platforms with search results
-        self.auto_expand_platforms_with_results(filtered_games)
+        self.auto_expand_platforms_with_results(sorted_games)
     
     def on_platform_filter_changed(self, dropdown, pspec):
         """Handle platform filter changes"""
@@ -2849,7 +2965,7 @@ class RomMClient:
         self.session.headers.update({
             'Accept-Encoding': 'gzip, deflate, br',
             'Accept': 'application/json',
-            'User-Agent': 'RomM-RetroArch-Sync/1.0.3',
+            'User-Agent': 'RomM-RetroArch-Sync/1.0.5',
             'Connection': 'keep-alive',
             'Keep-Alive': 'timeout=30, max=100'  # Keep connections alive
         })
@@ -2947,90 +3063,6 @@ class RomMClient:
             print(f"Authentication error: {e}")
             return False
 
-    def get_roms_delta(self, last_sync_time=None, last_sync_timestamp=None, progress_callback=None):
-        """Enhanced delta sync with multiple detection methods"""
-        if not self.authenticated:
-            return [], 0, False, None
-        
-        try:
-            # Method 1: Try time-based delta if the API supports it
-            if last_sync_time:
-                delta_params = {
-                    'fields': 'id,name,fs_name,platform_name,updated_at,created_at',
-                    'limit': 1000,
-                    'offset': 0
-                }
-                
-                # Try different time filter formats that might work
-                time_filters = [
-                    ('updated_since', last_sync_time),
-                    ('modified_after', last_sync_time),
-                    ('since', last_sync_time),
-                ]
-                
-                for filter_name, filter_value in time_filters:
-                    try:
-                        test_params = delta_params.copy()
-                        test_params[filter_name] = filter_value
-                        
-                        response = self.session.get(
-                            urljoin(self.base_url, '/api/roms'),
-                            params=test_params,
-                            timeout=15
-                        )
-                        
-                        if response.status_code == 200:
-                            data = response.json()
-                            items = data.get('items', [])
-                            total_on_server = data.get('total', 0)
-                            
-                            # If we got a reasonable delta (less than 20% of total), use it
-                            if len(items) < total_on_server * 0.2:
-                                if progress_callback:
-                                    progress_callback('delta', f"Found {len(items)} changes since last sync")
-                                
-                                return items, total_on_server, True, 'time_filter'
-                                
-                    except Exception as e:
-                        print(f"Time filter '{filter_name}' failed: {e}")
-                        continue
-            
-            # Method 2: Quick change detection - get first and last few items
-            quick_check_params = {
-                'fields': 'id,name,fs_name,platform_name,platform_slug',
-                'limit': 20,  # Just get first 20 items
-                'offset': 0
-            }
-            
-            response = self.session.get(
-                urljoin(self.base_url, '/api/roms'),
-                params=quick_check_params,
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                current_total = data.get('total', 0)
-                current_items = data.get('items', [])
-                
-                # Create a quick signature from the first few items
-                current_signature = {
-                    'total': current_total,
-                    'first_5_ids': [item.get('id') for item in current_items[:5]],
-                    'sample_names': [item.get('name', '') for item in current_items[:3]]
-                }
-                
-                if progress_callback:
-                    progress_callback('check', f"Quick check: {current_total} total games")
-                
-                return [], current_total, False, current_signature
-            
-            return [], 0, False, None
-            
-        except Exception as e:
-            print(f"Delta detection error: {e}")
-            return [], 0, False, None
-
     def get_roms(self, progress_callback=None, limit=500, offset=0):
         """Get ROMs with pagination support - FIXED to fetch ALL games"""
         if not self.authenticated:
@@ -3070,74 +3102,37 @@ class RomMClient:
             return [], 0
 
     def _fetch_all_games_chunked(self, progress_callback):
-        """Fetch all games in chunks with progress updates"""
-        all_games = []
-        chunk_size = 2000
-        offset = 0
-        total_games = None
-        chunk_number = 0
-        total_chunks = None
-        
-        while True:
-            try:
-                chunk_number += 1
+        """Fetch all games using parallel requests"""
+        try:
+            # First, get total count
+            response = self.session.get(
+                urljoin(self.base_url, '/api/roms'),
+                params={'limit': 1, 'offset': 0, 'fields': 'id'},
+                timeout=30
+            )
+            
+            if response.status_code != 200:
+                return [], 0
                 
-                if progress_callback:
-                    if total_chunks:
-                        progress_callback('chunk', f'🔄 Loading chunk {chunk_number}/{total_chunks}...')
-                    else:
-                        progress_callback('chunk', f'🔄 Loading chunk {chunk_number}...')
+            data = response.json()
+            total_games = data.get('total', 0)
+            
+            if total_games == 0:
+                return [], 0
                 
-                response = self.session.get(
-                    urljoin(self.base_url, '/api/roms'),
-                    params={
-                        'limit': chunk_size,
-                        'offset': offset,
-                        'fields': 'id,name,fs_name,platform_name,platform_slug'
-                    },
-                    timeout=60
-                )
-                
-                if response.status_code != 200:
-                    print(f"❌ RomM API error: HTTP {response.status_code}")
-                    break
-                
-                data = response.json()
-                items = data.get('items', [])
-                
-                if total_games is None:
-                    total_games = data.get('total', 0)
-                    total_chunks = (total_games + chunk_size - 1) // chunk_size  # Ceiling division
-                    print(f"📚 Fetching {total_games:,} games in {total_chunks} chunks of {chunk_size:,}...")
-                
-                if not items:
-                    break
-                
-                all_games.extend(items)
-                
-                if progress_callback:
-                    progress_callback('batch', {
-                        'items': items, 
-                        'total': total_games, 
-                        'offset': offset,
-                        'chunk_number': chunk_number,
-                        'total_chunks': total_chunks,
-                        'accumulated_games': list(all_games)  # Send all games so far
-                    })
-                
-                print(f"✅ Chunk {chunk_number}/{total_chunks}: {len(all_games):,}/{total_games:,} games")
-                
-                if len(items) < chunk_size:
-                    break
-                    
-                offset += chunk_size
-                
-            except Exception as e:
-                print(f"❌ Error fetching chunk {chunk_number}: {e}")
-                break
-        
-        print(f"✅ Completed: fetched {len(all_games):,} total games")
-        return all_games, len(all_games)
+            chunk_size = 500
+            total_chunks = (total_games + chunk_size - 1) // chunk_size
+            
+            print(f"📚 Fetching {total_games:,} games in {total_chunks} chunks of {chunk_size:,} (parallel)...")
+            
+            # Use existing parallel fetching
+            all_games = self._fetch_pages_parallel(total_games, chunk_size, total_chunks, progress_callback)
+            
+            return all_games, len(all_games)
+            
+        except Exception as e:
+            print(f"❌ Parallel fetch error: {e}")
+            return [], 0
         
     def _find_optimal_page_size(self, total_items, progress_callback):
         # For libraries under 5000, skip all testing
@@ -3243,13 +3238,13 @@ class RomMClient:
         
         # Process pages in batches to avoid overwhelming the server
         print(f"🚀 Starting parallel fetch: {pages_needed} pages, {max_workers} workers")
-        
+
         for batch_start in range(1, pages_needed + 1, max_workers):
             batch_end = min(batch_start + max_workers, pages_needed + 1)
             batch_pages = list(range(batch_start, batch_end))
             
             if progress_callback:
-                progress_callback('page', f'Parallel batch: pages {batch_start}-{batch_end-1}')
+                progress_callback('page', f'🔄 Parallel batch {batch_start}-{batch_end-1} pages')
             
             # Fetch this batch in parallel
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -3261,22 +3256,35 @@ class RomMClient:
                 
                 # Collect results as they complete
                 batch_results = []
+                batch_game_count = 0  # Track games in current batch
+                
                 for future in concurrent.futures.as_completed(future_to_page):
                     page_num, page_roms = future.result()
                     batch_results.append((page_num, page_roms))
+                    batch_game_count += len(page_roms)  # Count games in this batch
                     
                     with lock:
                         completed_pages += 1
                         if progress_callback:
-                            progress_callback('page', f'Completed {completed_pages}/{pages_needed} pages')
+                            progress_callback('page', f'🔄 Completed {completed_pages}/{pages_needed} pages ({batch_game_count} games)')
                 
-                # Sort batch results by page number and add to collection
+                # Sort batch results by page number and add to main collection
                 batch_results.sort(key=lambda x: x[0])
                 for page_num, page_roms in batch_results:
                     if page_roms:
-                        all_roms.extend(page_roms)
-            
-            print(f"✅ Batch complete: {len(all_roms):,} ROMs loaded so far")
+                        all_roms.extend(page_roms)  # Add to main accumulator
+
+                # Call progress callback ONCE per batch (not per page)
+                if progress_callback and all_roms:
+                    progress_callback('batch', {
+                        'items': batch_results[-1][1] if batch_results else [],  # Last batch's items
+                        'total': total_items,
+                        'accumulated_games': all_roms,  # Send ALL games accumulated so far
+                        'chunk_number': len(range(batch_start, batch_end)),
+                        'total_chunks': pages_needed
+                    })
+
+            print(f"✅ Batch complete: {len(all_roms):,} ROMs loaded so far ({batch_game_count} in this batch)")
             
         # Remove duplicates by ID (in case API returns duplicates)
         if all_roms:
@@ -5080,7 +5088,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                 'romm_data': rom
             })
         
-        return self.sort_games_consistently(games)
+        return self.library_section.sort_games_consistently(games)
 
     def set_application_identity(self):
         """Set proper application identity for dock/taskbar"""
@@ -5156,7 +5164,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             changes_applied += 1
         
         # Re-sort to maintain consistency
-        updated_games = self.sort_games_consistently(existing_games)
+        updated_games = self.library_section.sort_games_consistently(existing_games)
         
         # Update UI immediately
         def update_ui():
@@ -5183,12 +5191,15 @@ class SyncWindow(Gtk.ApplicationWindow):
         # Background save
         threading.Thread(target=lambda: [
             self.game_cache.save_games_data(updated_games),
-            self.game_cache.save_sync_metadata(current_total, content_hash, self.romm_client.base_url, updated_games)
         ], daemon=True).start()
 
     def handle_offline_mode(self):
         """Handle when not connected to RomM - show only downloaded games"""
         download_dir = Path(self.rom_dir_row.get_text())
+        
+        self.log_message(f"🔍 DEBUG: Offline mode - download_dir: {download_dir}")
+        self.log_message(f"🔍 DEBUG: Cache valid: {self.game_cache.is_cache_valid()}")
+        self.log_message(f"🔍 DEBUG: Cached games count: {len(self.game_cache.cached_games)}")
         
         if self.game_cache.is_cache_valid():
             # Use cached data but FILTER to only show downloaded games
@@ -5225,28 +5236,27 @@ class SyncWindow(Gtk.ApplicationWindow):
         downloaded_games = []
         
         for game in cached_games:
-            # Check if this game is actually downloaded
-            platform = game.get('platform', 'Unknown')
+            # Use platform_slug instead of platform for directory name
+            platform_slug = game.get('platform_slug') or game.get('platform', 'Unknown')
             file_name = game.get('file_name', '')
             
             if not file_name:
                 continue
                 
-            # Build expected local path
-            platform_dir = download_dir / platform
+            # Build expected local path using platform_slug
+            platform_dir = download_dir / platform_slug  # Use slug, not full name
             local_path = platform_dir / file_name
             
             # Check if file exists and is not empty
             if local_path.exists() and local_path.stat().st_size > 1024:
                 # Update game data with current local info
-                game_copy = game.copy()  # Don't modify the original cache
+                game_copy = game.copy()
                 game_copy['is_downloaded'] = True
                 game_copy['local_path'] = str(local_path)
                 game_copy['local_size'] = local_path.stat().st_size
                 downloaded_games.append(game_copy)
         
-        # Sort the filtered games
-        return self.sort_games_consistently(downloaded_games)
+        return self.library_section.sort_games_consistently(downloaded_games)
 
     def scan_and_merge_local_changes(self, cached_games):
         """Merge local file changes with cached RomM data - FILTER to downloaded only"""
@@ -5314,7 +5324,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             transient_for=self,
             application_name="RomM - RetroArch Sync",
             application_icon="com.romm.retroarch.sync",
-            version="1.0.3",
+            version="1.0.5",
             developer_name='Hector Eduardo "Covin" Silveri',
             copyright="© 2025 Hector Eduardo Silveri",
             license_type=Gtk.License.GPL_3_0
@@ -5882,9 +5892,15 @@ class SyncWindow(Gtk.ApplicationWindow):
             self.connection_status_row.set_subtitle("🔄 Loading games...")
             
         elif state == "connected":
-            self.connection_expander.set_subtitle("🟢 Connected")
-            self.connection_status_row.set_subtitle("🟢 Connected")
-            
+            # Add game count when connected
+            game_count = len(getattr(self, 'available_games', []))
+            if game_count > 0:
+                subtitle = f"🟢 Connected - {game_count:,} Games"
+            else:
+                subtitle = "🟢 Connected"
+            self.connection_expander.set_subtitle(subtitle)
+            self.connection_status_row.set_subtitle(subtitle)
+                
         elif state == "failed":
             self.connection_expander.set_subtitle("🔴 Connection failed")
             self.connection_status_row.set_subtitle("🔴 Connection failed")
@@ -5942,47 +5958,6 @@ class SyncWindow(Gtk.ApplicationWindow):
     def on_auto_enable_sync_changed(self, switch_row, pspec):
         """Handle auto-enable sync setting change"""
         self.settings.set('AutoSync', 'auto_enable_on_connect', str(switch_row.get_active()).lower())
-
-    def sort_games_consistently(self, games):
-        """Lightning-fast sorting with key pre-computation"""
-        if not games:
-            return games
-        
-        game_count = len(games)
-        
-        # For small lists, use simple sorting
-        if game_count < 200:
-            return sorted(games, key=lambda game: (
-                game.get('platform', 'ZZZ_Unknown'),
-                game.get('name', '').lower()
-            ))
-        
-        # For large lists, use optimized sorting
-        print(f"⚡ Fast-sorting {game_count:,} games...")
-        start_time = time.time()
-        
-        # Pre-compute all sort keys in one pass to avoid repeated string operations
-        keyed_games = []
-        for game in games:
-            platform = game.get('platform', 'ZZZ_Unknown')
-            name = game.get('name', '')
-            
-            # Cache the lowercase conversion
-            name_lower = name.lower() if name else ''
-            
-            sort_key = (platform, name_lower)
-            keyed_games.append((sort_key, game))
-        
-        # Sort using pre-computed keys (much faster)
-        keyed_games.sort(key=lambda x: x[0])
-        
-        # Extract sorted games
-        sorted_games = [game for sort_key, game in keyed_games]
-        
-        elapsed = time.time() - start_time
-        print(f"✅ Sorted {game_count:,} games in {elapsed:.2f}s")
-        
-        return sorted_games
 
     def create_quick_actions_section(self):
         """Create the enhanced library section with tree view (quick actions removed)"""
@@ -6395,13 +6370,12 @@ class SyncWindow(Gtk.ApplicationWindow):
         self.log_message("RetroArch information updated")
 
     def refresh_games_list(self):
-        """Ultra-smart delta sync with comprehensive change detection"""
+        """Smart sync with comprehensive change detection"""
         if getattr(self, '_dialog_open', False):
             return
 
         def smart_sync():
             if not (self.romm_client and self.romm_client.authenticated):
-                # Handle offline mode
                 self.handle_offline_mode()
                 return
                 
@@ -6409,48 +6383,14 @@ class SyncWindow(Gtk.ApplicationWindow):
                 download_dir = Path(self.rom_dir_row.get_text())
                 server_url = self.romm_client.base_url
                 
-                # ADD DEBUG LOGGING
-                self.log_message(f"🔍 Starting sync with server: {server_url}")
-                self.log_message(f"📁 Download directory: {download_dir}")
-                
-                # Check if we can do delta sync
-                can_attempt_delta = (
-                    self.game_cache.is_cache_valid() and
-                    self.game_cache.sync_metadata.get('romm_server_url') == server_url and
-                    self.game_cache.sync_metadata.get('last_sync_time')
-                )
-                
-                if can_attempt_delta:
-                    self.log_message("🔍 Cache valid, attempting delta sync...")
-                    # ... rest of delta logic
-                else:
-                    cache_status = "invalid" if not self.game_cache.is_cache_valid() else "valid"
-                    server_match = self.game_cache.sync_metadata.get('romm_server_url') == server_url
-                    has_sync_time = bool(self.game_cache.sync_metadata.get('last_sync_time'))
-                    
-                    self.log_message(f"🔄 Full sync needed - cache: {cache_status}, server match: {server_match}, has sync time: {has_sync_time}")
-                
-                # Fallback to full sync
+                self.log_message(f"🔄 Syncing with server: {server_url}")
                 self.perform_full_sync(download_dir, server_url)
                 
             except Exception as e:
                 self.log_message(f"❌ Sync error: {e}")
-                import traceback
-                print(f"Full traceback: {traceback.format_exc()}")
-                # Emergency fallback to cached data
                 self.use_cached_data_as_fallback()
         
         threading.Thread(target=smart_sync, daemon=True).start()
-
-    def log_delta_progress(self, stage, message):
-        """Log delta sync progress"""
-        stage_icons = {
-            'delta': '⚡',
-            'check': '🔍', 
-            'full': '🔄'
-        }
-        icon = stage_icons.get(stage, '📡')
-        self.log_message(f"{icon} {message}")
 
     def apply_no_changes_update(self):
         """Handle the perfect case where nothing changed"""
@@ -6477,7 +6417,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             start_time = time.time()
             
             def progress_handler(stage, data):
-                if stage == 'chunk':
+                if stage in ['chunk', 'page']:
                     # Update connection status with chunk progress
                     GLib.idle_add(lambda msg=data: self.update_connection_ui_with_message(msg))
                 elif stage == 'batch':
@@ -6494,19 +6434,13 @@ class SyncWindow(Gtk.ApplicationWindow):
                             processed_games.append(processed_game)
                         
                         # Sort games
-                        processed_games = self.sort_games_consistently(processed_games)
+                        processed_games = self.library_section.sort_games_consistently(processed_games)
                         
                         # Update UI with current progress
                         def update_ui():
                             self.available_games = processed_games
                             if hasattr(self, 'library_section'):
                                 self.library_section.update_games_library(processed_games)
-                            
-                            if total_chunks > 1:
-                                status_msg = f"🔄 Loaded chunk {chunk_num}/{total_chunks} ({len(processed_games):,} games)"
-                            else:
-                                status_msg = f"🔄 Loaded {len(processed_games):,} games"
-                            self.update_connection_ui_with_message(status_msg)
                         
                         GLib.idle_add(update_ui)
             
@@ -6525,30 +6459,42 @@ class SyncWindow(Gtk.ApplicationWindow):
                 processed_game = self.process_single_rom(rom, download_dir)
                 games.append(processed_game)
             
-            games = self.sort_games_consistently(games)
+            games = self.library_section.sort_games_consistently(games)
             
             def final_update():
                 self.available_games = games
                 if hasattr(self, 'library_section'):
                     self.library_section.update_games_library(games)
-                self.update_connection_ui("connected")
                 
                 elapsed = time.time() - start_time
-                self.log_message(f"✅ Full sync complete: {len(games):,} games in {elapsed:.2f}s")
+                
+                # Show completion message first
+                completion_msg = f"✅ Full sync complete: {len(games):,} games in {elapsed:.2f}s"
+                self.update_connection_ui_with_message(completion_msg)
+                self.log_message(completion_msg)
+                
+                # After 3 seconds, show connected status
+                def show_connected():
+                    self.update_connection_ui("connected")
+                    return False  # Don't repeat
+                
+                GLib.timeout_add(5000, show_connected)  # 3 second delay
             
             GLib.idle_add(final_update)
             
             # Save cache in background
             content_hash = hash(str(len(games)) + str(games[0].get('rom_id', '') if games else ''))
             threading.Thread(target=lambda: self.game_cache.save_games_data(games), daemon=True).start()
-            self.game_cache.save_sync_metadata(len(games), content_hash, server_url)
-            
+
         except Exception as e:
             self.log_message(f"Full sync error: {e}")
 
     def scan_local_games_only(self, download_dir):
         """Enhanced local game scanning that handles both slug and full platform names"""
         games = []
+        
+        self.log_message(f"🔍 DEBUG: Scanning {download_dir}")
+        self.log_message(f"🔍 DEBUG: Directory exists: {download_dir.exists()}")
         
         if not download_dir.exists():
             return games
@@ -6587,7 +6533,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                     'romm_data': romm_data
                 })
         
-        return self.sort_games_consistently(games)
+        return self.library_section.sort_games_consistently(games)
 
     def on_refresh_games_list(self, button):
         """Refresh games list button handler"""

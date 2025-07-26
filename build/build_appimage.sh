@@ -10,7 +10,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 echo "📁 Project root: $PROJECT_ROOT"
 
 # Add version variable at the top
-VERSION="1.0.3"
+VERSION="1.0.5"
 APPIMAGE_NAME="RomM-RetroArch-Sync-v${VERSION}.AppImage"
 
 # Define paths
@@ -46,9 +46,32 @@ mkdir -p "$APPDIR/usr/share/applications"
 mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
 mkdir -p "$APPDIR/usr/share/metainfo"
 
+# Clean any git metadata that might interfere with version detection
+echo "🧹 Cleaning git metadata from AppDir..."
+find "$APPDIR" -name ".git*" -type f -delete 2>/dev/null || true
+
 # Copy main application
 echo "📋 Copying main application..."
 cp "$SOURCE_APP" "$APPDIR/usr/bin/"
+
+# Create version files for better version detection
+echo "📝 Creating comprehensive version metadata..."
+echo "$VERSION" > "$APPDIR/usr/bin/VERSION"
+echo "$VERSION" > "$APPDIR/VERSION"
+echo "$VERSION" > "$APPDIR/.version"
+
+# Create a version info file in a standard location
+mkdir -p "$APPDIR/usr/share/romm-retroarch-sync"
+echo "$VERSION" > "$APPDIR/usr/share/romm-retroarch-sync/version"
+
+# Also embed version in a way that AppImage tools can read
+cat > "$APPDIR/version.json" << EOF
+{
+  "version": "$VERSION",
+  "name": "RomM - RetroArch Sync",
+  "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
 
 # Copy and setup icons
 echo "🎨 Setting up icons..."
@@ -80,22 +103,23 @@ echo "✅ Dependencies installed with conflict avoidance"
 
 # Create desktop file
 echo "🖥️ Creating desktop file..."
-cat > "$APPDIR/usr/share/applications/com.romm.retroarch.sync.desktop" << 'EOF'
+cat > "$APPDIR/usr/share/applications/com.romm.retroarch.sync.desktop" << EOF
 [Desktop Entry]
 Type=Application
 Name=RomM - RetroArch Sync
 Comment=Sync game library between RomM and RetroArch
 Exec=romm_sync_app.py
 Icon=com.romm.retroarch.sync
-Categories=Game;Utility;
+Categories=Game;
 Terminal=false
 StartupNotify=true
 StartupWMClass=com.romm.retroarch.sync
+X-AppImage-Version=${VERSION}
 EOF
 
-# Create AppStream metadata (CORRECTED VERSION)
+# Create AppStream metadata
 echo "📝 Creating AppStream metadata..."
-cat > "$APPDIR/usr/share/metainfo/com.romm.retroarch.sync.appdata.xml" << 'EOF'
+cat > "$APPDIR/usr/share/metainfo/com.romm.retroarch.sync.appdata.xml" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
   <id>com.romm.retroarch.sync</id>
@@ -127,7 +151,7 @@ cat > "$APPDIR/usr/share/metainfo/com.romm.retroarch.sync.appdata.xml" << 'EOF'
   </categories>
   
   <releases>
-    <release version="1.0.3" date="2025-07-26">
+    <release version="${VERSION}" date="2025-07-26">
       <description>
         <p>Fix pagination and save sync, add loading feedback.</p>
       </description>
@@ -167,15 +191,46 @@ else
     APPIMAGETOOL_CMD="appimagetool"
 fi
 
-# Update the final build command
-echo "🔧 Building AppImage..."
+# FIXED: Build AppImage with proper update information
+echo "🔧 Building AppImage with update information..."
 cd "$BUILD_DIR"
-"$APPIMAGETOOL_CMD" --no-appstream AppDir "$APPIMAGE_NAME"
+
+# Set environment variables for appimagetool
+export VERSION="$VERSION"
+export ARCH="x86_64"
+
+# Try multiple update information formats for better compatibility
+UPDATE_INFO="gh-releases-zsync|Covin90|romm-retroarch-sync|latest|RomM-RetroArch-Sync-v*.AppImage.zsync"
+
+echo "📝 Using update info: $UPDATE_INFO"
+echo "📝 Using version: $VERSION"
+
+# Build with update information (removed --appimage-version as it's not supported)
+"$APPIMAGETOOL_CMD" \
+    --updateinformation="$UPDATE_INFO" \
+    --verbose \
+    AppDir "$APPIMAGE_NAME"
 
 if [ -f "$APPIMAGE_NAME" ]; then
-    echo "✅ AppImage built successfully!"
+    echo "✅ AppImage built successfully with update information!"
     echo "📍 Location: $BUILD_DIR/$APPIMAGE_NAME"
     echo "🚀 You can now run: ./build/$APPIMAGE_NAME"
+    
+    # Verify update info was embedded
+    echo "🔍 Verifying embedded update information..."
+    if readelf --string-dump=.upd_info --wide "$APPIMAGE_NAME" 2>/dev/null | grep -q "gh-releases-zsync"; then
+        echo "✅ Update information successfully embedded!"
+    else
+        echo "⚠️ Warning: Update information may not be properly embedded"
+    fi
+    
+    # Check for version information in the AppImage
+    echo "🔍 Checking for version information..."
+    if strings "$APPIMAGE_NAME" | grep -q "$VERSION"; then
+        echo "✅ Version $VERSION found in AppImage!"
+    else
+        echo "⚠️ Version information may not be embedded"
+    fi
 else
     echo "❌ AppImage build failed!"
     exit 1
