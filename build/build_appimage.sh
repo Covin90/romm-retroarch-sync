@@ -10,7 +10,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 echo "📁 Project root: $PROJECT_ROOT"
 
 # Add version variable at the top
-VERSION="1.0.5"
+VERSION="1.0.6"
 APPIMAGE_NAME="RomM-RetroArch-Sync-v${VERSION}.AppImage"
 
 # Define paths
@@ -86,7 +86,7 @@ echo "📦 Installing Python dependencies..."
 # Method 1: Use --no-deps to avoid dependency checking for conflicting packages
 pip3 install --target="$APPDIR/usr/lib/python3/dist-packages" \
     --no-deps \
-    requests watchdog cryptography
+    requests watchdog cryptography psutil
 
 # Install any missing sub-dependencies manually
 pip3 install --target="$APPDIR/usr/lib/python3/dist-packages" \

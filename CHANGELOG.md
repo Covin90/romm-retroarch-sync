@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.6] - 2025-07-27
+
+### Added
+- Library caching system
+
+### Tweaked
+- Reduced memory consumption
+- Tweaked fetching algorithm
+
 ## [1.0.5] - 2025-07-26
 
 ### Added
