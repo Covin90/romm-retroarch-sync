@@ -2862,6 +2862,10 @@ class SettingsManager:
                 'auto_enable_on_connect': 'true',
                 'overwrite_behavior': '0' 
             }
+            self.config['System'] = {
+                'autostart': 'false'
+            }
+
             self.save_settings()
     
     def save_settings(self):
@@ -4424,34 +4428,107 @@ class RetroArchInterface:
         }
 
     def find_retroarch_executable(self):
-        """Find RetroArch executable"""
-        possible_paths = [
-            '/usr/bin/retroarch',
-            '/usr/local/bin/retroarch',
-            '/opt/retroarch/bin/retroarch',
-            '/snap/bin/retroarch',
-            'retroarch'  # In PATH
-        ]
+        """Find RetroArch executable with comprehensive installation support"""
+        import shutil
+        import subprocess
+        from pathlib import Path
         
-        # Check Flatpak
+        retroarch_candidates = []
+        
+        # Method 1: Flatpak (current method)
         try:
-            import subprocess
             result = subprocess.run(['flatpak', 'list'], capture_output=True, text=True)
             if 'org.libretro.RetroArch' in result.stdout:
-                return 'flatpak run org.libretro.RetroArch'
+                retroarch_candidates.append({
+                    'type': 'flatpak',
+                    'command': 'flatpak run org.libretro.RetroArch',
+                    'priority': 3
+                })
         except:
             pass
         
-        # Check regular paths
-        import shutil
-        for path in possible_paths:
+        # Method 2: Steam installation
+        steam_paths = [
+            Path.home() / '.steam/steam/steamapps/common/RetroArch/retroarch',
+            Path.home() / '.local/share/Steam/steamapps/common/RetroArch/retroarch',
+            Path('/usr/games/retroarch'),  # Some Steam installs
+        ]
+        
+        for steam_path in steam_paths:
+            if steam_path.exists() and steam_path.is_file():
+                retroarch_candidates.append({
+                    'type': 'steam',
+                    'command': str(steam_path),
+                    'priority': 2
+                })
+                break
+        
+        # Method 3: Native package installations
+        native_paths = [
+            '/usr/bin/retroarch',
+            '/usr/local/bin/retroarch',
+            '/opt/retroarch/bin/retroarch',
+        ]
+        
+        for path in native_paths:
             if shutil.which(path):
-                return path
+                retroarch_candidates.append({
+                    'type': 'native',
+                    'command': path,
+                    'priority': 1  # Highest priority
+                })
+                break
+        
+        # Method 4: Snap package
+        try:
+            result = subprocess.run(['snap', 'list', 'retroarch'], capture_output=True, text=True)
+            if result.returncode == 0:
+                retroarch_candidates.append({
+                    'type': 'snap',
+                    'command': 'snap run retroarch',
+                    'priority': 4
+                })
+        except:
+            pass
+        
+        # Method 5: AppImage (check common locations)
+        appimage_locations = [
+            Path.home() / 'Applications',
+            Path.home() / 'Downloads',
+            Path.home() / '.local/bin',
+            Path('/opt'),
+        ]
+        
+        for location in appimage_locations:
+            if location.exists():
+                for appimage in location.glob('*RetroArch*.AppImage'):
+                    if appimage.is_file() and os.access(appimage, os.X_OK):
+                        retroarch_candidates.append({
+                            'type': 'appimage',
+                            'command': str(appimage),
+                            'priority': 5
+                        })
+                        break
+        
+        # Method 6: Generic PATH search
+        path_command = shutil.which('retroarch')
+        if path_command and not any(c['command'] == path_command for c in retroarch_candidates):
+            retroarch_candidates.append({
+                'type': 'path',
+                'command': path_command,
+                'priority': 6
+            })
+        
+        # Select best candidate (lowest priority number = highest priority)
+        if retroarch_candidates:
+            best_candidate = min(retroarch_candidates, key=lambda x: x['priority'])
+            print(f"🎮 Selected RetroArch: {best_candidate['type']} - {best_candidate['command']}")
+            return best_candidate['command']
         
         return None
-    
-    def find_cores_directory(self):
-        """Find RetroArch cores directory"""
+        
+        def find_cores_directory(self):
+            """Find RetroArch cores directory"""
         possible_dirs = [
             Path.home() / '.var/app/org.libretro.RetroArch/config/retroarch/cores',
             Path.home() / '.config/retroarch/cores',
@@ -5097,6 +5174,123 @@ class SyncWindow(Gtk.ApplicationWindow):
             
             GLib.idle_add(update_ui)
 
+    def on_autostart_changed(self, switch_row, pspec):
+        """Handle autostart setting change"""
+        enable = switch_row.get_active()
+        
+        def setup_autostart():
+            try:
+                if enable:
+                    success = self.create_systemd_service()
+                    if success:
+                        GLib.idle_add(lambda: self.log_message("✅ Autostart enabled"))
+                    else:
+                        GLib.idle_add(lambda: self.log_message("❌ Failed to enable autostart"))
+                        GLib.idle_add(lambda: switch_row.set_active(False))
+                else:
+                    success = self.remove_systemd_service()
+                    if success:
+                        GLib.idle_add(lambda: self.log_message("✅ Autostart disabled"))
+                    else:
+                        GLib.idle_add(lambda: self.log_message("❌ Failed to disable autostart"))
+            except Exception as e:
+                GLib.idle_add(lambda: self.log_message(f"❌ Autostart error: {e}"))
+                GLib.idle_add(lambda: switch_row.set_active(False))
+        
+        threading.Thread(target=setup_autostart, daemon=True).start()
+
+    def create_systemd_service(self):
+        """Create systemd user service for autostart"""
+        import subprocess
+        import os
+        import sys
+        from pathlib import Path
+        
+        try:
+            # Get current executable path
+            if hasattr(sys, '_MEIPASS'):  # PyInstaller bundle
+                exec_path = sys.executable
+            elif os.environ.get('APPIMAGE'):  # AppImage
+                exec_path = os.environ['APPIMAGE']
+            else:  # Python script
+                exec_path = f"python3 {os.path.abspath(__file__)}"
+            
+            # Create systemd user directory
+            systemd_dir = Path.home() / '.config' / 'systemd' / 'user'
+            systemd_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Create service file
+            service_content = f"""[Unit]
+    Description=RomM RetroArch Sync
+    After=graphical-session.target
+
+    [Service]
+    Type=simple
+    ExecStartPre=/bin/sleep 5
+    ExecStart={exec_path} --minimized
+    Restart=on-failure
+    RestartSec=5
+    Environment=DISPLAY=:0
+
+    [Install]
+    WantedBy=default.target
+    """
+            
+            service_file = systemd_dir / 'romm-retroarch-sync.service'
+            with open(service_file, 'w') as f:
+                f.write(service_content)
+            
+            # Enable and start service
+            subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True)
+            subprocess.run(['systemctl', '--user', 'enable', 'romm-retroarch-sync.service'], check=True)
+            
+            # Save setting
+            self.settings.set('System', 'autostart', 'true')
+            
+            return True
+            
+        except Exception as e:
+            print(f"Failed to create systemd service: {e}")
+            return False
+
+    def remove_systemd_service(self):
+        """Remove systemd user service"""
+        import subprocess
+        from pathlib import Path
+        
+        try:
+            # Disable and stop service
+            subprocess.run(['systemctl', '--user', 'disable', 'romm-retroarch-sync.service'], 
+                        capture_output=True)
+            subprocess.run(['systemctl', '--user', 'stop', 'romm-retroarch-sync.service'], 
+                        capture_output=True)
+            
+            # Remove service file
+            service_file = Path.home() / '.config' / 'systemd' / 'user' / 'romm-retroarch-sync.service'
+            if service_file.exists():
+                service_file.unlink()
+            
+            subprocess.run(['systemctl', '--user', 'daemon-reload'], capture_output=True)
+            
+            # Save setting
+            self.settings.set('System', 'autostart', 'false')
+            
+            return True
+            
+        except Exception as e:
+            print(f"Failed to remove systemd service: {e}")
+            return False
+
+    def check_autostart_status(self):
+        """Check if autostart is currently enabled"""
+        import subprocess
+        try:
+            result = subprocess.run(['systemctl', '--user', 'is-enabled', 'romm-retroarch-sync.service'], 
+                                capture_output=True, text=True)
+            return result.returncode == 0 and 'enabled' in result.stdout
+        except:
+            return False
+
     def filter_to_downloaded_games_only(self, cached_games, download_dir):
         """Filter cached games to only show those that are actually downloaded"""
         downloaded_games = []
@@ -5361,6 +5555,15 @@ class SyncWindow(Gtk.ApplicationWindow):
             self.username_row.set_text(self.settings.get('RomM', 'username'))
             self.password_row.set_text(self.settings.get('RomM', 'password'))
             self.remember_switch.set_active(True)
+
+        if hasattr(self, 'autostart_row'):
+            # Defer autostart check until UI is fully ready
+            def check_autostart_when_ready():
+                is_enabled = self.check_autostart_status()
+                self.autostart_row.set_active(is_enabled)
+                return False  # Don't repeat
+            
+            GLib.timeout_add(100, check_autostart_when_ready)
         
         self.auto_connect_switch.set_active(self.settings.get('RomM', 'auto_connect') == 'true')
         self.auto_refresh_switch.set_active(self.settings.get('RomM', 'auto_refresh') == 'true') 
@@ -5566,6 +5769,13 @@ class SyncWindow(Gtk.ApplicationWindow):
         self.auto_refresh_switch.set_subtitle("Automatically fetch games if cache is outdated")
         self.auto_refresh_switch.connect('notify::active', self.on_auto_refresh_changed)
         self.connection_expander.add_row(self.auto_refresh_switch)
+
+        # Autostart setting
+        self.autostart_row = Adw.SwitchRow()
+        self.autostart_row.set_title("Start with System")
+        self.autostart_row.set_subtitle("Automatically start app when Steam Deck boots")
+        self.autostart_row.connect('notify::active', self.on_autostart_changed)
+        self.connection_expander.add_row(self.autostart_row)
 
         # Connection status row
         self.connection_status_row = Adw.ActionRow()
@@ -7484,7 +7694,13 @@ class SyncApp(Adw.Application):
             windows[0].present()
         else:
             win = SyncWindow(application=app)
-            win.present()
+            
+            # Handle minimized startup
+            if hasattr(app, 'start_minimized') and app.start_minimized:
+                print("🔽 Starting minimized to tray")
+                win.set_visible(False)  # Start hidden
+            else:
+                win.present()
     
     def on_shutdown(self, app):  # Add this method
         """Clean up before shutdown"""
@@ -7522,6 +7738,11 @@ class AutoSyncManager:
         
         # Upload worker thread
         self.upload_worker = None
+
+        # Add these new attributes at the end
+        self.retroarch_monitor = None
+        self.current_retroarch_game = None
+        self.retroarch_running = False
         
     def start_auto_sync(self):
         """Start all auto-sync components"""
@@ -7539,7 +7760,10 @@ class AutoSyncManager:
             # Start upload worker
             self.start_upload_worker()
             
-            self.log("🔄 Auto-sync started (file monitoring + RetroArch status)")
+            # Start RetroArch monitoring (always enabled with auto-sync)
+            self.start_retroarch_monitoring()
+            
+            self.log("🔄 Auto-sync started (file monitoring + RetroArch detection)")
             
         except Exception as e:
             self.log(f"❌ Failed to start auto-sync: {e}")
@@ -8189,6 +8413,14 @@ class SaveFileHandler(FileSystemEventHandler):
         
 def main():
     """Main entry point"""
+    import argparse
+    
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='RomM-RetroArch Sync')
+    parser.add_argument('--minimized', action='store_true', 
+                       help='Start minimized to tray')
+    args = parser.parse_args()
+    
     print("🚀 Starting RomM-RetroArch Sync...")
     
     # Check desktop environment
@@ -8205,6 +8437,7 @@ def main():
         print("💡 Install libappindicator3-dev for better tray support")
     
     app = SyncApp()
+    app.start_minimized = args.minimized  # Pass the flag to the app
     return app.run()
 
 if __name__ == '__main__':

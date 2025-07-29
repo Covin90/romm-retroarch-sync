@@ -80,9 +80,6 @@ cp "$SOURCE_ICON" "$APPDIR/com.romm.retroarch.sync.png"
 cp "$SOURCE_ICON" "$APPDIR/.DirIcon"
 cp "$SOURCE_ICON" "$APPDIR/usr/bin/romm_icon.png"
 
-# Install Python dependencies with conflict resolution
-echo "📦 Installing Python dependencies..."
-
 # Method 1: Use --no-deps to avoid dependency checking for conflicting packages
 pip3 install --target="$APPDIR/usr/lib/python3/dist-packages" \
     --no-deps \
@@ -94,6 +91,38 @@ pip3 install --target="$APPDIR/usr/lib/python3/dist-packages" \
     urllib3 charset-normalizer idna certifi cffi pycparser
 
 echo "✅ Dependencies installed with conflict avoidance"
+
+# Bundle libadwaita and GI typelibs for Steam Deck compatibility
+echo "📦 Bundling libadwaita and GI typelibs for Steam Deck..."
+
+# Create directories for GObject introspection
+mkdir -p "$APPDIR/usr/lib/girepository-1.0"
+mkdir -p "$APPDIR/usr/lib/x86_64-linux-gnu"
+
+# Copy GI typelib files if available
+for typelib in Gtk-4.0.typelib GObject-2.0.typelib Gio-2.0.typelib Adw-1.typelib; do
+    for path in /usr/lib/girepository-1.0 /usr/lib/x86_64-linux-gnu/girepository-1.0; do
+        if [ -f "$path/$typelib" ]; then
+            cp "$path/$typelib" "$APPDIR/usr/lib/girepository-1.0/" 2>/dev/null || true
+            echo "✅ Copied $typelib"
+            break
+        fi
+    done
+done
+
+# Copy libadwaita shared libraries if available
+echo "📦 Bundling only essential libraries..."
+for lib in libadwaita-1.so*; do
+    for libpath in /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib; do
+        if ls "$libpath"/$lib 1> /dev/null 2>&1; then
+            cp "$libpath"/$lib "$APPDIR/usr/lib/x86_64-linux-gnu/" 2>/dev/null || true
+            echo "✅ Copied $lib"
+            break
+        fi
+    done
+done
+
+echo "✅ Dependencies bundled without PyGObject rebuild"
 
 # Alternative Method 2: Use ignore-conflicts flag (uncomment if Method 1 doesn't work)
 # pip3 install --target="$APPDIR/usr/lib/python3/dist-packages" \
@@ -108,7 +137,7 @@ cat > "$APPDIR/usr/share/applications/com.romm.retroarch.sync.desktop" << EOF
 Type=Application
 Name=RomM - RetroArch Sync
 Comment=Sync game library between RomM and RetroArch
-Exec=romm_sync_app.py
+Exec=AppRun
 Icon=com.romm.retroarch.sync
 Categories=Game;
 Terminal=false
@@ -170,8 +199,11 @@ cat > "$APPDIR/AppRun" << 'EOF'
 HERE="$(dirname "$(readlink -f "${0}")")"
 export PYTHONPATH="${HERE}/usr/lib/python3/dist-packages:${PYTHONPATH}"
 export PATH="${HERE}/usr/bin:${PATH}"
+export GI_TYPELIB_PATH="${HERE}/usr/lib/girepository-1.0:${GI_TYPELIB_PATH}"
+export LD_LIBRARY_PATH="${HERE}/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
+
 cd "${HERE}/usr/bin"
-exec python3 "${HERE}/usr/bin/romm_sync_app.py" "$@"
+exec /usr/bin/python3 "${HERE}/usr/bin/romm_sync_app.py" "$@"
 EOF
 
 chmod +x "$APPDIR/AppRun"
