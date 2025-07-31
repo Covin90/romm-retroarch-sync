@@ -4451,7 +4451,9 @@ class RetroArchInterface:
         steam_paths = [
             Path.home() / '.steam/steam/steamapps/common/RetroArch/retroarch',
             Path.home() / '.local/share/Steam/steamapps/common/RetroArch/retroarch',
-            Path('/usr/games/retroarch'),  # Some Steam installs
+            Path('/usr/games/retroarch'),
+            Path.home() / '.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/RetroArch/retroarch',
+            Path.home() / '.var/app/com.valvesoftware.Steam/home/.local/share/Steam/steamapps/common/RetroArch/retroarch',
         ]
         
         for steam_path in steam_paths:
@@ -4503,12 +4505,14 @@ class RetroArchInterface:
             if location.exists():
                 for appimage in location.glob('*RetroArch*.AppImage'):
                     if appimage.is_file() and os.access(appimage, os.X_OK):
+                        # Skip our own app
+                        if 'RomM-RetroArch-Sync' in appimage.name:
+                            continue
                         retroarch_candidates.append({
-                            'type': 'appimage',
+                            'type': 'appimage', 
                             'command': str(appimage),
                             'priority': 5
                         })
-                        break
         
         # Method 6: Generic PATH search
         path_command = shutil.which('retroarch')
@@ -4526,23 +4530,8 @@ class RetroArchInterface:
             return best_candidate['command']
         
         return None
-        
-        def find_cores_directory(self):
-            """Find RetroArch cores directory"""
-        possible_dirs = [
-            Path.home() / '.var/app/org.libretro.RetroArch/config/retroarch/cores',
-            Path.home() / '.config/retroarch/cores',
-            Path('/usr/lib/libretro'),
-            Path('/usr/local/lib/libretro'),
-            Path('/usr/lib/x86_64-linux-gnu/libretro'),
-        ]
-        
-        for cores_dir in possible_dirs:
-            if cores_dir.exists() and any(cores_dir.glob('*.so')):
-                return cores_dir
-        
-        return None
     
+        
     def get_available_cores(self):
         """Get list of available RetroArch cores"""
         if not self.cores_dir:
@@ -4595,56 +4584,38 @@ class RetroArchInterface:
         except Exception as e:
             print(f"❌ Failed to send RetroArch notification: {e}")
             return False
-        
-    def launch_game(self, rom_path, platform_name=None, core_name=None):
-        """Launch a game in RetroArch"""
-        if not self.retroarch_executable:
-            return False, "RetroArch executable not found"
-        
-        # If no core specified, try to suggest one
-        if not core_name and platform_name:
-            core_name, core_path = self.suggest_core_for_platform(platform_name)
-            if not core_name:
-                return False, f"No suitable core found for platform: {platform_name}"
-        
-        # Get core path
-        available_cores = self.get_available_cores()
-        if core_name not in available_cores:
-            return False, f"Core not found: {core_name}"
-        
-        core_path = available_cores[core_name]
-        
-        try:
-            import subprocess
-            
-            # Build RetroArch command
-            cmd = [self.retroarch_executable, '-L', core_path, str(rom_path)]
-            
-            # Handle Flatpak case
-            if 'flatpak' in self.retroarch_executable:
-                cmd = ['flatpak', 'run', 'org.libretro.RetroArch', '-L', core_path, str(rom_path)]
-            
-            print(f"Launching RetroArch: {' '.join(cmd)}")
-            
-            # Launch RetroArch
-            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            
-            return True, f"Launched {rom_path.name} with {core_name} core"
-            
-        except Exception as e:
-            return False, f"Launch error: {e}"
     
     def find_retroarch_dirs(self):
-        """Find RetroArch save directories"""
-        # Common RetroArch locations
+        """Find RetroArch save directories with comprehensive installation support"""
+        save_dirs = {}
+        
+        # All possible RetroArch config locations (ordered by likelihood)
         possible_dirs = [
+            # Flatpak
             Path.home() / '.var/app/org.libretro.RetroArch/config/retroarch',
+            
+            # Native/Steam installations
             Path.home() / '.config/retroarch',
-            Path('/var/lib/flatpak/app/org.libretro.RetroArch'),
-            Path.home() / '.local/share/applications'
+            Path.home() / '/.retroarch',
+            
+            # Steam specific locations
+            Path.home() / '.steam/steam/steamapps/common/RetroArch',
+            Path.home() / '.local/share/Steam/steamapps/common/RetroArch',
+
+            Path.home() / '.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/RetroArch',
+            Path.home() / '.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/RetroArch/config',
+            
+            # Snap
+            Path.home() / 'snap/retroarch/current/.config/retroarch',
+            
+            # AppImage (usually creates config in user dir)
+            Path.home() / '.retroarch-appimage',
+            
+            # System-wide installations
+            Path('/etc/retroarch'),
+            Path('/usr/local/etc/retroarch'),
         ]
         
-        save_dirs = {}
         for base_dir in possible_dirs:
             if base_dir.exists():
                 saves_dir = base_dir / 'saves'
@@ -4655,11 +4626,46 @@ class RetroArchInterface:
                 if states_dir.exists():
                     save_dirs['states'] = states_dir
                     
+                # If we found both or either, we're done
                 if save_dirs:
+                    print(f"📁 Found RetroArch config: {base_dir}")
                     break
         
         return save_dirs
-    
+
+    def find_cores_directory(self):
+        """Find RetroArch cores directory with comprehensive installation support"""
+        possible_dirs = [
+            # Flatpak
+            Path.home() / '.var/app/org.libretro.RetroArch/config/retroarch/cores',
+            
+            # Native installations
+            Path.home() / '.config/retroarch/cores',
+            Path('/usr/lib/libretro'),
+            Path('/usr/local/lib/libretro'),
+            Path('/usr/lib/x86_64-linux-gnu/libretro'),
+            
+            # Steam installations
+            Path.home() / '.steam/steam/steamapps/common/RetroArch/cores',
+            Path.home() / '.local/share/Steam/steamapps/common/RetroArch/cores',
+            
+            # Snap
+            Path('/snap/retroarch/current/usr/lib/libretro'),
+            
+            # AppImage bundled cores
+            Path.home() / '.retroarch-appimage/cores',
+
+            Path.home() / '.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/RetroArch/cores',
+            Path.home() / '.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/RetroArch/info',
+        ]
+        
+        for cores_dir in possible_dirs:
+            if cores_dir.exists() and any(cores_dir.glob('*.so')):
+                print(f"🔧 Found cores directory: {cores_dir}")
+                return cores_dir
+        
+        return None
+
     def send_command(self, command):
         """Send UDP command to RetroArch"""
         try:
@@ -5026,6 +5032,7 @@ class SyncWindow(Gtk.ApplicationWindow):
         self._progress_update_interval = 0.1  # Update UI every 100ms max
 
         self.setup_ui()
+        self.debug_retroarch_status() 
         self.connect('close-request', self.on_window_close_request)
         self.load_saved_settings()
 
@@ -5085,6 +5092,20 @@ class SyncWindow(Gtk.ApplicationWindow):
 
         # ADD AUTO-CONNECT LOGIC:
         GLib.timeout_add(50, self.try_auto_connect)
+
+    def debug_retroarch_status(self):
+            """Debug RetroArch status"""
+            print("=== RetroArch Debug Info ===")
+            print(f"Executable: {getattr(self.retroarch, 'retroarch_executable', 'NOT SET')}")
+            print(f"RetroArch object: {self.retroarch}")
+            print(f"Save dirs: {getattr(self.retroarch, 'save_dirs', 'NOT SET')}")
+            print(f"Cores dir: {getattr(self.retroarch, 'cores_dir', 'NOT SET')}")
+            print(f"UI elements exist:")
+            print(f"  - retroarch_info_row: {hasattr(self, 'retroarch_info_row')}")
+            print(f"  - cores_info_row: {hasattr(self, 'cores_info_row')}")
+            print(f"  - core_count_row: {hasattr(self, 'core_count_row')}")
+            print(f"  - retroarch_connection_row: {hasattr(self, 'retroarch_connection_row')}")
+            print("========================")
 
     def try_auto_connect(self):
         """Try to auto-connect if enabled"""
@@ -6481,13 +6502,25 @@ class SyncWindow(Gtk.ApplicationWindow):
         return False  # Don't repeat
             
     def refresh_retroarch_info(self):
-        """Update RetroArch information in UI"""
+        """Update RetroArch information in UI with installation type"""
         def update_info():
             # Check RetroArch executable
             if hasattr(self, 'retroarch_info_row'):
                 if self.retroarch.retroarch_executable:
-                    self.retroarch_info_row.set_subtitle(f"Found: {self.retroarch.retroarch_executable}")
-                    self.retroarch_expander.set_subtitle("🟢 RetroArch installed")
+                    # Determine installation type
+                    if 'flatpak' in self.retroarch.retroarch_executable:
+                        install_type = "Flatpak"
+                    elif 'steam' in self.retroarch.retroarch_executable.lower():
+                        install_type = "Steam"
+                    elif 'snap' in self.retroarch.retroarch_executable:
+                        install_type = "Snap"
+                    elif '.AppImage' in self.retroarch.retroarch_executable:
+                        install_type = "AppImage"
+                    else:
+                        install_type = "Native"
+                    
+                    self.retroarch_info_row.set_subtitle(f"Found: {install_type} - {self.retroarch.retroarch_executable}")
+                    self.retroarch_expander.set_subtitle(f"🟢 {install_type} RetroArch detected")
                 else:
                     self.retroarch_info_row.set_subtitle("Not found - install RetroArch")
                     self.retroarch_expander.set_subtitle("🔴 RetroArch not installed")
@@ -6932,34 +6965,45 @@ class SyncWindow(Gtk.ApplicationWindow):
             # Download the game
             self.download_game(selected_game)
     
-    def launch_game(self, game):
-        """Launch a downloaded game in RetroArch"""
-        def launch():
-            try:
-                game_name = game['name']
-                game_path = Path(game['local_path'])
-                platform = game['platform']
-                
-                GLib.idle_add(lambda n=game_name, p=platform: 
-                             self.log_message(f"Launching {n} ({p})..."))
-                
-                if (hasattr(self, 'auto_sync') and 
-                    self.auto_sync.enabled and 
-                    self.auto_sync.download_enabled):
-                    self.auto_sync.sync_before_launch(game)
-
-                # Launch the game
-                success, message = self.retroarch.launch_game(game_path, platform)
-                
-                if success:
-                    GLib.idle_add(lambda m=message: self.log_message(f"✓ {m}"))
-                else:
-                    GLib.idle_add(lambda m=message: self.log_message(f"✗ Launch failed: {m}"))
-                
-            except Exception as e:
-                GLib.idle_add(lambda err=str(e): self.log_message(f"Launch error: {err}"))
+    def launch_game(self, rom_path, platform_name=None, core_name=None):
+        """Launch a game in RetroArch with multi-installation support"""
+        if not self.retroarch.retroarch_executable:
+            return False, "RetroArch executable not found"
         
-        threading.Thread(target=launch, daemon=True).start()
+        # If no core specified, try to suggest one
+        if not core_name and platform_name:
+            core_name, core_path = self.suggest_core_for_platform(platform_name)
+            if not core_name:
+                return False, f"No suitable core found for platform: {platform_name}"
+        
+        # Get core path
+        available_cores = self.get_available_cores()
+        if core_name not in available_cores:
+            return False, f"Core not found: {core_name}"
+        
+        core_path = available_cores[core_name]
+        
+        try:
+            import subprocess
+            
+            # Build command based on RetroArch type
+            if 'flatpak' in self.retroarch.retroarch_executable:
+                cmd = ['flatpak', 'run', 'org.libretro.RetroArch', '-L', core_path, str(rom_path)]
+            elif 'snap' in self.retroarch.retroarch_executable:
+                cmd = ['snap', 'run', 'retroarch', '-L', core_path, str(rom_path)]
+            else:
+                # Native, Steam, AppImage, or path-based
+                cmd = [self.retroarch.retroarch_executable, '-L', core_path, str(rom_path)]
+            
+            print(f"🚀 Launching: {' '.join(cmd)}")
+            
+            # Launch RetroArch
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            return True, f"Launched {rom_path.name} with {core_name} core"
+            
+        except Exception as e:
+            return False, f"Launch error: {e}"
 
     def on_window_close_request(self, _window):
         """Overrides the default window close action.
