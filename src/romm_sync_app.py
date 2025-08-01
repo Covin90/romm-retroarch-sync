@@ -4319,13 +4319,11 @@ class RetroArchInterface:
     """Interface for RetroArch network commands and file monitoring"""
     
     def __init__(self):
+        self.settings = SettingsManager()
         self.save_dirs = self.find_retroarch_dirs()
-        self.cores_dir = self.find_cores_directory()
 
-    # Check for custom path override first
-        from pathlib import Path
-        settings = SettingsManager()
-        custom_path = settings.get('RetroArch', 'custom_path', '').strip()
+        # Check for custom path override first
+        custom_path = self.settings.get('RetroArch', 'custom_path', '').strip()
 
         if custom_path and Path(custom_path).exists():
             self.retroarch_executable = custom_path
@@ -4765,6 +4763,41 @@ class RetroArchInterface:
                     break
         
         return save_dirs
+
+    def find_retroarch_config_dir(self):
+        """Find RetroArch config directory for the detected installation"""
+        # Check for custom path override first
+        custom_path = self.settings.get('RetroArch', 'custom_path', '').strip()
+        if custom_path and Path(custom_path).exists():
+            custom_config_dir = Path(custom_path).parent
+            if (custom_config_dir / 'config/retroarch').exists():
+                custom_config_dir = custom_config_dir / 'config/retroarch'
+            if custom_config_dir.exists():
+                print(f"🔧 Using custom config directory: {custom_config_dir}")
+                return custom_config_dir
+        
+        # Standard detection logic
+        possible_dirs = [
+            # RetroDECK
+            Path.home() / 'retrodeck',
+            # Flatpak
+            Path.home() / '.var/app/org.libretro.RetroArch/config/retroarch',
+            # Native/Steam installations
+            Path.home() / '.config/retroarch',
+            Path.home() / '/.retroarch',
+            # Steam specific locations
+            Path.home() / '.steam/steam/steamapps/common/RetroArch',
+            Path.home() / '.local/share/Steam/steamapps/common/RetroArch',
+            # Snap
+            Path.home() / 'snap/retroarch/current/.config/retroarch',
+            # AppImage
+            Path.home() / '.retroarch-appimage',
+        ]
+        
+        for config_dir in possible_dirs:
+            if config_dir.exists():
+                return config_dir
+        return None
 
     def find_cores_directory(self):
         """Find RetroArch cores directory with comprehensive installation support"""
@@ -5992,7 +6025,7 @@ class SyncWindow(Gtk.ApplicationWindow):
         self.retroarch_override_row = Adw.EntryRow()
         self.retroarch_override_row.set_title("Custom Installation Path (Override auto-detection)")
         self.retroarch_override_row.set_text(self.settings.get('RetroArch', 'custom_path', ''))
-        self.retroarch_override_row.connect('changed', self.on_retroarch_override_changed)
+        self.retroarch_override_row.connect('activate', self.on_retroarch_override_changed)
         self.retroarch_expander.add_row(self.retroarch_override_row)
 
         # Cores directory row
@@ -8042,7 +8075,10 @@ class AutoSyncManager:
             
             while not self.should_stop.is_set():
                 try:
-                    history_path = Path.home() / '.var/app/org.libretro.RetroArch/config/retroarch/content_history.lpl'
+                    config_dir = self.retroarch.find_retroarch_config_dir()
+                    if not config_dir:
+                        continue
+                    history_path = config_dir / 'content_history.lpl'
                     
                     if history_path.exists():
                         current_mtime = history_path.stat().st_mtime
@@ -8095,7 +8131,10 @@ class AutoSyncManager:
         """Get currently loaded game from RetroArch history playlist (JSON format)"""
         try:
             import json
-            history_path = Path.home() / '.var/app/org.libretro.RetroArch/config/retroarch/content_history.lpl'
+            config_dir = self.retroarch.find_retroarch_config_dir()
+            if not config_dir:
+                return None
+            history_path = config_dir / 'content_history.lpl'
             
             if history_path.exists():
                 with open(history_path, 'r', encoding='utf-8') as f:
