@@ -4321,7 +4321,30 @@ class RetroArchInterface:
     def __init__(self):
         self.save_dirs = self.find_retroarch_dirs()
         self.cores_dir = self.find_cores_directory()
-        self.retroarch_executable = self.find_retroarch_executable()
+
+    # Check for custom path override first
+        from pathlib import Path
+        settings = SettingsManager()
+        custom_path = settings.get('RetroArch', 'custom_path', '').strip()
+
+        if custom_path and Path(custom_path).exists():
+            self.retroarch_executable = custom_path
+            print(f"🎮 Using custom RetroArch path: {custom_path}")
+            
+            # ALSO CHECK FOR CORES RELATIVE TO CUSTOM PATH
+            custom_config_dir = Path(custom_path).parent
+            if (custom_config_dir / 'config/retroarch').exists():
+                custom_config_dir = custom_config_dir / 'config/retroarch'
+            custom_cores_dir = custom_config_dir / 'cores'
+            if custom_cores_dir.exists():
+                self.cores_dir = custom_cores_dir
+                print(f"🔧 Using custom cores directory: {custom_cores_dir}")
+            else:
+                self.cores_dir = self.find_cores_directory()
+        else:
+            self.retroarch_executable = self.find_retroarch_executable()
+            self.cores_dir = self.find_cores_directory()
+
         self.thumbnails_dir = self.find_thumbnails_directory()
 
         self.host = '127.0.0.1'
@@ -4427,6 +4450,40 @@ class RetroArchInterface:
             'flycast': 'Flycast',
         }
 
+    def launch_game_retrodeck(self, rom_path):
+        """Launch game through RetroDECK (which handles core selection automatically)"""
+        try:
+            import subprocess
+            
+            # RetroDECK methods to try (in order of preference)
+            commands_to_try = [
+                ['flatpak', 'run', 'net.retrodeck.retrodeck', str(rom_path)],
+                ['flatpak', 'run', 'net.retrodeck.retrodeck', '--pass-args', str(rom_path)],
+                ['flatpak', 'run', 'net.retrodeck.retrodeck', '--run', str(rom_path)]
+            ]
+            
+            for cmd in commands_to_try:
+                print(f"🎮 Trying RetroDECK command: {' '.join(cmd)}")
+                
+                result = subprocess.Popen(cmd, 
+                                        stdout=subprocess.PIPE, 
+                                        stderr=subprocess.PIPE,
+                                        text=True)
+                
+                time.sleep(2)  # Wait to see if it fails immediately
+                
+                if result.poll() is None:
+                    return True, f"Launched via RetroDECK: {rom_path.name}"
+                else:
+                    stdout, stderr = result.communicate()
+                    print(f"❌ Command failed: {stderr[:100]}")
+                    continue
+            
+            return False, "All RetroDECK launch methods failed"
+            
+        except Exception as e:
+            return False, f"RetroDECK launch error: {e}"
+
     def find_retroarch_executable(self):
         """Find RetroArch executable with comprehensive installation support"""
         import shutil
@@ -4434,14 +4491,21 @@ class RetroArchInterface:
         from pathlib import Path
         
         retroarch_candidates = []
-        
-        # Method 1: Flatpak (current method)
+
+        # Method 1: Flatpak - REPLACE THE RETRODECK PART
         try:
             result = subprocess.run(['flatpak', 'list'], capture_output=True, text=True)
-            if 'org.libretro.RetroArch' in result.stdout:
+            # Check for RetroDECK first
+            if 'net.retrodeck.retrodeck' in result.stdout:
+                retroarch_candidates.append({
+                    'type': 'retrodeck',
+                    'command': 'flatpak run net.retrodeck.retrodeck',  # Remove 'retroarch'
+                    'priority': 2
+                })
+            elif 'org.libretro.RetroArch' in result.stdout:
                 retroarch_candidates.append({
                     'type': 'flatpak',
-                    'command': 'flatpak run org.libretro.RetroArch',
+                    'command': 'flatpak run org.libretro.RetroArch', 
                     'priority': 3
                 })
         except:
@@ -4530,8 +4594,7 @@ class RetroArchInterface:
             return best_candidate['command']
         
         return None
-    
-        
+          
     def get_available_cores(self):
         """Get list of available RetroArch cores"""
         if not self.cores_dir:
@@ -4564,6 +4627,64 @@ class RetroArchInterface:
         
         return None, None
 
+    def launch_game(self, rom_path, platform_name=None, core_name=None):
+        """Launch a game in RetroArch with multi-installation support"""
+        if not self.retroarch_executable:
+            return False, "RetroArch executable not found"
+        
+        # Special handling for RetroDECK
+        if 'retrodeck' in self.retroarch_executable.lower():
+            return self.launch_game_retrodeck(rom_path)
+    
+        # If no core specified, try to suggest one
+        if not core_name and platform_name:
+            core_name, core_path = self.suggest_core_for_platform(platform_name)
+            if not core_name:
+                return False, f"No suitable core found for platform: {platform_name}"
+        
+        # Get core path
+        available_cores = self.get_available_cores()
+        if core_name not in available_cores:
+            return False, f"Core not found: {core_name}"
+        
+        core_path = available_cores[core_name]
+        
+        try:
+            import subprocess
+            
+            # Build command based on RetroArch type - REPLACE THIS SECTION
+            if 'retrodeck' in self.retroarch_executable.lower():
+                # RetroDECK launches games differently - try multiple approaches
+                cmd = ['flatpak', 'run', 'net.retrodeck.retrodeck', '--pass-args', str(rom_path)]
+            elif 'flatpak' in self.retroarch_executable:
+                cmd = ['flatpak', 'run', 'org.libretro.RetroArch', '-L', core_path, str(rom_path)]
+            elif 'snap' in self.retroarch_executable:
+                cmd = ['snap', 'run', 'retroarch', '-L', core_path, str(rom_path)]
+            else:
+                cmd = [self.retroarch_executable, '-L', core_path, str(rom_path)]
+            
+            print(f"🚀 Launching: {' '.join(cmd)}")
+            
+            # Launch RetroArch with debugging
+            result = subprocess.Popen(cmd, 
+                                    stdout=subprocess.PIPE, 
+                                    stderr=subprocess.PIPE,
+                                    text=True)
+            
+            # Wait a moment to see if it fails immediately
+            import time
+            time.sleep(2)
+            
+            if result.poll() is not None:
+                # Process has already exited
+                stdout, stderr = result.communicate()
+                return False, f"Launch failed immediately. STDOUT: {stdout[:200]} STDERR: {stderr[:200]}"
+            
+            return True, f"Launched {rom_path.name} with {core_name} core"
+            
+        except Exception as e:
+            return False, f"Launch error: {e}"
+
     def send_notification(self, message):
         """Send notification to RetroArch using SHOW_MSG command"""
         try:
@@ -4591,9 +4712,13 @@ class RetroArchInterface:
         
         # All possible RetroArch config locations (ordered by likelihood)
         possible_dirs = [
+        
+            # RetroDECK
+            Path.home() / 'retrodeck',
+
             # Flatpak
             Path.home() / '.var/app/org.libretro.RetroArch/config/retroarch',
-            
+
             # Native/Steam installations
             Path.home() / '.config/retroarch',
             Path.home() / '/.retroarch',
@@ -4618,8 +4743,14 @@ class RetroArchInterface:
         
         for base_dir in possible_dirs:
             if base_dir.exists():
-                saves_dir = base_dir / 'saves'
-                states_dir = base_dir / 'states'
+                # RetroDECK uses different structure
+                if 'retrodeck' in str(base_dir) and base_dir.name == 'retrodeck':
+                    saves_dir = base_dir / 'saves'
+                    states_dir = base_dir / 'states'
+                else:
+                    # Standard RetroArch structure
+                    saves_dir = base_dir / 'saves'
+                    states_dir = base_dir / 'states'
                 
                 if saves_dir.exists():
                     save_dirs['saves'] = saves_dir
@@ -4628,7 +4759,9 @@ class RetroArchInterface:
                     
                 # If we found both or either, we're done
                 if save_dirs:
-                    print(f"📁 Found RetroArch config: {base_dir}")
+                    print(f"📁 Found RetroArch save dirs: {base_dir}")
+                    print(f"   Saves: {save_dirs.get('saves', 'Not found')}")
+                    print(f"   States: {save_dirs.get('states', 'Not found')}")
                     break
         
         return save_dirs
@@ -4639,6 +4772,9 @@ class RetroArchInterface:
             # Flatpak
             Path.home() / '.var/app/org.libretro.RetroArch/config/retroarch/cores',
             
+            # RetroDECK
+            Path.home() / '.var/app/net.retrodeck.retrodeck/config/retroarch/cores',
+
             # Native installations
             Path.home() / '.config/retroarch/cores',
             Path('/usr/lib/libretro'),
@@ -5447,6 +5583,26 @@ class SyncWindow(Gtk.ApplicationWindow):
         selected = combo_row.get_selected()
         self.settings.set('AutoSync', 'overwrite_behavior', str(selected))
 
+    def on_retroarch_override_changed(self, entry_row):
+        """Handle RetroArch path override change"""
+        custom_path = entry_row.get_text().strip()
+        
+        # Handle RetroDECK config directory input
+        if 'retrodeck' in custom_path.lower() and 'config/retroarch' in custom_path:
+            # User entered config directory, set to RetroDECK executable instead
+            custom_path = 'flatpak run net.retrodeck.retrodeck retroarch'
+            entry_row.set_text(custom_path)  # Update the field
+        
+        self.settings.set('RetroArch', 'custom_path', custom_path)
+        
+        # Re-initialize RetroArch with new path
+        self.retroarch = RetroArchInterface()
+        self.refresh_retroarch_info()
+        
+        if custom_path:
+            self.log_message(f"RetroArch path overridden: {custom_path}")
+        else:
+            self.log_message("RetroArch path override cleared, using auto-detection")
 
     def debug_icon_loading(self):
         """Set application icon for GTK4 correctly"""
@@ -5832,6 +5988,13 @@ class SyncWindow(Gtk.ApplicationWindow):
         self.retroarch_info_row.set_subtitle("Checking...")
         self.retroarch_expander.add_row(self.retroarch_info_row)
 
+        # RetroArch installation override
+        self.retroarch_override_row = Adw.EntryRow()
+        self.retroarch_override_row.set_title("Custom Installation Path (Override auto-detection)")
+        self.retroarch_override_row.set_text(self.settings.get('RetroArch', 'custom_path', ''))
+        self.retroarch_override_row.connect('changed', self.on_retroarch_override_changed)
+        self.retroarch_expander.add_row(self.retroarch_override_row)
+
         # Cores directory row
         self.cores_info_row = Adw.ActionRow()
         self.cores_info_row.set_title("Cores Directory")
@@ -5926,14 +6089,41 @@ class SyncWindow(Gtk.ApplicationWindow):
             self.settings.set('RomM', 'password', '')
         
         def connect():
-            self.log_message(f"Connecting to {url}...")
+            import time
+            
+            # START TIMING
+            start_time = time.time()
+            self.log_message(f"🔗 Starting RomM connection...")
+            
             GLib.idle_add(lambda: self.update_connection_ui("connecting"))
             
+            # STEP 1: Initialize client
+            init_start = time.time()
             self.romm_client = RomMClient(url, username, password)
+            init_time = time.time() - init_start
+            self.log_message(f"⚡ Client initialized in {init_time:.2f}s")
             
             def update_ui():
+                # STEP 2: Check authentication result
+                auth_time = time.time() - start_time
+                
                 if self.romm_client.authenticated:
-                    self.log_message("✅ Successfully connected to RomM")
+                    self.log_message(f"✅ Authentication successful in {auth_time:.2f}s")
+                    
+                    # STEP 3: Test basic API access
+                    api_test_start = time.time()
+                    try:
+                        test_count = self.romm_client.get_games_count_only()
+                        api_test_time = time.time() - api_test_start
+                        
+                        if test_count is not None:
+                            self.log_message(f"📊 API test successful in {api_test_time:.2f}s ({test_count:,} games)")
+                        else:
+                            self.log_message(f"⚠️ API test completed in {api_test_time:.2f}s (count unavailable)")
+                            
+                    except Exception as e:
+                        api_test_time = time.time() - api_test_start
+                        self.log_message(f"❌ API test failed in {api_test_time:.2f}s: {str(e)[:100]}")
                     
                     if hasattr(self, 'auto_sync'):
                         self.auto_sync.romm_client = self.romm_client
@@ -6019,32 +6209,6 @@ class SyncWindow(Gtk.ApplicationWindow):
                         # Check cache freshness in background
                         threading.Thread(target=check_cache_freshness, daemon=True).start()
                         
-                        # Show all cached games (same code as before)
-                        download_dir = Path(self.rom_dir_row.get_text())
-                        all_cached_games = []
-                        
-                        for game in list(self.game_cache.cached_games):
-                            platform_slug = game.get('platform_slug') or game.get('platform', 'Unknown')
-                            file_name = game.get('file_name', '')
-                            
-                            if file_name:
-                                platform_dir = download_dir / platform_slug
-                                local_path = platform_dir / file_name
-                                is_downloaded = local_path.exists() and local_path.stat().st_size > 1024
-                                
-                                game_copy = game.copy()
-                                game_copy['is_downloaded'] = is_downloaded
-                                game_copy['local_path'] = str(local_path) if is_downloaded else None
-                                game_copy['local_size'] = local_path.stat().st_size if is_downloaded else 0
-                                all_cached_games.append(game_copy)
-                        
-                        def update_games_ui():
-                            self.available_games = all_cached_games
-                            if hasattr(self, 'library_section'):
-                                self.library_section.update_games_library(all_cached_games)
-                        
-                        GLib.idle_add(update_games_ui)
-                        
                     else:
                         # Always fetch on first startup (no cached games)
                         print("🔍 DEBUG: No cached games - auto-fetching for first time")
@@ -6056,14 +6220,19 @@ class SyncWindow(Gtk.ApplicationWindow):
                     if self.settings.get('AutoSync', 'auto_enable_on_connect') == 'true':
                         self.autosync_enable_switch.set_active(True)
                         self.log_message("🔄 Auto-sync enabled automatically")
+                    
+                    total_time = time.time() - start_time
+                    self.log_message(f"🎉 Total connection time: {total_time:.2f}s")
                         
                 else:
                     # Authentication failed logic...
-                    self.log_message("❌ Authentication failed")
+                    auth_time = time.time() - start_time
+                    self.log_message(f"❌ Authentication failed after {auth_time:.2f}s")
+                    self.log_message(f"🔍 Debug: Check server accessibility and credentials")
                     self.update_connection_ui("failed")
                     self.connection_enable_switch.set_active(False)
 
-            GLib.idle_add(update_ui) 
+            GLib.idle_add(update_ui)
 
         threading.Thread(target=connect, daemon=True).start() 
 
@@ -6450,18 +6619,22 @@ class SyncWindow(Gtk.ApplicationWindow):
     
     def on_choose_directory(self, button):
         """Choose download directory"""
-        def on_response(dialog, response):
-            if response == Gtk.ResponseType.ACCEPT:
-                file = dialog.get_file()
+        dialog = Gtk.FileDialog()
+        dialog.set_title("Choose ROM Download Directory")
+        
+        def on_response(source, result):
+            try:
+                file = dialog.select_folder_finish(result)
                 if file:
                     path = file.get_path()
                     self.rom_dir_row.set_text(path)
-                    self.rom_dir_expander.set_subtitle(path)  # Update expander subtitle too
+                    self.rom_dir_expander.set_subtitle(path)
                     self.settings.set('Download', 'rom_directory', path)
                     self.log_message(f"Download directory set to: {path}")
+            except Exception as e:
+                # User cancelled or error occurred
+                pass
         
-        dialog = Gtk.FileDialog()
-        dialog.set_title("Choose ROM Download Directory")
         dialog.select_folder(self, None, on_response)
     
     def update_download_progress(self, progress_info):
@@ -6504,75 +6677,74 @@ class SyncWindow(Gtk.ApplicationWindow):
     def refresh_retroarch_info(self):
         """Update RetroArch information in UI with installation type"""
         def update_info():
-            # Check RetroArch executable
-            if hasattr(self, 'retroarch_info_row'):
-                if self.retroarch.retroarch_executable:
-                    # Determine installation type
-                    if 'flatpak' in self.retroarch.retroarch_executable:
-                        install_type = "Flatpak"
-                    elif 'steam' in self.retroarch.retroarch_executable.lower():
-                        install_type = "Steam"
-                    elif 'snap' in self.retroarch.retroarch_executable:
-                        install_type = "Snap"
-                    elif '.AppImage' in self.retroarch.retroarch_executable:
-                        install_type = "AppImage"
-                    else:
-                        install_type = "Native"
-                    
-                    self.retroarch_info_row.set_subtitle(f"Found: {install_type} - {self.retroarch.retroarch_executable}")
-                    self.retroarch_expander.set_subtitle(f"🟢 {install_type} RetroArch detected")
-                else:
-                    self.retroarch_info_row.set_subtitle("Not found - install RetroArch")
-                    self.retroarch_expander.set_subtitle("🔴 RetroArch not installed")
-            
-            # Check cores directory
-            if hasattr(self, 'cores_info_row'):
-                if self.retroarch.cores_dir:
-                    self.cores_info_row.set_subtitle(f"Found: {self.retroarch.cores_dir}")
-                    
-                    # Count cores
-                    cores = self.retroarch.get_available_cores()
-                    core_count = len(cores)
-                    
-                    if hasattr(self, 'core_count_row'):
-                        self.core_count_row.set_subtitle(f"{core_count} cores available")
-                    
-                    if core_count > 0:
-                        # Show some example cores
-                        example_cores = list(cores.keys())[:3]
-                        examples = ", ".join(example_cores)
-                        if len(cores) > 3:
-                            examples += f" + {len(cores) - 3} more"
-                        self.log_message(f"Available cores: {examples}")
+            try:
+                # Check RetroArch executable
+                if hasattr(self, 'retroarch_info_row'):
+                    if self.retroarch.retroarch_executable:
+                        # Determine installation type
+                        if 'flatpak' in self.retroarch.retroarch_executable:
+                            install_type = "Flatpak"
+                        elif 'steam' in self.retroarch.retroarch_executable.lower():
+                            install_type = "Steam"
+                        elif 'snap' in self.retroarch.retroarch_executable:
+                            install_type = "Snap"
+                        elif '.AppImage' in self.retroarch.retroarch_executable:
+                            install_type = "AppImage"
+                        else:
+                            install_type = "Native"
                         
-                        if self.retroarch.retroarch_executable:
-                            self.retroarch_expander.set_subtitle("🟢 Ready")
+                        self.retroarch_info_row.set_subtitle(f"Found: {install_type} - {self.retroarch.retroarch_executable}")
+                        self.retroarch_expander.set_subtitle(f"🟢 {install_type} RetroArch detected")
                     else:
-                        self.retroarch_expander.set_subtitle("⚠️ No cores available")
-                else:
-                    if hasattr(self, 'cores_info_row'):
+                        self.retroarch_info_row.set_subtitle("Not found")
+                        self.retroarch_expander.set_subtitle("🔴 RetroArch not found")
+            except Exception as e:
+                print(f"Error updating RetroArch info: {e}")
+                if hasattr(self, 'retroarch_info_row'):
+                    self.retroarch_info_row.set_subtitle("Error checking installation")
+            
+            try:
+                # Check cores directory
+                if hasattr(self, 'cores_info_row'):
+                    if self.retroarch.cores_dir:
+                        self.cores_info_row.set_subtitle(f"Found: {self.retroarch.cores_dir}")
+                        
+                        # Count cores
+                        cores = self.retroarch.get_available_cores()
+                        core_count = len(cores)
+                        
+                        if hasattr(self, 'core_count_row'):
+                            self.core_count_row.set_subtitle(f"{core_count} cores available")
+                    else:
                         self.cores_info_row.set_subtitle("Cores directory not found")
-                    if hasattr(self, 'core_count_row'):
-                        self.core_count_row.set_subtitle("0 cores available")
-                    self.retroarch_expander.set_subtitle("🔴 Cores directory not found")
-        
-            # Test RetroArch network connection
-            if hasattr(self, 'retroarch_connection_row'):
-                if self.retroarch.retroarch_executable:
-                    # Test connection
-                    try:
+                        if hasattr(self, 'core_count_row'):
+                            self.core_count_row.set_subtitle("0 cores available")
+            except Exception as e:
+                print(f"Error checking cores: {e}")
+                if hasattr(self, 'cores_info_row'):
+                    self.cores_info_row.set_subtitle("Error checking cores")
+            
+            try:
+                # Test RetroArch network connection
+                if hasattr(self, 'retroarch_connection_row'):
+                    if self.retroarch.retroarch_executable:
+                        # Test connection
                         status = self.retroarch.send_command("GET_STATUS")
                         if status:
                             self.retroarch_connection_row.set_subtitle("🟢 Connected - notifications will work")
                         else:
-                            self.retroarch_connection_row.set_subtitle("🔴 Not responding - turn ON Settings - Network - Network Commands to get notifications")
-                    except Exception as e:
-                        self.retroarch_connection_row.set_subtitle("🔴 Connection failed")
-                else:
-                    self.retroarch_connection_row.set_subtitle("⚠️ RetroArch not found")
+                            self.retroarch_connection_row.set_subtitle("🔴 Not responding - enable Network Commands in Settings")
+                    else:
+                        self.retroarch_connection_row.set_subtitle("⚠️ RetroArch not found")
+            except Exception as e:
+                print(f"Error testing connection: {e}")
+                if hasattr(self, 'retroarch_connection_row'):
+                    self.retroarch_connection_row.set_subtitle("Error testing connection")
         
-        update_info()
-        
+        # Ensure UI update happens in main thread
+        from gi.repository import GLib
+        GLib.idle_add(update_info)
+            
     def on_refresh_retroarch_info(self, button):
         """Refresh RetroArch information"""
         self.log_message("Refreshing RetroArch information...")
@@ -6965,46 +7137,30 @@ class SyncWindow(Gtk.ApplicationWindow):
             # Download the game
             self.download_game(selected_game)
     
-    def launch_game(self, rom_path, platform_name=None, core_name=None):
-        """Launch a game in RetroArch with multi-installation support"""
-        if not self.retroarch.retroarch_executable:
-            return False, "RetroArch executable not found"
+    def launch_game(self, game):
+        """Launch a game using RetroArch"""
+        if not game.get('is_downloaded'):
+            self.log_message("Game is not downloaded")
+            return
         
-        # If no core specified, try to suggest one
-        if not core_name and platform_name:
-            core_name, core_path = self.suggest_core_for_platform(platform_name)
-            if not core_name:
-                return False, f"No suitable core found for platform: {platform_name}"
+        local_path = game.get('local_path')
+        if not local_path or not Path(local_path).exists():
+            self.log_message("Game file not found")
+            return
         
-        # Get core path
-        available_cores = self.get_available_cores()
-        if core_name not in available_cores:
-            return False, f"Core not found: {core_name}"
+        platform_name = game.get('platform')
+        rom_path = Path(local_path)
         
-        core_path = available_cores[core_name]
+        # Let RetroArch interface handle the actual launching
+        success, message = self.retroarch.launch_game(rom_path, platform_name)
         
-        try:
-            import subprocess
-            
-            # Build command based on RetroArch type
-            if 'flatpak' in self.retroarch.retroarch_executable:
-                cmd = ['flatpak', 'run', 'org.libretro.RetroArch', '-L', core_path, str(rom_path)]
-            elif 'snap' in self.retroarch.retroarch_executable:
-                cmd = ['snap', 'run', 'retroarch', '-L', core_path, str(rom_path)]
-            else:
-                # Native, Steam, AppImage, or path-based
-                cmd = [self.retroarch.retroarch_executable, '-L', core_path, str(rom_path)]
-            
-            print(f"🚀 Launching: {' '.join(cmd)}")
-            
-            # Launch RetroArch
-            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            
-            return True, f"Launched {rom_path.name} with {core_name} core"
-            
-        except Exception as e:
-            return False, f"Launch error: {e}"
-
+        if success:
+            self.log_message(f"🚀 {message}")
+            # Send notification to RetroArch if possible
+            self.retroarch.send_notification(f"Launching {game.get('name', 'Unknown')}")
+        else:
+            self.log_message(f"❌ Launch failed: {message}")
+ 
     def on_window_close_request(self, _window):
         """Overrides the default window close action.
         
@@ -7804,10 +7960,13 @@ class AutoSyncManager:
             # Start upload worker
             self.start_upload_worker()
             
-            # Start RetroArch monitoring (always enabled with auto-sync)
             self.start_retroarch_monitoring()
             
-            self.log("🔄 Auto-sync started (file monitoring + RetroArch detection)")
+            self.log("🔄 Auto-sync started (file monitoring + RetroArch monitoring)")
+            
+        except Exception as e:
+            self.log(f"❌ Failed to start auto-sync: {e}")
+            self.stop_auto_sync()
             
         except Exception as e:
             self.log(f"❌ Failed to start auto-sync: {e}")
@@ -7842,13 +8001,178 @@ class AutoSyncManager:
         self.observer = Observer()
         
         for save_type, directory in self.retroarch.save_dirs.items():
-            if directory.exists():
+            # Create directory if it doesn't exist
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
                 handler = SaveFileHandler(self.on_save_file_changed, save_type)
                 self.observer.schedule(handler, str(directory), recursive=True)
                 self.log(f"📁 Monitoring {save_type}: {directory}")
+            except Exception as e:
+                self.log(f"❌ Failed to create/monitor {save_type} directory {directory}: {e}")
         
         self.observer.start()
+
+    def debug_retroarch_history(self):
+        """Debug RetroArch history playlist contents"""
+        try:
+            history_path = Path.home() / '.var/app/org.libretro.RetroArch/config/retroarch/content_history.lpl'
+            
+            if history_path.exists():
+                self.log(f"📄 Reading RetroArch history: {history_path}")
+                with open(history_path, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                
+                self.log(f"📋 History has {len(lines)} lines")
+                
+                # Show first 12 lines (2 entries)
+                for i, line in enumerate(lines[:12]):
+                    self.log(f"Line {i}: {line.strip()}")
+                    
+            else:
+                self.log(f"❌ History file not found: {history_path}")
+                
+        except Exception as e:
+            self.log(f"❌ History debug error: {e}")
+
+    def start_retroarch_monitoring(self):
+        """Monitor RetroArch history playlist for recently loaded content"""
+        def monitor_retroarch():
+            last_content = None
+            last_mtime = 0
+            
+            while not self.should_stop.is_set():
+                try:
+                    history_path = Path.home() / '.var/app/org.libretro.RetroArch/config/retroarch/content_history.lpl'
+                    
+                    if history_path.exists():
+                        current_mtime = history_path.stat().st_mtime
+                        
+                        # History file changed
+                        if current_mtime != last_mtime:
+                            self.log(f"📝 RetroArch history updated")
+                        
+                            current_content = self.get_retroarch_current_game()
+                            self.log(f"🔍 Most recent content: {current_content}")
+                            
+                            # New game detected
+                            if current_content and current_content != last_content:
+                                self.log(f"🎯 Game launched: {Path(current_content).name}")
+                                self.sync_saves_for_rom_file(current_content)
+                                last_content = current_content
+                            
+                            last_mtime = current_mtime
+                    
+                    time.sleep(2)
+                    
+                except Exception as e:
+                    self.log(f"RetroArch monitoring error: {e}")
+                    time.sleep(10)
+        
+        threading.Thread(target=monitor_retroarch, daemon=True).start()
+        self.log("🔄 RetroArch history monitoring started")
     
+    def debug_retroarch_config(self):
+        """Debug RetroArch config file contents"""
+        try:
+            config_path = Path.home() / '.var/app/org.libretro.RetroArch/config/retroarch/retroarch.cfg'
+            
+            if config_path.exists():
+                self.log(f"📄 Reading RetroArch config: {config_path}")
+                with open(config_path, 'r') as f:
+                    lines = f.readlines()
+                    
+                # Look for content-related entries
+                for line in lines:
+                    if any(keyword in line.lower() for keyword in ['content', 'recent', 'playlist', 'history']):
+                        self.log(f"🔍 Config: {line.strip()}")
+            else:
+                self.log(f"❌ Config file not found: {config_path}")
+                
+        except Exception as e:
+            self.log(f"❌ Config debug error: {e}")
+
+    def get_retroarch_current_game(self):
+        """Get currently loaded game from RetroArch history playlist (JSON format)"""
+        try:
+            import json
+            history_path = Path.home() / '.var/app/org.libretro.RetroArch/config/retroarch/content_history.lpl'
+            
+            if history_path.exists():
+                with open(history_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                # Get first item from items array (most recent)
+                items = data.get('items', [])
+                if items and len(items) > 0:
+                    first_item = items[0]
+                    rom_path = first_item.get('path', '')
+                    
+                    if rom_path and rom_path != 'N/A' and Path(rom_path).exists():
+                        return rom_path
+                        
+        except Exception as e:
+            self.log(f"❌ JSON parsing error: {e}")
+        return None
+
+    def sync_saves_for_rom_file(self, rom_path):
+        """Sync saves for a specific ROM file that's being launched"""
+        try:
+            rom_filename = Path(rom_path).name
+            rom_stem = Path(rom_path).stem
+            
+            self.log(f"🎯 Detected ROM: {rom_filename} - syncing saves...")
+            
+            # Find matching game in library
+            games = self.get_games()
+            matching_game = None
+            
+            for game in games:
+                game_filename = game.get('file_name', '')
+                if game_filename == rom_filename or Path(game_filename).stem == rom_stem:
+                    matching_game = game
+                    break
+            
+            if matching_game:
+                self.log(f"📥 Syncing saves for: {matching_game.get('name')}")
+                self.download_saves_for_specific_game(matching_game)
+            else:
+                self.log(f"⚠️ ROM not in library - downloading all recent saves as fallback")
+                self.sync_recent_saves()
+                
+        except Exception as e:
+            self.log(f"❌ ROM-specific sync error: {e}")
+
+    def sync_recent_saves(self):
+        """Download saves for games that have local save files (recently played)"""
+        try:
+            if not self.retroarch.save_dirs:
+                return
+                
+            # Get all local save files
+            local_saves = self.retroarch.get_save_files()
+            recently_played_games = set()
+            
+            # Find ROM IDs for games with local saves
+            for save_type, files in local_saves.items():
+                for save_file in files:
+                    save_basename = Path(save_file['name']).stem
+                    rom_id = self.find_rom_id_for_save_file(Path(save_file['path']))
+                    if rom_id:
+                        recently_played_games.add(rom_id)
+            
+            # Sync saves for these games
+            games = self.get_games()
+            synced_count = 0
+            for game in games:
+                if game.get('rom_id') in recently_played_games:
+                    self.download_saves_for_specific_game(game)
+                    synced_count += 1
+            
+            self.log(f"📥 Synced saves for {synced_count} recently played games")
+            
+        except Exception as e:
+            self.log(f"❌ Recent saves sync error: {e}")
+
     def start_upload_worker(self):
         """Start background thread to process upload queue"""
         def upload_worker():
@@ -8318,6 +8642,8 @@ class AutoSyncManager:
                                             temp_path.rename(final_path)
                                         downloads_successful += 1
                                         self.log(f"  ✅ Save ready: {retroarch_filename}")
+                                        # ADD THIS LINE:
+                                        self.retroarch.send_notification(f"Save downloaded: {game_name}")
                                     except Exception as e:
                                         self.log(f"  ❌ Failed to rename save: {e}")
 
@@ -8372,6 +8698,7 @@ class AutoSyncManager:
                                             temp_path.rename(final_path)
                                         downloads_successful += 1
                                         self.log(f"  ✅ State ready: {retroarch_filename}")
+                                        self.retroarch.send_notification(f"Save state downloaded: {game_name}")
                                         
                                         # Download screenshot if available
                                         screenshot_data = latest_state.get('screenshot')
