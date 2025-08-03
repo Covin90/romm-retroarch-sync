@@ -17,6 +17,7 @@ import webbrowser
 import base64
 import datetime
 import psutil
+import stat
 
 def log_memory_usage(label="", detailed=False):
     # Only log memory in debug mode
@@ -2949,7 +2950,7 @@ class RomMClient:
         # Force HTTP/2 and connection reuse
         from requests.adapters import HTTPAdapter
         from urllib3.util.retry import Retry
-        
+
         adapter = HTTPAdapter(
             pool_connections=4,
             pool_maxsize=4,
@@ -2957,14 +2958,14 @@ class RomMClient:
         )
         self.session.mount('http://', adapter)
         self.session.mount('https://', adapter)
-        
+
         # Existing headers + compression
         self.session.headers.update({
-            'Accept-Encoding': 'gzip, deflate, br',
+            'Accept-Encoding': 'gzip, deflate',
             'Accept': 'application/json',
             'User-Agent': 'RomM-RetroArch-Sync/1.0.6',
             'Connection': 'keep-alive',
-            'Keep-Alive': 'timeout=30, max=100'  # Keep connections alive
+            'Keep-Alive': 'timeout=30, max=100'
         })
         
         if username and password:
@@ -3695,6 +3696,12 @@ class RomMClient:
             
     def upload_save_with_thumbnail(self, rom_id, save_type, file_path, thumbnail_path=None, emulator=None):
         """NEW METHOD: Upload save file with optional thumbnail using separate linked uploads"""
+        
+        print(f"🚀 DEBUG: Upload called - ROM {rom_id}, file: {file_path}, thumbnail: {thumbnail_path}")
+        import traceback
+        print("🚀 DEBUG: Call stack:")
+        traceback.print_stack()
+        
         try:
             file_path = Path(file_path)
             if not file_path.exists():
@@ -3845,7 +3852,9 @@ class RomMClient:
             return self.upload_save(rom_id, save_type, file_path)
 
     def upload_save_and_get_id(self, rom_id, save_type, file_path, emulator=None):
-        """Upload save file using existing server filename for saves, new timestamp for states"""
+        print(f"🔍 DEBUG: upload_save_and_get_id called with emulator: {emulator}")
+        print(f"🔍 DEBUG: rom_id={rom_id}, save_type={save_type}")
+        
         try:
             file_path = Path(file_path)
             
@@ -3856,6 +3865,7 @@ class RomMClient:
                 endpoint = f'/api/{save_type}?rom_id={rom_id}'
             
             upload_url = urljoin(self.base_url, endpoint)
+            print(f"🔍 DEBUG: Upload URL: {upload_url}")
             
             # Use correct field names
             if save_type == 'states':
@@ -3863,6 +3873,7 @@ class RomMClient:
             elif save_type == 'saves':
                 file_field_name = 'saveFile'
             else:
+                print(f"🔍 DEBUG: Unknown save type: {save_type}")
                 return None, None
 
             original_basename = file_path.stem
@@ -3890,30 +3901,67 @@ class RomMClient:
             with open(file_path, 'rb') as f:
                 files = {file_field_name: (romm_filename, f.read(), 'application/octet-stream')}
                 
+                print(f"🔍 DEBUG: About to POST to {upload_url}")
+                print(f"🔍 DEBUG: File field: {file_field_name}")
+                print(f"🔍 DEBUG: Filename: {romm_filename}")
+                
                 response = self.session.post(
                     upload_url,
                     files=files,
                     timeout=60
                 )
                 
+                print(f"🔍 DEBUG: Response status: {response.status_code}")
+                print(f"🔍 DEBUG: Response headers: {dict(response.headers)}")
+                
                 if response.status_code in [200, 201]:
                     try:
+                        # Force decompression by accessing content first
+                        _ = response.content
                         response_data = response.json()
                         save_state_id = response_data.get('id')
-                        # Get the actual filename used by the server
                         server_filename = response_data.get('file_name', romm_filename)
                         if save_state_id:
                             return save_state_id, server_filename
                         else:
                             print(f"No ID in save upload response: {response_data}")
                             return None, None
-                    except:
-                        print(f"Could not parse save upload response: {response.text[:200]}")
+                    except Exception as e:
+                        print(f"JSON parsing error: {e}")
                         return None, None
-                else:
-                    print(f"Save upload failed: {response.status_code} - {response.text[:200]}")
-                    return None, None
-                    
+                    except Exception as e:
+                        print(f"JSON parsing error: {e}")
+                        # ENHANCED DEBUG: Show raw response info when JSON parsing fails
+                        print(f"🔍 COMPRESSION DEBUG:")
+                        print(f"  Content-Encoding: {response.headers.get('content-encoding', 'none')}")
+                        print(f"  Content-Length: {response.headers.get('content-length', 'unknown')}")
+                        print(f"  Response encoding: {response.encoding}")
+                        
+                        # Try alternative parsing methods
+                        try:
+                            # Method 1: Force decode response content
+                            if response.headers.get('content-encoding') == 'br':
+                                print(f"  Attempting manual Brotli decompression...")
+                                import brotli
+                                decompressed = brotli.decompress(response.content)
+                                response_data = json.loads(decompressed.decode('utf-8'))
+                                save_state_id = response_data.get('id')
+                                server_filename = response_data.get('file_name', romm_filename)
+                                print(f"🎉 Manual decompression successful! ID: {save_state_id}")
+                                return save_state_id, server_filename
+                        except Exception as manual_error:
+                            print(f"  Manual decompression failed: {manual_error}")
+                        
+                        # Method 2: Show first 200 bytes for debugging
+                        try:
+                            raw_preview = response.content[:200]
+                            print(f"  Raw content preview: {raw_preview}")
+                        except:
+                            pass
+                        
+                        print(f"Could not parse save upload response")
+                        return None, None
+                        
         except Exception as e:
             print(f"Error uploading save and getting ID: {e}")
             return None, None
@@ -5096,27 +5144,33 @@ class RetroArchInterface:
     def find_thumbnail_for_save_state(self, state_file_path):
         """Find the thumbnail file corresponding to a save state"""
         state_path = Path(state_file_path)
+        
+        print(f"🔍 DEBUG: Looking for screenshot for: {state_path}")
+        print(f"🔍 DEBUG: Directory contents:")
+        try:
+            for file in state_path.parent.iterdir():
+                print(f"     {file.name}")
+        except:
+            print("     Error listing directory")
+        
         thumbnails_dir = self.find_thumbnails_directory()
         
         # RetroArch thumbnail naming patterns
         base_name = state_path.stem  # Remove .state extension
-        game_name = base_name
         
         # Remove state slot numbers (.state1, .state2, etc.)
         import re
-        game_name = re.sub(r'\.state\d*$', '', game_name)
+        game_name = re.sub(r'\.state\d*$', '', base_name)
         
-        # Possible thumbnail locations (prioritize same directory first)
+        # Possible thumbnail locations (UPDATED - prioritize same directory)
         possible_thumbnails = [
-            # MOST COMMON: Same directory as save state, appending .png to full filename
-            state_path.with_name(state_path.name + '.png'),  # "game.state" -> "game.state.png"
-            
-            # Same directory, replacing extension
-            state_path.with_suffix('.png'),  # "game.state" -> "game.png"
-            
-            # Same directory with game name variations
-            state_path.parent / f"{game_name}.png",
-            state_path.parent / f"{base_name}.png",
+            # SAME DIRECTORY - Multiple naming patterns for RetroDECK compatibility
+            state_path.with_name(state_path.name + '.png'),           # "game.state" -> "game.state.png" 
+            state_path.with_suffix('.png'),                           # "game.state" -> "game.png"
+            state_path.parent / f"{game_name}.png",                   # Same dir, base game name
+            state_path.parent / f"{base_name}.png",                   # Same dir, full stem
+            state_path.with_name(state_path.stem + '_screenshot.png'), # "game.state" -> "game_screenshot.png"
+            state_path.with_name(game_name + '_thumb.png'),           # RetroDECK style naming
         ]
         
         # Add RetroArch thumbnails directory paths if available
@@ -5258,6 +5312,10 @@ class SyncWindow(Gtk.ApplicationWindow):
 
         # Schedule cleanup check after initial load
         GLib.timeout_add(2000, setup_periodic_cleanup)
+
+        # Initialize status file for Decky plugin
+        self.status_file = Path.home() / '.config' / 'romm-retroarch-sync' / 'status.json'
+        self.update_status_file()
 
         # ADD AUTO-CONNECT LOGIC:
         GLib.timeout_add(50, self.try_auto_connect)
@@ -5412,15 +5470,17 @@ class SyncWindow(Gtk.ApplicationWindow):
             # Create service file
             service_content = f"""[Unit]
     Description=RomM RetroArch Sync
-    After=graphical-session.target
+    After=multi-user.target
 
     [Service]
     Type=simple
-    ExecStartPre=/bin/sleep 5
-    ExecStart={exec_path} --minimized
-    Restart=on-failure
-    RestartSec=5
+    ExecStartPre=/bin/sleep 15
+    ExecStart={exec_path} --daemon
+    Restart=always
+    RestartSec=10
     Environment=DISPLAY=:0
+    KillMode=mixed
+    KillSignal=SIGTERM
 
     [Install]
     WantedBy=default.target
@@ -5436,6 +5496,17 @@ class SyncWindow(Gtk.ApplicationWindow):
             
             # Save setting
             self.settings.set('System', 'autostart', 'true')
+            
+            # Try to install Decky plugin (optional - don't fail if it doesn't work)
+            decky_plugins_dir = Path.home() / 'homebrew' / 'plugins'
+            if decky_plugins_dir.exists():
+                try:
+                    if os.access(decky_plugins_dir, os.W_OK):
+                        self.install_decky_plugin()
+                    else:
+                        self.log_message("📱 Decky plugin skipped - no write permission")
+                except Exception as e:
+                    self.log_message(f"📱 Decky plugin install skipped: {e}")
             
             return True
             
@@ -5462,14 +5533,86 @@ class SyncWindow(Gtk.ApplicationWindow):
             
             subprocess.run(['systemctl', '--user', 'daemon-reload'], capture_output=True)
             
+            # Try to remove Decky plugin (optional - don't fail if it doesn't work)
+            try:
+                self.remove_decky_plugin()
+            except Exception as e:
+                self.log_message(f"📱 Decky plugin removal skipped: {e}")
+            
             # Save setting
             self.settings.set('System', 'autostart', 'false')
-            
             return True
             
         except Exception as e:
             print(f"Failed to remove systemd service: {e}")
             return False
+
+    def install_decky_plugin(self):
+        """Install companion Decky plugin - DISABLED"""
+        # Plugin installation disabled - install manually
+        self.log_message("📱 Decky plugin installation disabled (install manually)")
+        return False
+
+    def debug_decky_permissions(self):
+        """Debug Decky plugin directory permissions"""
+        try:
+            import pwd
+            import grp
+            
+            # Check the homebrew directory structure
+            paths_to_check = [
+                Path.home() / 'homebrew',
+                Path.home() / 'homebrew' / 'plugins',
+            ]
+            
+            current_user = pwd.getpwuid(os.getuid()).pw_name
+            self.log_message(f"🔍 Current user: {current_user}")
+            
+            for path in paths_to_check:
+                if path.exists():
+                    stat_info = path.stat()
+                    owner = pwd.getpwuid(stat_info.st_uid).pw_name
+                    group = grp.getgrgid(stat_info.st_gid).gr_name
+                    perms = oct(stat_info.st_mode)[-3:]
+                    
+                    self.log_message(f"📁 {path}")
+                    self.log_message(f"   Owner: {owner}, Group: {group}, Permissions: {perms}")
+                    self.log_message(f"   Writable by current user: {os.access(path, os.W_OK)}")
+                else:
+                    self.log_message(f"❌ {path} does not exist")
+                    # Try to create it
+                    try:
+                        path.mkdir(parents=True, exist_ok=True)
+                        self.log_message(f"✅ Created {path}")
+                    except Exception as e:
+                        self.log_message(f"❌ Failed to create {path}: {e}")
+            
+            # Check if we can fix permissions
+            plugins_dir = Path.home() / 'homebrew' / 'plugins'
+            if plugins_dir.exists():
+                try:
+                    # Try to change ownership to current user
+                    import subprocess
+                    result = subprocess.run(['whoami'], capture_output=True, text=True)
+                    current_user = result.stdout.strip()
+                    
+                    self.log_message(f"🔧 Attempting to fix ownership for {current_user}...")
+                    
+                    # This might require sudo, so we'll suggest the fix
+                    fix_command = f"sudo chown -R {current_user}:{current_user} {Path.home() / 'homebrew'}"
+                    self.log_message(f"💡 To fix permissions, run in terminal:")
+                    self.log_message(f"   {fix_command}")
+                    
+                except Exception as e:
+                    self.log_message(f"❌ Permission fix error: {e}")
+                    
+        except Exception as e:
+            self.log_message(f"❌ Debug error: {e}")
+
+    def remove_decky_plugin(self):
+        """Remove companion Decky plugin - DISABLED"""
+        # Plugin removal disabled  
+        return False
 
     def check_autostart_status(self):
         """Check if autostart is currently enabled"""
@@ -6254,6 +6397,8 @@ class SyncWindow(Gtk.ApplicationWindow):
                         self.autosync_enable_switch.set_active(True)
                         self.log_message("🔄 Auto-sync enabled automatically")
                     
+                    self.update_status_file()
+
                     total_time = time.time() - start_time
                     self.log_message(f"🎉 Total connection time: {total_time:.2f}s")
                         
@@ -6285,6 +6430,8 @@ class SyncWindow(Gtk.ApplicationWindow):
         
         self.update_connection_ui("disconnected")
         self.log_message("Disconnected from RomM")
+
+        self.update_status_file()
         
         # Switch to local-only view immediately
         self.handle_offline_mode()
@@ -6322,6 +6469,115 @@ class SyncWindow(Gtk.ApplicationWindow):
         self.connection_expander.set_subtitle(message)
         self.connection_status_row.set_subtitle(message)       
 
+    def update_status_file(self):
+            """Update status file for Decky plugin"""
+            status = {
+                'running': True,
+                'connected': bool(self.romm_client and self.romm_client.authenticated),
+                'auto_sync': getattr(self, 'autosync_enable_switch', None) and self.autosync_enable_switch.get_active(),
+                'game_count': len(getattr(self, 'available_games', [])),
+                'last_update': time.time()
+            }
+            
+            try:
+                self.status_file = getattr(self, 'status_file', Path.home() / '.config' / 'romm-retroarch-sync' / 'status.json')
+                self.status_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(self.status_file, 'w') as f:
+                    json.dump(status, f)
+            except:
+                pass
+
+    def create_simple_decky_plugin(self):
+        """Create a simple, debug-friendly Decky plugin"""
+        try:
+            plugin_dest = Path.home() / 'homebrew' / 'plugins' / 'romm-sync-status'
+            plugin_dest.mkdir(parents=True, exist_ok=True)
+            
+            # Create a very simple plugin.json
+            plugin_json = {
+                "name": "RomM Sync Status",
+                "author": "RomM-RetroArch-Sync",
+                "flags": ["_root"],
+                "publish": {
+                    "discord_id": "0"
+                },
+                "tags": ["utility"]
+            }
+            
+            with open(plugin_dest / 'plugin.json', 'w') as f:
+                json.dump(plugin_json, f, indent=2)
+            
+            # Create a simple main.py with extensive logging
+            main_py_content = '''import os
+    import json
+    import logging
+    from pathlib import Path
+
+    # Set up logging to file
+    log_file = Path.home() / '.config' / 'romm-retroarch-sync' / 'decky_debug.log'
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+
+    logging.basicConfig(
+        filename=str(log_file),
+        level=logging.DEBUG,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+
+    class Plugin:
+        async def _main(self):
+            logging.info("RomM Sync plugin starting...")
+            try:
+                status_file = Path.home() / '.config' / 'romm-retroarch-sync' / 'status.json'
+                logging.info(f"Looking for status file: {status_file}")
+                
+                if status_file.exists():
+                    with open(status_file, 'r') as f:
+                        status = json.load(f)
+                    logging.info(f"Status loaded: {status}")
+                    return "RomM Sync: Connected" if status.get('connected') else "RomM Sync: Disconnected"
+                else:
+                    logging.warning("Status file not found")
+                    return "RomM Sync: Unknown"
+                    
+            except Exception as e:
+                logging.error(f"Plugin error: {e}")
+                return f"RomM Sync: Error - {e}"
+        
+        async def get_status(self):
+            return await self._main()
+    '''
+            
+            with open(plugin_dest / 'main.py', 'w') as f:
+                f.write(main_py_content)
+            
+            # Create package.json
+            package_json = {
+                "name": "romm-sync-status",
+                "version": "1.0.0",
+                "description": "RomM Sync Status Display",
+                "main": "main.py",
+                "scripts": {},
+                "dependencies": {}
+            }
+            
+            with open(plugin_dest / 'package.json', 'w') as f:
+                json.dump(package_json, f, indent=2)
+            
+            # Set proper permissions
+            for root, dirs, files in os.walk(plugin_dest):
+                for d in dirs:
+                    os.chmod(os.path.join(root, d), 0o755)
+                for f in files:
+                    os.chmod(os.path.join(root, f), 0o644)
+            
+            self.log_message("📱 Simple Decky plugin created with debug logging")
+            self.log_message(f"📝 Check logs at: ~/.config/romm-retroarch-sync/decky_debug.log")
+            return True
+            
+        except Exception as e:
+            self.log_message(f"❌ Simple plugin creation failed: {e}")
+            return False
+
     def create_status_section(self):
         """Status section is now combined with connection section, so this is empty"""
         # This method is now empty since we moved everything to create_connection_section
@@ -6348,14 +6604,17 @@ class SyncWindow(Gtk.ApplicationWindow):
                 self.autosync_status_row.set_subtitle("🟢 Active - monitoring for changes")
                 
                 self.log_message("🔄 Auto-sync enabled")
+                self.update_status_file()
             else:
                 self.log_message("⚠️ Please connect to RomM before enabling auto-sync")
                 self.autosync_status_row.set_subtitle("🔴 Disabled - not connected to RomM")
                 switch_row.set_active(False)
+                self.update_status_file()
         else:
             self.auto_sync.stop_auto_sync()
             self.autosync_status_row.set_subtitle("🔴 Disabled")
             self.log_message("⏹️ Auto-sync disabled")
+            self.update_status_file()
 
     def get_selected_game(self):
         """Get currently selected game from tree view"""
@@ -6627,6 +6886,18 @@ class SyncWindow(Gtk.ApplicationWindow):
 
     def log_message(self, message):
         """Add message to log view with buffer limit"""
+        
+        # ADD THIS: Also write to file for Steam Deck debugging
+        try:
+            log_file = Path.home() / '.config' / 'romm-retroarch-sync' / 'debug.log'
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(log_file, 'a', encoding='utf-8') as f:
+                import datetime
+                timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+                f.write(f"[{timestamp}] {message}\n")
+        except:
+            pass
+        
         def update_ui():
             try:
                 buffer = self.log_view.get_buffer()
@@ -6804,10 +7075,14 @@ class SyncWindow(Gtk.ApplicationWindow):
                 
                 self.log_message(f"🔄 Syncing with server: {server_url}")
                 self.perform_full_sync(download_dir, server_url)
+
+                self.update_status_file()
                 
             except Exception as e:
                 self.log_message(f"❌ Sync error: {e}")
                 self.use_cached_data_as_fallback()
+
+                self.update_status_file()
         
         threading.Thread(target=smart_sync, daemon=True).start()
 
@@ -7915,9 +8190,9 @@ class SyncApp(Adw.Application):
     """Main application class"""
     
     def __init__(self):
-        super().__init__(application_id='com.romm.retroarch.sync')  # Also update app ID
+        super().__init__(application_id='com.romm.retroarch.sync')
         self.connect('activate', self.on_activate)
-        self.connect('shutdown', self.on_shutdown)  # Add this line
+        self.connect('shutdown', self.on_shutdown)
     
     def on_activate(self, app):
         """Application activation handler"""
@@ -7994,8 +8269,9 @@ class AutoSyncManager:
             self.start_upload_worker()
             
             self.start_retroarch_monitoring()
+            self.start_playlist_monitoring()
             
-            self.log("🔄 Auto-sync started (file monitoring + RetroArch monitoring)")
+            self.log("🔄 Auto-sync started (file monitoring + RetroArch + playlist monitoring)")
             
         except Exception as e:
             self.log(f"❌ Failed to start auto-sync: {e}")
@@ -8045,6 +8321,71 @@ class AutoSyncManager:
         
         self.observer.start()
 
+    def start_playlist_monitoring(self):
+        """Monitor RetroArch playlist files for library launches"""
+        def monitor_playlists():
+            playlist_mtimes = {}
+            logged_path = False
+            
+            while not self.should_stop.is_set():
+                try:
+                    config_dir = self.retroarch.find_retroarch_config_dir()
+                    if (config_dir and 'retrodeck' in str(config_dir) and 
+                        not (config_dir / 'content_history.lpl').exists()):
+                        config_dir = Path.home() / '.var/app/net.retrodeck.retrodeck/config/retroarch'
+
+                    if not config_dir:
+                        continue
+
+                    # Find all playlist files
+                    playlist_files = list(config_dir.glob('*.lpl'))
+                    
+                    if not logged_path:
+                        self.log(f"🎮 Monitoring {len(playlist_files)} playlist files")
+                        logged_path = True
+                    
+                    for playlist_path in playlist_files:
+                        if playlist_path.name == 'content_history.lpl':
+                            continue  # Skip history, already monitored
+                            
+                        current_mtime = playlist_path.stat().st_mtime
+                        last_mtime = playlist_mtimes.get(str(playlist_path), 0)
+                        
+                        if current_mtime != last_mtime:
+                            playlist_mtimes[str(playlist_path)] = current_mtime
+                            
+                            # Get the most recently played item from this playlist
+                            recent_content = self.get_recent_from_playlist(playlist_path)
+                            if recent_content:
+                                self.log(f"🎯 Library launch: {Path(recent_content).name}")
+                                self.sync_saves_for_rom_file(recent_content)
+                    
+                    time.sleep(3)
+                    
+                except Exception as e:
+                    self.log(f"Playlist monitoring error: {e}")
+                    time.sleep(10)
+        
+        threading.Thread(target=monitor_playlists, daemon=True).start()
+
+    def get_recent_from_playlist(self, playlist_path):
+        """Get most recently added/played item from a playlist file"""
+        try:
+            import json
+            with open(playlist_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            items = data.get('items', [])
+            if items:
+                # Return the first item (most recent)
+                first_item = items[0]
+                rom_path = first_item.get('path', '')
+                if rom_path and rom_path != 'N/A' and Path(rom_path).exists():
+                    return rom_path
+        except:
+            pass
+        return None
+
     def debug_retroarch_history(self):
         """Debug RetroArch history playlist contents"""
         try:
@@ -8067,18 +8408,37 @@ class AutoSyncManager:
         except Exception as e:
             self.log(f"❌ History debug error: {e}")
 
+    def set_games_list(self, games):
+        """Set the games list for daemon mode"""
+        self.available_games = games
+        self.get_games = lambda: games
+
     def start_retroarch_monitoring(self):
         """Monitor RetroArch history playlist for recently loaded content"""
         def monitor_retroarch():
             last_content = None
             last_mtime = 0
+            logged_path = False  # Add this flag
             
             while not self.should_stop.is_set():
                 try:
                     config_dir = self.retroarch.find_retroarch_config_dir()
+
+                    # If RetroDECK detected, use correct path
+                    if (config_dir and 'retrodeck' in str(config_dir) and 
+                        not (config_dir / 'content_history.lpl').exists()):
+                        config_dir = Path.home() / '.var/app/net.retrodeck.retrodeck/config/retroarch'
+
                     if not config_dir:
                         continue
+
                     history_path = config_dir / 'content_history.lpl'
+                    
+                    # Only log once
+                    if not logged_path:
+                        print(f"🔍 Monitoring history file: {history_path}")
+                        print(f"🔍 History file exists: {history_path.exists()}")
+                        logged_path = True
                     
                     if history_path.exists():
                         current_mtime = history_path.stat().st_mtime
@@ -8090,9 +8450,20 @@ class AutoSyncManager:
                             current_content = self.get_retroarch_current_game()
                             self.log(f"🔍 Most recent content: {current_content}")
                             
-                            # New game detected
-                            if current_content and current_content != last_content:
-                                self.log(f"🎯 Game launched: {Path(current_content).name}")
+                            # Debug current vs last content
+                            if current_content:
+                                current_name = Path(current_content.split('#')[0]).name if '#' in current_content else Path(current_content).name
+                                self.log(f"🔍 Current: {current_name}")
+                                self.log(f"🔍 Last was: {Path(last_content.split('#')[0]).name if last_content and '#' in last_content else Path(last_content).name if last_content else 'None'}")
+                                self.log(f"🔍 Same as last? {current_content == last_content}")
+
+                            # New game detected OR history count changed (indicating recent activity)
+                            if current_content and (current_content != last_content or current_mtime != last_mtime):
+                                if current_content != last_content:
+                                    self.log(f"🎯 New game launched: {Path(current_content).name}")
+                                else:
+                                    self.log(f"🎯 Game activity detected: {Path(current_content).name}")
+                                
                                 self.sync_saves_for_rom_file(current_content)
                                 last_content = current_content
                             
@@ -8132,34 +8503,60 @@ class AutoSyncManager:
         try:
             import json
             config_dir = self.retroarch.find_retroarch_config_dir()
+            
+            # Apply same RetroDECK fix here
+            if (config_dir and 'retrodeck' in str(config_dir) and 
+                not (config_dir / 'content_history.lpl').exists()):
+                config_dir = Path.home() / '.var/app/net.retrodeck.retrodeck/config/retroarch'
+                
             if not config_dir:
                 return None
             history_path = config_dir / 'content_history.lpl'
+            
+            print(f"🔍 DEBUG: Reading history from {history_path}")
             
             if history_path.exists():
                 with open(history_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 
-                # Get first item from items array (most recent)
+                print(f"🔍 DEBUG: History data keys: {list(data.keys())}")
                 items = data.get('items', [])
+                print(f"🔍 DEBUG: Found {len(items)} history items")
+                
                 if items and len(items) > 0:
                     first_item = items[0]
                     rom_path = first_item.get('path', '')
+                    print(f"🔍 DEBUG: First item path: {rom_path}")
                     
-                    if rom_path and rom_path != 'N/A' and Path(rom_path).exists():
-                        return rom_path
-                        
+                    if rom_path and rom_path != 'N/A':
+                        # Handle archive paths (file.zip#internal.file)
+                        if '#' in rom_path:
+                            archive_path = rom_path.split('#')[0]
+                            if Path(archive_path).exists():
+                                print(f"🔍 DEBUG: Archive exists, returning: {rom_path}")
+                                return rom_path
+                        else:
+                            if Path(rom_path).exists():
+                                print(f"🔍 DEBUG: File exists, returning: {rom_path}")
+                                return rom_path
+                            
         except Exception as e:
-            self.log(f"❌ JSON parsing error: {e}")
+            print(f"❌ History parsing error: {e}")
         return None
 
     def sync_saves_for_rom_file(self, rom_path):
         """Sync saves for a specific ROM file that's being launched"""
         try:
-            rom_filename = Path(rom_path).name
-            rom_stem = Path(rom_path).stem
-            
-            self.log(f"🎯 Detected ROM: {rom_filename} - syncing saves...")
+            # Handle archive paths (ZIP files with # separator)
+            if '#' in rom_path:
+                archive_path, internal_file = rom_path.split('#', 1)
+                rom_filename = Path(archive_path).name  # Use archive filename
+                rom_stem = Path(archive_path).stem
+                self.log(f"🎯 Detected ROM from archive: {rom_filename} - syncing saves...")
+            else:
+                rom_filename = Path(rom_path).name
+                rom_stem = Path(rom_path).stem
+                self.log(f"🎯 Detected ROM: {rom_filename} - syncing saves...")
             
             # Find matching game in library
             games = self.get_games()
@@ -8244,11 +8641,15 @@ class AutoSyncManager:
         if not self.upload_enabled or not self.romm_client or not self.romm_client.authenticated:
             return
             
-        # Update debounce time
-        self.upload_debounce[file_path] = time.time()
+        # PREVENT RAPID RE-TRIGGERS
+        current_time = time.time()
+        if file_path in self.upload_debounce:
+            time_since_last = current_time - self.upload_debounce[file_path]
+            if time_since_last < 2.0:  # Ignore changes within 2 seconds
+                return
         
-        # Log the detection (but not the upload yet - that's debounced)
-        relative_path = Path(file_path).name
+        # Update debounce time
+        self.upload_debounce[file_path] = current_time
     
     def process_save_upload(self, file_path):
         """Process a queued save file upload with smart timestamp comparison using NEW method"""
@@ -8820,7 +9221,221 @@ class SaveFileHandler(FileSystemEventHandler):
             return path.suffix.lower() in self.extensions
         except:
             return False
+
+def run_daemon_mode():
+    """Run in background daemon mode without GUI"""
+    import signal
+    import sys
+    import time
+    import json
+    from pathlib import Path
+    
+    print("🤖 Daemon mode: Initializing...")
+    
+    # Initialize core components
+    settings = SettingsManager()
+    retroarch = RetroArchInterface()
+    
+    # State variables
+    romm_client = None
+    available_games = []
+    running = True
+    auto_sync = None
+    
+    def signal_handler(signum, frame):
+        nonlocal running
+        print(f"\n🚪 Daemon received signal {signum}, shutting down...")
+        running = False
+        if auto_sync and auto_sync.enabled:
+            auto_sync.stop_auto_sync()
+        sys.exit(0)
+    
+    # Handle signals gracefully
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    def try_connect_to_romm():
+        """Try to connect to RomM using saved credentials"""
+        nonlocal romm_client, available_games, auto_sync
         
+        url = settings.get('RomM', 'url')
+        username = settings.get('RomM', 'username') 
+        password = settings.get('RomM', 'password')
+        remember = settings.get('RomM', 'remember_credentials') == 'true'
+        auto_connect = settings.get('RomM', 'auto_connect') == 'true'
+        
+        if not (url and username and password and remember and auto_connect):
+            print("🔍 Daemon: Auto-connect disabled or credentials missing")
+            print(f"   URL: {'✓' if url else '✗'}")
+            print(f"   Username: {'✓' if username else '✗'}")
+            print(f"   Password: {'✓' if password else '✗'}")
+            print(f"   Remember: {'✓' if remember else '✗'}")
+            print(f"   Auto-connect: {'✓' if auto_connect else '✗'}")
+            return False
+        
+        print(f"🔗 Daemon: Connecting to RomM at {url}...")
+        
+        try:
+            romm_client = RomMClient(url, username, password)
+            
+            if romm_client.authenticated:
+                print("✅ Daemon: Connected to RomM successfully")
+                
+                # Load games list
+                print("📚 Daemon: Loading games list...")
+                roms_result = romm_client.get_roms()  # Get all games
+                if roms_result and len(roms_result) == 2:
+                    raw_games, total = roms_result
+                    print(f"📚 Daemon: Processing {len(raw_games)} games...")
+                    
+                    # Clear previous games
+                    available_games.clear()
+                    
+                    # Process games (simplified version)
+                    download_dir = Path(settings.get('Download', 'rom_directory'))
+                    for rom in raw_games:
+                        # Basic processing
+                        platform_slug = rom.get('platform_slug', 'Unknown')
+                        file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
+                        platform_dir = download_dir / platform_slug
+                        local_path = platform_dir / file_name
+                        is_downloaded = local_path.exists() and local_path.stat().st_size > 1024
+                        
+                        available_games.append({
+                            'name': Path(file_name).stem if file_name else rom.get('name', 'Unknown'),
+                            'rom_id': rom.get('id'),
+                            'platform': rom.get('platform_name', 'Unknown'),
+                            'platform_slug': platform_slug,
+                            'file_name': file_name,
+                            'is_downloaded': is_downloaded,
+                            'local_path': str(local_path) if is_downloaded else None,
+                            'local_size': local_path.stat().st_size if is_downloaded else 0,
+                            'romm_data': {
+                                'fs_name': rom.get('fs_name'),
+                                'fs_name_no_ext': rom.get('fs_name_no_ext'),
+                                'fs_size_bytes': rom.get('fs_size_bytes', 0),
+                                'platform_id': rom.get('platform_id'),
+                                'platform_slug': rom.get('platform_slug')
+                            }
+                        })
+                    
+                    print(f"📚 Daemon: Loaded {len(available_games)} games")
+                
+                # Initialize auto-sync now that we have connection
+                if auto_sync is None:
+                    auto_sync = AutoSyncManager(
+                        romm_client=romm_client,
+                        retroarch=retroarch,
+                        settings=settings,
+                        log_callback=lambda msg: print(f"[DAEMON] {msg}"),
+                        get_games_callback=lambda: available_games,
+                        parent_window=None
+                    )
+                else:
+                    # Update existing auto-sync with new client
+                    auto_sync.romm_client = romm_client
+                
+                # Auto-enable sync if configured
+                if settings.get('AutoSync', 'auto_enable_on_connect') == 'true':
+                    auto_sync.upload_enabled = True
+                    auto_sync.download_enabled = True 
+                    # Get upload delay from settings (with fallback)
+                    upload_delay = 3  # default
+                    try:
+                        saved_delay = settings.get('AutoSync', 'sync_delay', '3')
+                        upload_delay = int(saved_delay)
+                    except (ValueError, TypeError):
+                        upload_delay = 3
+
+                    auto_sync.upload_delay = upload_delay        
+                    auto_sync.start_auto_sync()
+                    print("🔄 Daemon: Auto-sync enabled")
+                else:
+                    print("🔄 Daemon: Auto-sync disabled in settings")
+                
+                return True
+            else:
+                print("❌ Daemon: RomM authentication failed")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Daemon: Connection error: {e}")
+            return False
+    
+    def daemon_loop():
+        """Main daemon loop"""
+        nonlocal running
+        
+        # Try initial connection
+        if not try_connect_to_romm():
+            print("⚠️ Daemon: Starting without RomM connection")
+            print("💡 Daemon: Will retry connection every 5 minutes")
+        
+        # Update status file
+        status_file = Path.home() / '.config' / 'romm-retroarch-sync' / 'status.json'
+        status_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        connection_retry_time = 0
+        
+        print("🔄 Daemon: Entering main loop...")
+        
+        while running:
+            try:
+                # Update status file
+                status = {
+                    'running': True,
+                    'connected': bool(romm_client and romm_client.authenticated),
+                    'auto_sync': bool(auto_sync and auto_sync.enabled),
+                    'game_count': len(available_games),
+                    'last_update': time.time()
+                }
+                
+                with open(status_file, 'w') as f:
+                    json.dump(status, f)
+                
+                # Try to reconnect if disconnected (every 5 minutes)
+                current_time = time.time()
+                if (not romm_client or not romm_client.authenticated) and \
+                   (current_time - connection_retry_time > 300):  # 5 minutes
+                    
+                    print("🔄 Daemon: Attempting to reconnect to RomM...")
+                    if try_connect_to_romm():
+                        print("✅ Daemon: Reconnected successfully")
+                    else:
+                        print("❌ Daemon: Reconnection failed")
+                    connection_retry_time = current_time
+                
+                # Sleep and check for stop signal
+                for _ in range(30):  # Check every second for 30 seconds
+                    if not running:
+                        break
+                    time.sleep(1)
+                    
+            except KeyboardInterrupt:
+                print("\n🔄 Daemon: Interrupted by user")
+                break
+            except Exception as e:
+                print(f"❌ Daemon loop error: {e}")
+                time.sleep(10)  # Back off on error
+        
+        print("🚪 Daemon: Main loop exited")
+    
+    # Start daemon
+    print("✅ Daemon: Initialized successfully")
+    print("💡 Daemon: Use Ctrl+C or SIGTERM to stop")
+    
+    try:
+        daemon_loop()
+    except KeyboardInterrupt:
+        print("\n🛑 Daemon: Stopped by user")
+    finally:
+        if auto_sync and auto_sync.enabled:
+            auto_sync.stop_auto_sync()
+        print("✅ Daemon: Cleanup complete")
+    
+    return 0
+
+
 def main():
     """Main entry point"""
     import argparse
@@ -8829,10 +9444,18 @@ def main():
     parser = argparse.ArgumentParser(description='RomM-RetroArch Sync')
     parser.add_argument('--minimized', action='store_true', 
                        help='Start minimized to tray')
+    parser.add_argument('--daemon', action='store_true',
+                        help='Run in daemon mode (no GUI)')
     args = parser.parse_args()
     
     print("🚀 Starting RomM-RetroArch Sync...")
     
+    # Handle daemon mode first
+    if args.daemon:
+        print("🔧 Starting in daemon mode...")
+        return run_daemon_mode()
+    
+    # GUI mode continues here...
     # Check desktop environment
     desktop = os.environ.get('XDG_CURRENT_DESKTOP', 'unknown').lower()
     print(f"🖥️ Desktop environment: {desktop}")
@@ -8849,6 +9472,7 @@ def main():
     app = SyncApp()
     app.start_minimized = args.minimized  # Pass the flag to the app
     return app.run()
+
 
 if __name__ == '__main__':
     main()

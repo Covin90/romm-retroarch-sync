@@ -1,0 +1,11 @@
+{
+  "name": "RomM Sync Monitor",
+  "author": "Your Name",
+  "flags": ["_root"],
+  "api_version": 1,
+  "publish": {
+    "tags": ["utility", "romm"],
+    "description": "Monitor RomM-RetroArch Sync service status",
+    "image": "https://opengraph.githubassets.com/1/SteamDeckHomebrew/PluginLoader"
+  }
+}

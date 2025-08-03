@@ -54,6 +54,18 @@ find "$APPDIR" -name ".git*" -type f -delete 2>/dev/null || true
 echo "📋 Copying main application..."
 cp "$SOURCE_APP" "$APPDIR/usr/bin/"
 
+# Copy Decky plugin if it exists
+echo "📱 Checking for Decky plugin..."
+DECKY_PLUGIN_SOURCE="$PROJECT_ROOT/decky_plugin"
+if [ -d "$DECKY_PLUGIN_SOURCE" ]; then
+    echo "📋 Copying Decky plugin..."
+    mkdir -p "$APPDIR/usr/share/romm-retroarch-sync"
+    cp -r "$DECKY_PLUGIN_SOURCE" "$APPDIR/usr/share/romm-retroarch-sync/"
+    echo "✅ Decky plugin bundled"
+else
+    echo "ℹ️ No Decky plugin found (optional)"
+fi
+
 # Create version files for better version detection
 echo "📝 Creating comprehensive version metadata..."
 echo "$VERSION" > "$APPDIR/usr/bin/VERSION"
