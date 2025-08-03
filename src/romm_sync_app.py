@@ -2963,7 +2963,7 @@ class RomMClient:
         self.session.headers.update({
             'Accept-Encoding': 'gzip, deflate',
             'Accept': 'application/json',
-            'User-Agent': 'RomM-RetroArch-Sync/1.0.6',
+            'User-Agent': 'RomM-RetroArch-Sync/1.1.0',
             'Connection': 'keep-alive',
             'Keep-Alive': 'timeout=30, max=100'
         })
@@ -4653,7 +4653,29 @@ class RetroArchInterface:
             cores[core_name] = str(core_file)
         
         return cores
-    
+
+    def detect_core_from_state_file(self, state_path):
+        """Detect core from save state file content"""
+        try:
+            with open(state_path, 'rb') as f:
+                header = f.read(64)  # Read first 64 bytes
+            
+            # Known signatures
+            if b'SNES9X' in header:
+                return 'snes9x'
+            elif b'FCEU' in header:
+                return 'fceumm'
+            elif b'mGBA' in header:
+                return 'mgba'
+            elif b'BEETLE' in header:
+                return 'beetle_psx'
+            # Add more signatures as needed
+            
+        except:
+            pass
+        
+        return None
+
     def suggest_core_for_platform(self, platform_name):
         """Suggest best core for a platform"""
         available_cores = self.get_available_cores()
@@ -4846,6 +4868,130 @@ class RetroArchInterface:
             if config_dir.exists():
                 return config_dir
         return None
+
+    def is_retrodeck_installation(self):
+        """Enhanced RetroDECK detection using multiple methods"""
+        # Method 1: Check executable command
+        if self.retroarch_executable and 'retrodeck' in str(self.retroarch_executable).lower():
+            return True
+        
+        # Method 2: Check if RetroDECK directories exist
+        retrodeck_paths = [
+            Path.home() / 'retrodeck',
+            Path.home() / '.var/app/net.retrodeck.retrodeck'
+        ]
+        
+        for path in retrodeck_paths:
+            if path.exists():
+                print(f"🔍 RetroDECK path found: {path}")
+                return True
+        
+        # Method 3: Check save directories for RetroDECK structure
+        for save_type, directory in self.save_dirs.items():
+            if 'retrodeck' in str(directory).lower():
+                print(f"🔍 RetroDECK detected from save path: {directory}")
+                return True
+        
+        # Method 4: Check Flatpak list
+        try:
+            import subprocess
+            result = subprocess.run(['flatpak', 'list'], capture_output=True, text=True, timeout=5)
+            if 'net.retrodeck.retrodeck' in result.stdout:
+                print("🔍 RetroDECK detected via Flatpak list")
+                return True
+        except:
+            pass
+        
+        return False
+
+    def get_core_from_platform_slug(self, platform_slug):
+        """Map RetroDECK platform slugs to likely cores"""
+        retrodeck_core_map = {
+            'snes': 'snes9x',
+            'nes': 'nestopia', 
+            'gba': 'mgba',
+            'gbc': 'sameboy',
+            'gb': 'sameboy',
+            'psx': 'beetle_psx_hw',
+            'ps1': 'beetle_psx_hw',
+            'genesis': 'genesis_plus_gx',
+            'megadrive': 'genesis_plus_gx',
+            'n64': 'mupen64plus_next',
+            'saturn': 'beetle_saturn',
+            'arcade': 'mame',
+            'mame': 'mame',
+            'fbneo': 'fbneo',
+            'atari2600': 'stella',
+        }
+        return retrodeck_core_map.get(platform_slug.lower(), platform_slug)
+
+    def detect_save_folder_structure(self):
+        """Detect if saves use core names or platform slugs by examining actual folders"""
+        folder_types = {'core_names': 0, 'platform_slugs': 0}
+        
+        for save_type, directory in self.save_dirs.items():
+            if not directory.exists():
+                continue
+                
+            for subdir in directory.iterdir():
+                if subdir.is_dir():
+                    folder_name = subdir.name.lower()
+                    
+                    # Check for known core name patterns
+                    if any(core in folder_name for core in ['snes9x', 'beetle', 'mgba', 'nestopia', 'gambatte', 'genesis_plus_gx']):
+                        folder_types['core_names'] += 1
+                    # Check for platform slug patterns  
+                    elif any(platform in folder_name for platform in ['snes', 'nes', 'gba', 'psx', 'genesis', 'n64']):
+                        folder_types['platform_slugs'] += 1
+        
+        # Return the dominant pattern
+        if folder_types['core_names'] > folder_types['platform_slugs']:
+            return 'core_names'
+        elif folder_types['platform_slugs'] > 0:
+            return 'platform_slugs'
+        else:
+            return 'unknown'
+
+    def get_emulator_info_from_path(self, file_path):
+        """Enhanced emulator detection that handles both folder structures"""
+        file_path = Path(file_path)
+        
+        # DEBUG: Show detection info (use print instead of self.log)
+        is_retrodeck = self.is_retrodeck_installation()
+        print(f"🔍 DEBUG: RetroDECK detected: {is_retrodeck}")
+        print(f"🔍 DEBUG: Save path: {file_path}")
+        
+        if file_path.parent.name in ['saves', 'states']:
+            return {
+                'directory_name': None,
+                'retroarch_emulator': None,
+                'romm_emulator': None,
+                'folder_structure': 'root'
+            }
+        
+        directory_name = file_path.parent.name
+        folder_structure = self.detect_save_folder_structure()
+        is_retrodeck = self.is_retrodeck_installation()
+        
+        if folder_structure == 'platform_slugs':
+            # Using platform slugs (RetroDECK default)
+            retroarch_emulator = directory_name
+            romm_emulator = self.get_core_from_platform_slug(directory_name)
+            print(f"🔍 Platform slug detected: {directory_name} → {romm_emulator}")
+        else:
+            # Using core names (standard RetroArch or RetroDECK with core names enabled)
+            retroarch_emulator = directory_name
+            romm_emulator = directory_name.lower().replace(' ', '_')
+            if is_retrodeck:
+                print(f"🔍 RetroDECK using core names: {directory_name}")
+        
+        return {
+            'directory_name': directory_name,
+            'retroarch_emulator': retroarch_emulator,
+            'romm_emulator': romm_emulator,
+            'folder_structure': folder_structure,
+            'is_retrodeck': is_retrodeck
+        }
 
     def find_cores_directory(self):
         """Find RetroArch cores directory with comprehensive installation support"""
@@ -5730,7 +5876,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             transient_for=self,
             application_name="RomM - RetroArch Sync",
             application_icon="com.romm.retroarch.sync",
-            version="1.0.6",
+            version="1.1.0",
             developer_name='Hector Eduardo "Covin" Silveri',
             copyright="© 2025 Hector Eduardo Silveri",
             license_type=Gtk.License.GPL_3_0
@@ -6553,7 +6699,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             # Create package.json
             package_json = {
                 "name": "romm-sync-status",
-                "version": "1.0.0",
+                "version": "1.1.0",
                 "description": "RomM Sync Status Display",
                 "main": "main.py",
                 "scripts": {},
@@ -6986,7 +7132,9 @@ class SyncWindow(Gtk.ApplicationWindow):
                 if hasattr(self, 'retroarch_info_row'):
                     if self.retroarch.retroarch_executable:
                         # Determine installation type
-                        if 'flatpak' in self.retroarch.retroarch_executable:
+                        if 'retrodeck' in self.retroarch.retroarch_executable.lower():
+                            install_type = "RetroDECK"
+                        elif 'flatpak' in self.retroarch.retroarch_executable:
                             install_type = "Flatpak"
                         elif 'steam' in self.retroarch.retroarch_executable.lower():
                             install_type = "Steam"
@@ -8691,10 +8839,8 @@ class AutoSyncManager:
                     self.log(f"⚖️ {file_path.name} timestamps similar, uploading anyway...")
 
             # Find emulator from file path
-            emulator = None
-            if file_path.parent.name not in ['saves', 'states']:
-                # File is in emulator subdirectory - use the directory name directly
-                emulator = file_path.parent.name.lower().replace(' ', '_')
+            emulator_info = self.retroarch.get_emulator_info_from_path(file_path)
+            emulator = emulator_info['romm_emulator']  # Use RomM-compatible name
             
             # Upload the file with thumbnail and emulator info
             if thumbnail_path:
@@ -8802,6 +8948,22 @@ class AutoSyncManager:
         # TODO: Find and upload recent save files for this game
         self.log(f"📤 Checking for saves to upload for {game_name}")
     
+    def get_platform_slug_from_emulator(self, romm_emulator):
+        """Reverse map core names to platform slugs for RetroDECK"""
+        core_to_platform = {
+            'snes9x': 'snes',
+            'nestopia': 'nes',
+            'mgba': 'gba',
+            'sameboy': 'gb',
+            'beetle_psx_hw': 'psx',
+            'genesis_plus_gx': 'genesis',
+            'mupen64plus_next': 'n64',
+            'beetle_saturn': 'saturn',
+            'mame': 'arcade',
+            'stella': 'atari2600',
+        }
+        return core_to_platform.get(romm_emulator, romm_emulator)
+
     def sync_before_launch(self, game):
         """Sync saves before launching a specific game"""
         if not self.download_enabled or not self.romm_client or not self.romm_client.authenticated:
@@ -8966,7 +9128,6 @@ class AutoSyncManager:
                         return True, f"Server {file_type} is newer ({-time_diff:.1f}s newer)"
                             
                 elif overwrite_behavior == "Ask each time":
-
                     # Ask user in main thread
                     import threading
                     user_choice = threading.Event()
@@ -9044,10 +9205,21 @@ class AutoSyncManager:
                     romm_emulator = latest_save.get('emulator', 'unknown')
                     
                     if original_filename:
-                        retroarch_emulator_dir = self.retroarch.get_retroarch_directory_name(romm_emulator)
+                        # Detect existing folder structure and use appropriate directory
+                        folder_structure = self.retroarch.detect_save_folder_structure()
                         
-                        if retroarch_emulator_dir:
+                        if folder_structure == 'platform_slugs':
+                            # Use platform slug (RetroDECK default)
+                            platform_slug = self.get_platform_slug_from_emulator(romm_emulator)
+                            emulator_save_dir = save_base_dir / platform_slug
+                            print(f"🔍 Saves using platform slug: {platform_slug}")
+                        else:
+                            # Use core name (standard RetroArch)
+                            retroarch_emulator_dir = self.retroarch.get_retroarch_directory_name(romm_emulator)
                             emulator_save_dir = save_base_dir / retroarch_emulator_dir
+                            print(f"🔍 Saves using core name: {retroarch_emulator_dir}")
+                        
+                        if emulator_save_dir:
                             emulator_save_dir.mkdir(parents=True, exist_ok=True)
                             
                             retroarch_filename = self.retroarch.convert_to_retroarch_filename(
@@ -9082,12 +9254,11 @@ class AutoSyncManager:
                                             temp_path.rename(final_path)
                                         downloads_successful += 1
                                         self.log(f"  ✅ Save ready: {retroarch_filename}")
-                                        # ADD THIS LINE:
                                         self.retroarch.send_notification(f"Save downloaded: {game_name}")
                                     except Exception as e:
                                         self.log(f"  ❌ Failed to rename save: {e}")
 
-            # Process states (similar logic)
+            # Process states
             if 'states' in self.retroarch.save_dirs:
                 state_base_dir = self.retroarch.save_dirs['states']
                 user_states = rom_details.get('user_states', [])
@@ -9100,10 +9271,21 @@ class AutoSyncManager:
                     romm_emulator = latest_state.get('emulator', 'unknown')
                     
                     if original_filename:
-                        retroarch_emulator_dir = self.retroarch.get_retroarch_directory_name(romm_emulator)
+                        # Detect existing folder structure and use appropriate directory
+                        folder_structure = self.retroarch.detect_save_folder_structure()
                         
-                        if retroarch_emulator_dir:
+                        if folder_structure == 'platform_slugs':
+                            # Use platform slug (RetroDECK default)
+                            platform_slug = self.get_platform_slug_from_emulator(romm_emulator)
+                            emulator_state_dir = state_base_dir / platform_slug
+                            print(f"🔍 States using platform slug: {platform_slug}")
+                        else:
+                            # Use core name (standard RetroArch)
+                            retroarch_emulator_dir = self.retroarch.get_retroarch_directory_name(romm_emulator)
                             emulator_state_dir = state_base_dir / retroarch_emulator_dir
+                            print(f"🔍 States using core name: {retroarch_emulator_dir}")
+                        
+                        if emulator_state_dir:
                             emulator_state_dir.mkdir(parents=True, exist_ok=True)
                             
                             retroarch_filename = self.retroarch.convert_to_retroarch_filename(
