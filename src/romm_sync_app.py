@@ -5405,6 +5405,10 @@ class SyncWindow(Gtk.ApplicationWindow):
         self.connect('close-request', self.on_window_close_request)
         self.load_saved_settings()
 
+        # Auto-update systemd service for new versions
+        if self.settings.get('System', 'autostart') == 'true':
+            self.update_systemd_service_if_needed()
+
         # Add about action
         about_action = Gio.SimpleAction.new("about", None)
         about_action.connect("activate", self.on_about)
@@ -5568,6 +5572,30 @@ class SyncWindow(Gtk.ApplicationWindow):
             
             GLib.idle_add(update_ui)
 
+    def map_platform_slug_for_retrodeck(self, platform_slug):
+        """Map RomM platform slugs to RetroArch/RetroDECK-compatible names"""
+        slug_mapping = {
+            'ps': 'psx',
+            'playstation': 'psx',
+            'ps1': 'psx',
+            'ps2': 'ps2',
+            'playstation-2': 'ps2',
+            'super-nintendo-entertainment-system': 'snes',
+            'nintendo-entertainment-system': 'nes',
+            'game-boy-advance': 'gba',
+            'game-boy': 'gb',
+            'game-boy-color': 'gbc',
+            'sega-genesis': 'genesis',
+            'sega-mega-drive': 'megadrive',
+            'nintendo-64': 'n64',
+            'sega-saturn': 'saturn',
+            'sega-dreamcast': 'dreamcast',
+            'atari-2600': 'atari2600',
+            'pc-engine': 'pce',
+            'turbografx-16': 'pce',
+        }
+        return slug_mapping.get(platform_slug.lower(), platform_slug)
+
     def on_autostart_changed(self, switch_row, pspec):
         """Handle autostart setting change"""
         enable = switch_row.get_active()
@@ -5691,6 +5719,49 @@ class SyncWindow(Gtk.ApplicationWindow):
             
         except Exception as e:
             print(f"Failed to remove systemd service: {e}")
+            return False
+
+    def update_systemd_service_if_needed(self):
+        """Update systemd service if current executable differs from service file"""
+        try:
+            import subprocess
+            import os
+            import sys
+            from pathlib import Path
+            
+            service_file = Path.home() / '.config' / 'systemd' / 'user' / 'romm-retroarch-sync.service'
+            
+            if not service_file.exists():
+                return False
+                
+            # Get current executable path
+            if os.environ.get('APPIMAGE'):
+                current_exec = os.environ['APPIMAGE']
+            elif hasattr(sys, '_MEIPASS'):
+                current_exec = sys.executable
+            else:
+                current_exec = f"python3 {os.path.abspath(__file__)}"
+            
+            # Read service file
+            with open(service_file, 'r') as f:
+                service_content = f.read()
+            
+            # Check if ExecStart path is different
+            if f"ExecStart={current_exec}" not in service_content:
+                self.log_message("🔄 Updating autostart service for new version...")
+                
+                # Recreate service with new path
+                success = self.create_systemd_service()
+                if success:
+                    self.log_message("✅ Autostart service updated")
+                    return True
+                else:
+                    self.log_message("❌ Failed to update autostart service")
+            
+            return False
+            
+        except Exception as e:
+            self.log_message(f"❌ Service update check failed: {e}")
             return False
 
     def install_decky_plugin(self):
@@ -5832,10 +5903,16 @@ class SyncWindow(Gtk.ApplicationWindow):
         rom_id = rom.get('id')
         platform_display_name = rom.get('platform_name', 'Unknown')  # Full name for tree view
         platform_slug = rom.get('platform_slug', platform_display_name)  # Short name for directories
+        # Clean up platform slug - prefer "megadrive" over "genesis"
+        if 'genesis' in platform_slug.lower() and 'megadrive' in platform_slug.lower():
+            platform_slug = 'megadrive'
+        elif '-slash-' in platform_slug:
+            platform_slug = platform_slug.replace('-slash-', '-')
         file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
         
-        # Use short platform slug for local directory structure
-        platform_dir = download_dir / platform_slug  # e.g., "snes" instead of "Super Nintendo Entertainment System"
+        # Use short platform slug for local directory structure (mapped for RetroDECK compatibility)
+        mapped_slug = self.map_platform_slug_for_retrodeck(platform_slug)
+        platform_dir = download_dir / mapped_slug
         local_path = platform_dir / file_name
         is_downloaded = local_path.exists() and local_path.stat().st_size > 1024
         
@@ -6271,16 +6348,10 @@ class SyncWindow(Gtk.ApplicationWindow):
 
         # Autostart setting
         self.autostart_row = Adw.SwitchRow()
-        self.autostart_row.set_title("Start with System")
-        self.autostart_row.set_subtitle("Automatically start app when Steam Deck boots")
+        self.autostart_row.set_title("Run at Startup")
+        self.autostart_row.set_subtitle("Run as a service at startup")
         self.autostart_row.connect('notify::active', self.on_autostart_changed)
         self.connection_expander.add_row(self.autostart_row)
-
-        # Connection status row
-        self.connection_status_row = Adw.ActionRow()
-        self.connection_status_row.set_title("Status")
-        self.connection_status_row.set_subtitle("🔴 Disconnected")
-        self.connection_expander.add_row(self.connection_status_row)
         
         connection_group.add(self.connection_expander)
         
@@ -6331,8 +6402,8 @@ class SyncWindow(Gtk.ApplicationWindow):
 
         # Add this new connection status row
         self.retroarch_connection_row = Adw.ActionRow()
-        self.retroarch_connection_row.set_title("Network Connection")
-        self.retroarch_connection_row.set_subtitle("Checking...")
+        self.retroarch_connection_row.set_title("RetroArch Notifications")
+        self.retroarch_connection_row.set_subtitle("Turn ON in Settings → Network Commands to get notifications")
         self.retroarch_expander.add_row(self.retroarch_connection_row)
 
         connection_group.add(self.retroarch_expander)
@@ -6586,11 +6657,9 @@ class SyncWindow(Gtk.ApplicationWindow):
         """Update connection UI based on state"""
         if state == "connecting":
             self.connection_expander.set_subtitle("🟡 Connecting...")
-            self.connection_status_row.set_subtitle("🟡 Connecting...")
             
         elif state == "loading":
             self.connection_expander.set_subtitle("🔄 Loading games...")
-            self.connection_status_row.set_subtitle("🔄 Loading games...")
             
         elif state == "connected":
             # Add game count when connected
@@ -6600,20 +6669,16 @@ class SyncWindow(Gtk.ApplicationWindow):
             else:
                 subtitle = "🟢 Connected"
             self.connection_expander.set_subtitle(subtitle)
-            self.connection_status_row.set_subtitle(subtitle)
                 
         elif state == "failed":
             self.connection_expander.set_subtitle("🔴 Connection failed")
-            self.connection_status_row.set_subtitle("🔴 Connection failed")
             
         elif state == "disconnected":
             self.connection_expander.set_subtitle("🔴 Disconnected")
-            self.connection_status_row.set_subtitle("🔴 Disconnected")
 
     def update_connection_ui_with_message(self, message):
         """Update connection UI with custom message"""
-        self.connection_expander.set_subtitle(message)
-        self.connection_status_row.set_subtitle(message)       
+        self.connection_expander.set_subtitle(message)     
 
     def update_status_file(self):
             """Update status file for Decky plugin"""
@@ -7087,9 +7152,10 @@ class SyncWindow(Gtk.ApplicationWindow):
         
         dialog.select_folder(self, None, on_response)
     
-    def update_download_progress(self, progress_info):
+    def update_download_progress(self, progress_info, rom_id=None):
         """Update progress for specific game in tree view only"""
-        rom_id = getattr(self, '_current_download_rom_id', None)
+        if not rom_id:
+            rom_id = getattr(self, '_current_download_rom_id', None)
         if not rom_id:
             return
         
@@ -7175,23 +7241,6 @@ class SyncWindow(Gtk.ApplicationWindow):
                 print(f"Error checking cores: {e}")
                 if hasattr(self, 'cores_info_row'):
                     self.cores_info_row.set_subtitle("Error checking cores")
-            
-            try:
-                # Test RetroArch network connection
-                if hasattr(self, 'retroarch_connection_row'):
-                    if self.retroarch.retroarch_executable:
-                        # Test connection
-                        status = self.retroarch.send_command("GET_STATUS")
-                        if status:
-                            self.retroarch_connection_row.set_subtitle("🟢 Connected - notifications will work")
-                        else:
-                            self.retroarch_connection_row.set_subtitle("🔴 Not responding - enable Network Commands in Settings")
-                    else:
-                        self.retroarch_connection_row.set_subtitle("⚠️ RetroArch not found")
-            except Exception as e:
-                print(f"Error testing connection: {e}")
-                if hasattr(self, 'retroarch_connection_row'):
-                    self.retroarch_connection_row.set_subtitle("Error testing connection")
         
         # Ensure UI update happens in main thread
         from gi.repository import GLib
@@ -7675,7 +7724,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                 
                 # Download with throttled progress tracking
                 success, message = self.romm_client.download_rom(
-                    rom_id, rom_name, download_path, self.update_download_progress
+                    rom_id, rom_name, download_path, lambda progress: self.update_download_progress(progress, rom_id)
                 )
                 
                 if success:
@@ -8399,11 +8448,20 @@ class AutoSyncManager:
         self.retroarch_monitor = None
         self.current_retroarch_game = None
         self.retroarch_running = False
-        
+
+        # Add lock mechanism
+        self.lock = AutoSyncLock()
+        self.instance_id = f"{'gui' if parent_window else 'daemon'}_{os.getpid()}"
+            
     def start_auto_sync(self):
         """Start all auto-sync components"""
         if self.enabled:
             self.log("Auto-sync already running")
+            return
+        
+        # Try to acquire lock
+        if not self.lock.acquire(self.instance_id):
+            self.log("⚠️ Auto-sync blocked - another instance is already running")
             return
             
         self.enabled = True
@@ -8424,10 +8482,6 @@ class AutoSyncManager:
         except Exception as e:
             self.log(f"❌ Failed to start auto-sync: {e}")
             self.stop_auto_sync()
-            
-        except Exception as e:
-            self.log(f"❌ Failed to start auto-sync: {e}")
-            self.stop_auto_sync()
 
     def stop_auto_sync(self):
         """Stop all auto-sync components"""
@@ -8436,6 +8490,9 @@ class AutoSyncManager:
             
         self.enabled = False
         self.should_stop.set()
+        
+        # Release lock
+        self.lock.release()
         
         # Stop file monitoring
         if self.observer:
@@ -9369,6 +9426,52 @@ class AutoSyncManager:
                     
         except Exception as e:
             self.log(f"❌ Error downloading saves/states for {game.get('name', 'Unknown')}: {e}")
+
+class AutoSyncLock:
+    """Linux-only file locking to prevent multiple auto-sync instances"""
+    
+    def __init__(self):
+        self.lock_file = Path.home() / '.config' / 'romm-retroarch-sync' / 'autosync.lock'
+        self.lock_file.parent.mkdir(parents=True, exist_ok=True)
+        self.lock_fd = None
+    
+    def acquire(self, instance_id):
+        """Acquire exclusive lock"""
+        import fcntl
+        
+        try:
+            # Open lock file
+            self.lock_fd = open(self.lock_file, 'w')
+            
+            # Try to acquire exclusive lock (non-blocking)
+            fcntl.flock(self.lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            
+            # Write instance info
+            self.lock_fd.write(f"{os.getpid()}:{instance_id}:{time.time()}\n")
+            self.lock_fd.flush()
+            
+            return True
+            
+        except (IOError, OSError):
+            # Lock already held by another process
+            if self.lock_fd:
+                self.lock_fd.close()
+                self.lock_fd = None
+            return False
+    
+    def release(self):
+        """Release the lock"""
+        if self.lock_fd:
+            self.lock_fd.close()  # Automatically releases flock
+            self.lock_fd = None
+            
+        try:
+            self.lock_file.unlink()  # Clean up lock file
+        except FileNotFoundError:
+            pass
+    
+    def __del__(self):
+        self.release()
 
 class SaveFileHandler(FileSystemEventHandler):
     """File system event handler for save file changes"""
