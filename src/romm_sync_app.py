@@ -4848,7 +4848,8 @@ class RetroArchInterface:
         
         # Standard detection logic
         possible_dirs = [
-            # RetroDECK
+            # RetroDECK (correct path)
+            Path.home() / '.var/app/net.retrodeck.retrodeck/config/retroarch',
             Path.home() / 'retrodeck',
             # Flatpak
             Path.home() / '.var/app/org.libretro.RetroArch/config/retroarch',
@@ -5366,6 +5367,41 @@ class RetroArchInterface:
         
         print(f"❌ No thumbnail found for {state_path.name}")
         return None
+
+    def check_network_commands_config(self):
+        """Check if RetroArch network commands are properly configured"""
+        try:
+            config_dir = self.find_retroarch_config_dir()
+            if not config_dir:
+                return False, "Config directory not found"
+            
+            config_file = config_dir / 'retroarch.cfg'
+            if not config_file.exists():
+                return False, "retroarch.cfg not found"
+            
+            network_enabled = False
+            network_port = None
+            
+            with open(config_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith('network_cmd_enable = '):
+                        network_enabled = 'true' in line.lower()
+                    elif line.startswith('network_cmd_port = '):
+                        try:
+                            network_port = int(line.split('=')[1].strip().strip('"'))
+                        except:
+                            pass
+            
+            if not network_enabled:
+                return False, "Network commands disabled in RA"
+            elif network_port != 55355:
+                return False, f"Wrong port: {network_port} (should be 55355)"
+            else:
+                return True, "Network commands enabled (port 55355)"
+                
+        except Exception as e:
+            return False, f"Config check failed: {e}"
 
 class SyncWindow(Gtk.ApplicationWindow):
     """Main application window"""
@@ -7252,10 +7288,21 @@ class SyncWindow(Gtk.ApplicationWindow):
                         self.cores_info_row.set_subtitle("Cores directory not found")
                         if hasattr(self, 'core_count_row'):
                             self.core_count_row.set_subtitle("0 cores available")
+                            
+                # Check network commands configuration
+                if hasattr(self, 'retroarch_connection_row'):
+                    network_ok, network_status = self.retroarch.check_network_commands_config()
+                    if network_ok:
+                        self.retroarch_connection_row.set_subtitle(f"🟢 {network_status}")
+                    else:
+                        self.retroarch_connection_row.set_subtitle(f"🔴 {network_status} - Turn ON in Settings → Network Commands for improved sync and notifications")
+                        
             except Exception as e:
-                print(f"Error checking cores: {e}")
+                print(f"Error checking RetroArch info: {e}")
                 if hasattr(self, 'cores_info_row'):
                     self.cores_info_row.set_subtitle("Error checking cores")
+                if hasattr(self, 'retroarch_connection_row'):
+                    self.retroarch_connection_row.set_subtitle("Turn ON in Settings → Network Commands to get notifications")
         
         # Ensure UI update happens in main thread
         from gi.repository import GLib
