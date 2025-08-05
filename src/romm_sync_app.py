@@ -4937,11 +4937,20 @@ class RetroArchInterface:
                 if subdir.is_dir():
                     folder_name = subdir.name.lower()
                     
+                    # Expanded core name patterns to match RetroArch core folder names
+                    core_patterns = [
+                        'snes9x', 'beetle', 'mgba', 'nestopia', 'gambatte', 'fceumm',
+                        'genesis plus gx', 'plus gx', 'genesis_plus_gx',  # Genesis Plus GX variants
+                        'mupen64plus', 'parallel n64', 'blastem', 'picodrive',
+                        'pcsx rearmed', 'swanstation', 'flycast', 'redream',
+                        'stella', 'handy', 'prosystem', 'vecx', 'o2em'
+                    ]
+                    
                     # Check for known core name patterns
-                    if any(core in folder_name for core in ['snes9x', 'beetle', 'mgba', 'nestopia', 'gambatte', 'genesis_plus_gx']):
+                    if any(core in folder_name for core in core_patterns):
                         folder_types['core_names'] += 1
-                    # Check for platform slug patterns  
-                    elif any(platform in folder_name for platform in ['snes', 'nes', 'gba', 'psx', 'genesis', 'n64']):
+                    # Check for platform slug patterns (short names)
+                    elif any(platform in folder_name for platform in ['snes', 'nes', 'gba', 'psx', 'genesis', 'megadrive', 'n64']):
                         folder_types['platform_slugs'] += 1
         
         # Return the dominant pattern
@@ -4981,7 +4990,7 @@ class RetroArchInterface:
         else:
             # Using core names (standard RetroArch or RetroDECK with core names enabled)
             retroarch_emulator = directory_name
-            romm_emulator = directory_name.lower().replace(' ', '_')
+            romm_emulator = self.get_romm_emulator_name(directory_name)
             if is_retrodeck:
                 print(f"🔍 RetroDECK using core names: {directory_name}")
         
@@ -5101,6 +5110,12 @@ class RetroArchInterface:
         fallback_name = ' '.join(word.capitalize() for word in fallback_name.split())
         
         return fallback_name
+
+    def get_romm_emulator_name(self, retroarch_directory_name):
+        """Convert RetroArch directory name to RomM emulator name using standard convention"""
+        # RomM naming convention: lowercase + replace hyphens/spaces with underscores
+        romm_name = retroarch_directory_name.lower().replace(' ', '_').replace('-', '_')
+        return romm_name
 
     def convert_to_retroarch_filename(self, original_filename, save_type, target_directory):
         """
@@ -8619,70 +8634,148 @@ class AutoSyncManager:
         self.get_games = lambda: games
 
     def start_retroarch_monitoring(self):
-        """Monitor RetroArch history playlist for recently loaded content"""
+        """Enhanced monitoring: prioritize network detection over history"""
         def monitor_retroarch():
             last_content = None
             last_mtime = 0
-            logged_path = False  # Add this flag
+            retroarch_was_running = False
+            last_network_state = False  # Local variable, not self._last_network_state
+            startup_grace_period = True
             
             while not self.should_stop.is_set():
                 try:
-                    config_dir = self.retroarch.find_retroarch_config_dir()
-
-                    # If RetroDECK detected, use correct path
-                    if (config_dir and 'retrodeck' in str(config_dir) and 
-                        not (config_dir / 'content_history.lpl').exists()):
-                        config_dir = Path.home() / '.var/app/net.retrodeck.retrodeck/config/retroarch'
-
-                    if not config_dir:
-                        continue
-
-                    history_path = config_dir / 'content_history.lpl'
+                    current_time = time.time()
                     
-                    # Only log once
-                    if not logged_path:
-                        print(f"🔍 Monitoring history file: {history_path}")
-                        print(f"🔍 History file exists: {history_path.exists()}")
-                        logged_path = True
+                    # 1. Check if RetroArch process is running
+                    retroarch_running = self.is_retroarch_running()
                     
-                    if history_path.exists():
-                        current_mtime = history_path.stat().st_mtime
-                        
-                        # History file changed
-                        if current_mtime != last_mtime:
-                            self.log(f"📝 RetroArch history updated")
-                        
+                    # 2. Check if RetroArch network is responding
+                    network_responding = self.is_retroarch_network_active()
+                    
+                    # Log state changes
+                    if retroarch_running != retroarch_was_running:
+                        if retroarch_running:
+                            self.log("🎮 RetroArch launched")
+                        else:
+                            self.log("🎮 RetroArch closed")
+                        retroarch_was_running = retroarch_running
+                    
+                    # 3. PRIORITY: Network state detection (content loaded/unloaded)
+                    if network_responding != last_network_state:
+                        if network_responding:
                             current_content = self.get_retroarch_current_game()
-                            self.log(f"🔍 Most recent content: {current_content}")
-                            
-                            # Debug current vs last content
                             if current_content:
-                                current_name = Path(current_content.split('#')[0]).name if '#' in current_content else Path(current_content).name
-                                self.log(f"🔍 Current: {current_name}")
-                                self.log(f"🔍 Last was: {Path(last_content.split('#')[0]).name if last_content and '#' in last_content else Path(last_content).name if last_content else 'None'}")
-                                self.log(f"🔍 Same as last? {current_content == last_content}")
-
-                            # New game detected OR history count changed (indicating recent activity)
-                            if current_content and (current_content != last_content or current_mtime != last_mtime):
-                                if current_content != last_content:
-                                    self.log(f"🎯 New game launched: {Path(current_content).name}")
-                                else:
-                                    self.log(f"🎯 Game activity detected: {Path(current_content).name}")
-                                
+                                self.log(f"🎯 RetroArch content loaded: {Path(current_content).name}")
                                 self.sync_saves_for_rom_file(current_content)
-                                last_content = current_content
-                            
-                            last_mtime = current_mtime
+                                self.last_sync_time[current_content] = current_time
+                            else:
+                                self.log("🎯 RetroArch network active but no content detected")
+                        else:
+                            self.log("🎮 RetroArch content unloaded (network inactive)")
+                        last_network_state = network_responding
                     
-                    time.sleep(2)
+                    # 4. FALLBACK: History file detection (for initial state and missed events)
+                    elif retroarch_running and not network_responding:
+                        current_content = self.get_retroarch_current_game()
+                        
+                        config_dir = self.retroarch.find_retroarch_config_dir()
+                        if config_dir and (config_dir / 'content_history.lpl').exists():
+                            history_path = config_dir / 'content_history.lpl'
+                            current_mtime = history_path.stat().st_mtime
+                            
+                            if startup_grace_period:
+                                last_content = current_content
+                                last_mtime = current_mtime
+                                startup_grace_period = False
+                                if current_content:
+                                    self.log(f"🔍 RetroArch history shows: {Path(current_content).name}")
+                            elif current_mtime != last_mtime and current_content:
+                                self.log(f"🎯 History fallback - game change: {Path(current_content).name}")
+                                self.sync_saves_for_rom_file(current_content)
+                                self.last_sync_time[current_content] = current_time
+                                last_content = current_content
+                                last_mtime = current_mtime
+                    
+                    time.sleep(1)  # Faster polling for network detection
                     
                 except Exception as e:
                     self.log(f"RetroArch monitoring error: {e}")
-                    time.sleep(10)
-        
+                    time.sleep(5)
+            
         threading.Thread(target=monitor_retroarch, daemon=True).start()
-        self.log("🔄 RetroArch history monitoring started")
-    
+        self.log("🔄 RetroArch monitoring started (network priority + history fallback)")
+
+    def is_retroarch_running(self):
+        """Check if RetroArch process is actually running (not just flatpak containers)"""
+        try:
+            import psutil
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'status']):
+                try:
+                    name = proc.info['name'].lower()
+                    cmdline = proc.info['cmdline'] if proc.info['cmdline'] else []
+                    status = proc.info['status']
+                    
+                    # Skip zombie/dead processes
+                    if status in ['zombie', 'dead']:
+                        continue
+                    
+                    # More specific detection
+                    if name == 'retroarch':  # Exact binary name match
+                        return True
+                    elif len(cmdline) > 0:
+                        # Check for actual RetroArch execution (not just flatpak container)
+                        cmd_str = ' '.join(cmdline).lower()
+                        if ('retroarch' in cmd_str and 
+                            ('--menu' in cmd_str or '--verbose' in cmd_str or 
+                            '.so' in cmd_str or 'content' in cmd_str)):
+                            return True
+                    
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    continue
+            return False
+        except ImportError:
+            # Fallback: check for flatpak RetroArch more specifically
+            import subprocess
+            try:
+                result = subprocess.run(['flatpak', 'ps'], capture_output=True, text=True, timeout=2)
+                return 'org.libretro.RetroArch' in result.stdout
+            except:
+                return False
+
+    def is_retroarch_network_active(self):
+        """Check if RetroArch has content loaded via network commands"""
+        try:
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(0.5)
+            
+            # Send GET_STATUS command
+            sock.sendto(b'GET_STATUS', ('127.0.0.1', 55355))
+            
+            # Try to receive response
+            try:
+                response, _ = sock.recvfrom(1024)
+                response_text = response.decode('utf-8', errors='ignore').strip()
+                
+                # Check if response indicates content is loaded
+                # RetroArch returns different status when content is loaded vs just menu
+                content_loaded = (
+                    'CONTENTLESS' not in response_text.upper() and
+                    'MENU' not in response_text.upper() and 
+                    len(response_text) > 0 and
+                    response_text != 'N/A'
+                )
+                
+                sock.close()
+                return content_loaded
+                
+            except socket.timeout:
+                sock.close()
+                return False
+                
+        except Exception:
+            return False
+
     def debug_retroarch_config(self):
         """Debug RetroArch config file contents"""
         try:
@@ -8718,31 +8811,24 @@ class AutoSyncManager:
                 return None
             history_path = config_dir / 'content_history.lpl'
             
-            print(f"🔍 DEBUG: Reading history from {history_path}")
-            
             if history_path.exists():
                 with open(history_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 
-                print(f"🔍 DEBUG: History data keys: {list(data.keys())}")
                 items = data.get('items', [])
-                print(f"🔍 DEBUG: Found {len(items)} history items")
                 
                 if items and len(items) > 0:
                     first_item = items[0]
                     rom_path = first_item.get('path', '')
-                    print(f"🔍 DEBUG: First item path: {rom_path}")
                     
                     if rom_path and rom_path != 'N/A':
                         # Handle archive paths (file.zip#internal.file)
                         if '#' in rom_path:
                             archive_path = rom_path.split('#')[0]
                             if Path(archive_path).exists():
-                                print(f"🔍 DEBUG: Archive exists, returning: {rom_path}")
                                 return rom_path
                         else:
                             if Path(rom_path).exists():
-                                print(f"🔍 DEBUG: File exists, returning: {rom_path}")
                                 return rom_path
                             
         except Exception as e:
@@ -9177,8 +9263,8 @@ class AutoSyncManager:
                 self.log(f"     Server: {server_str}")
                 
                 if overwrite_behavior == "Smart (prefer newer)":
-                    if time_diff >= -60:  # Local is newer or within 1 minute
-                        self.log(f"     → Local is newer/equivalent, keeping local")
+                    if time_diff > 60:  # Local is more than 1 minute newer
+                        self.log(f"     → Local is newer, keeping local")
                         return False, f"Local {file_type} is newer ({time_diff:.1f}s difference)"
                     else:
                         self.log(f"     → Server is newer, downloading")
@@ -9311,6 +9397,9 @@ class AutoSyncManager:
                                             temp_path.rename(final_path)
                                         downloads_successful += 1
                                         self.log(f"  ✅ Save ready: {retroarch_filename}")
+                                        if hasattr(self.parent_window, 'auto_sync') and self.parent_window.auto_sync:
+                                            # Skip auto-upload for recently downloaded files
+                                            self.parent_window.auto_sync.upload_debounce[str(final_path)] = time.time() + 30                                        
                                         self.retroarch.send_notification(f"Save downloaded: {game_name}")
                                     except Exception as e:
                                         self.log(f"  ❌ Failed to rename save: {e}")
@@ -9377,6 +9466,9 @@ class AutoSyncManager:
                                             temp_path.rename(final_path)
                                         downloads_successful += 1
                                         self.log(f"  ✅ State ready: {retroarch_filename}")
+                                        if hasattr(self.parent_window, 'auto_sync') and self.parent_window.auto_sync:
+                                            # Skip auto-upload for recently downloaded files  
+                                            self.parent_window.auto_sync.upload_debounce[str(final_path)] = time.time() + 30                                        
                                         self.retroarch.send_notification(f"Save state downloaded: {game_name}")
                                         
                                         # Download screenshot if available
