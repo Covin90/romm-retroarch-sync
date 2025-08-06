@@ -6453,7 +6453,7 @@ class SyncWindow(Gtk.ApplicationWindow):
 
         # Add this new connection status row
         self.retroarch_connection_row = Adw.ActionRow()
-        self.retroarch_connection_row.set_title("RetroArch Notifications")
+        self.retroarch_connection_row.set_title("Network Commands")
         self.retroarch_connection_row.set_subtitle("Turn ON in Settings → Network Commands to get notifications")
         self.retroarch_expander.add_row(self.retroarch_connection_row)
 
@@ -6925,6 +6925,16 @@ class SyncWindow(Gtk.ApplicationWindow):
         self.rom_dir_row.set_text(self.settings.get('Download', 'rom_directory'))
         self.rom_dir_expander.add_row(self.rom_dir_row)
 
+        # Max concurrent downloads
+        self.max_downloads_row = Adw.SpinRow()
+        self.max_downloads_row.set_title("Max Concurrent Downloads")
+        self.max_downloads_row.set_subtitle("Maximum simultaneous ROM downloads")
+        downloads_adjustment = Gtk.Adjustment(value=3, lower=1, upper=10, step_increment=1)
+        self.max_downloads_row.set_adjustment(downloads_adjustment)
+        self.max_downloads_row.set_value(int(self.settings.get('Download', 'max_concurrent', '3')))
+        self.max_downloads_row.connect('notify::value', self.on_max_downloads_changed)
+        self.rom_dir_expander.add_row(self.max_downloads_row)
+
         # Open Download Folder (nested under ROM Directory)
         browse_row = Adw.ActionRow()
         browse_row.set_title("Open Download Folder")
@@ -7202,7 +7212,11 @@ class SyncWindow(Gtk.ApplicationWindow):
                 pass
         
         dialog.select_folder(self, None, on_response)
-    
+
+    def on_max_downloads_changed(self, spin_row, pspec):
+        """Save max concurrent downloads setting"""
+        self.settings.set('Download', 'max_concurrent', str(int(spin_row.get_value())))
+
     def update_download_progress(self, progress_info, rom_id=None):
         """Update progress for specific game in tree view only"""
         if not rom_id:
@@ -7506,7 +7520,7 @@ class SyncWindow(Gtk.ApplicationWindow):
         dialog.present()
 
     def download_multiple_games(self, games):
-        """Download multiple games immediately without confirmation"""
+        """Download multiple games with concurrency limit"""
         count = len(games)
         games_to_download = list(games)
         
@@ -7520,39 +7534,49 @@ class SyncWindow(Gtk.ApplicationWindow):
         # Update count to reflect actual games to download
         download_count = len(not_downloaded)
         
-        # CAPTURE SELECTION STATE BEFORE BLOCKING (this is the key fix!)
+        # CAPTURE SELECTION STATE BEFORE BLOCKING
         if hasattr(self, 'library_section'):
-            # Create a set of ROM IDs that we're downloading for tracking
             self._downloading_rom_ids = set()
             for game in not_downloaded:
                 identifier_type, identifier_value = self.library_section.get_game_identifier(game)
                 if identifier_type == 'rom_id':
                     self._downloading_rom_ids.add(identifier_value)
-            
-            print(f"🔍 DEBUG: Captured downloading ROM IDs: {self._downloading_rom_ids}")
         
-        # BLOCK TREE REFRESHES DURING BULK OPERATION (prevents visible collapsing)
+        # BLOCK TREE REFRESHES DURING BULK OPERATION
         self._dialog_open = True
         if hasattr(self, 'library_section'):
             self.library_section._block_selection_updates(True)
         
-        # Track completion - starts at download count, decrements as each completes
+        # Track completion
         self._bulk_download_remaining = download_count
         
-        # Start downloads immediately
-        self.log_message(f"🚀 Starting bulk download of {download_count} games...")
+        # Get max concurrent setting and create semaphore
+        max_concurrent = int(self.settings.get('Download', 'max_concurrent', '3'))
+        self.log_message(f"🚀 Starting bulk download of {download_count} games (max {max_concurrent} concurrent)...")
+        
+        import threading
+        semaphore = threading.Semaphore(max_concurrent)
+        
+        def controlled_download(game):
+            """Download with proper semaphore control"""
+            semaphore.acquire()  # Wait for slot
+            try:
+                # Call download_game but pass semaphore to control the actual download thread
+                self.download_game_controlled(game, semaphore, is_bulk_operation=True)
+            except Exception as e:
+                self.log_message(f"Download error for {game.get('name')}: {e}")
+                semaphore.release()  # Ensure release on error
+        
+        # Start all downloads (semaphore controls actual concurrency)
         for game in not_downloaded:
-            self.download_game(game, is_bulk_operation=True)
+            threading.Thread(target=controlled_download, args=(game,), daemon=True).start()
         
         # Check for completion periodically
         def check_completion():
             if hasattr(self, '_bulk_download_remaining') and self._bulk_download_remaining <= 0:
-                # All downloads completed and selections updated
                 self._dialog_open = False
                 if hasattr(self, 'library_section'):
                     self.library_section._block_selection_updates(False)
-                    
-                    # Clean up any remaining selections for downloaded ROMs
                     if hasattr(self, '_downloading_rom_ids'):
                         for rom_id in self._downloading_rom_ids:
                             self.library_section.selected_rom_ids.discard(rom_id)
@@ -7561,13 +7585,11 @@ class SyncWindow(Gtk.ApplicationWindow):
                         self.library_section.update_selection_label()
                         self.library_section.refresh_all_platform_checkboxes()
                         delattr(self, '_downloading_rom_ids')
-                    
                 self.log_message(f"✅ Bulk download complete ({download_count} games)")
-                delattr(self, '_bulk_download_remaining')  # Clean up
-                return False  # Stop checking
-            return True  # Continue checking
+                delattr(self, '_bulk_download_remaining')
+                return False
+            return True
         
-        # Start checking after a short delay to allow initial setup
         GLib.timeout_add(500, check_completion)
 
     def delete_multiple_games(self, games):
@@ -7856,9 +7878,6 @@ class SyncWindow(Gtk.ApplicationWindow):
                                     GLib.idle_add(self.library_section.force_checkbox_sync)
                             
                             GLib.idle_add(clear_only_checkboxes)
-
-                        # Download saves
-                        self.download_saves_for_game(game)
                         
                         if file_size >= 1024:
                             GLib.idle_add(lambda n=rom_name: self.log_message(f"✓ {n} ready to play"))
@@ -7920,6 +7939,186 @@ class SyncWindow(Gtk.ApplicationWindow):
                 
                 GLib.idle_add(lambda err=str(e), n=game['name']: 
                             self.log_message(f"Download error for {n}: {err}"))
+        
+        threading.Thread(target=download, daemon=True).start()
+
+    def download_game_controlled(self, game, semaphore, is_bulk_operation=False):
+        """Download with semaphore already acquired - releases when complete"""
+        def download():
+            try:
+                rom_name = game['name']
+                rom_id = game['rom_id']
+                platform = game['platform']
+                platform_slug = game.get('platform_slug', platform)
+                file_name = game['file_name']
+                
+                # Track current download for progress updates
+                self._current_download_rom_id = rom_id
+                
+                # Initialize progress and throttling for this game
+                self.download_progress[rom_id] = {
+                    'progress': 0.0,
+                    'downloading': True,
+                    'filename': rom_name,
+                    'speed': 0,
+                    'downloaded': 0,
+                    'total': 0
+                }
+                self._last_progress_update[rom_id] = 0  # Reset throttling
+                
+                # Update tree view to show download starting
+                GLib.idle_add(lambda: self.library_section.update_game_progress(rom_id, self.download_progress[rom_id]) 
+                            if hasattr(self, 'library_section') else None)
+                
+                # Get download directory and create platform directory
+                download_dir = Path(self.rom_dir_row.get_text())
+                platform_dir = download_dir / platform_slug
+                platform_dir.mkdir(parents=True, exist_ok=True)
+                download_path = platform_dir / file_name
+                
+                # Log file size for large downloads
+                try:
+                    # Try to get file size from ROM data
+                    romm_data = game.get('romm_data', {})
+                    expected_size = romm_data.get('fs_size_bytes', 0)
+                except:
+                    pass
+                
+                # Download with throttled progress tracking
+                success, message = self.romm_client.download_rom(
+                    rom_id, rom_name, download_path, lambda progress: self.update_download_progress(progress, rom_id)
+                )
+                
+                if success:
+                    # Mark download complete
+                    file_size = download_path.stat().st_size if download_path.exists() else 0
+                    self.download_progress[rom_id] = {
+                        'progress': 1.0,
+                        'downloading': False,
+                        'completed': True,
+                        'filename': rom_name,
+                        'downloaded': file_size,
+                        'total': file_size
+                    }
+                    
+                    # Force final update
+                    GLib.idle_add(lambda: self.library_section.update_game_progress(rom_id, self.download_progress[rom_id]) 
+                                if hasattr(self, 'library_section') else None)
+                    
+                    # Rest of success handling...
+                    if download_path.exists():
+                        size_str = f"{file_size / (1024*1024*1024):.1f} GB" if file_size > 1024*1024*1024 else f"{file_size / (1024*1024):.1f} MB" if file_size > 1024*1024 else f"{file_size / 1024:.1f} KB"
+                        
+                        GLib.idle_add(lambda n=rom_name, s=size_str: 
+                                    self.log_message(f"✓ Downloaded {n} ({s})"))
+                        
+                        # Update game data
+                        game['is_downloaded'] = True
+                        game['local_path'] = str(download_path)
+                        game['local_size'] = file_size
+                        
+                        # Update UI
+                        GLib.idle_add(lambda: self.library_section.update_single_game(game, skip_platform_update=is_bulk_operation) if hasattr(self, 'library_section') else self.refresh_games_list())
+
+                        # Bulk operation handling
+                        if is_bulk_operation and hasattr(self, 'library_section'):
+                            def update_bulk_progress():
+                                if hasattr(self, '_bulk_download_remaining'):
+                                    self._bulk_download_remaining -= 1
+                                    remaining = self._bulk_download_remaining
+                                    
+                                    if remaining > 0:
+                                        GLib.idle_add(lambda r=remaining: 
+                                            self.library_section.selection_label.set_text(f"{r} downloads remaining") 
+                                            if hasattr(self.library_section, 'selection_label') else None)
+                                    else:
+                                        GLib.idle_add(lambda: 
+                                            self.library_section.selection_label.set_text("Downloads complete") 
+                                            if hasattr(self.library_section, 'selection_label') else None)
+                            
+                            GLib.idle_add(update_bulk_progress)
+
+                        # Clear checkbox selections for individual downloads, but preserve row selections
+                        if not is_bulk_operation and hasattr(self, 'library_section'):
+                            def clear_only_checkboxes():
+                                # Only clear checkbox selections if there's no row selection
+                                # If user clicked on a row and downloaded, they probably want to keep it selected to launch
+                                if not self.library_section.selected_game:
+                                    self.library_section.clear_checkbox_selections_smooth()
+                                else:
+                                    # Just clear checkboxes but keep the row selection
+                                    self.library_section.selected_checkboxes.clear()
+                                    self.library_section.selected_rom_ids.clear()
+                                    self.library_section.selected_game_keys.clear()
+                                    # Update UI to reflect cleared checkboxes but keep row selection
+                                    self.library_section.update_action_buttons()
+                                    self.library_section.update_selection_label()
+                                    GLib.idle_add(self.library_section.force_checkbox_sync)
+                            
+                            GLib.idle_add(clear_only_checkboxes)
+                        
+                        if file_size >= 1024:
+                            GLib.idle_add(lambda n=rom_name: self.log_message(f"✓ {n} ready to play"))
+                
+                else:
+                    # Mark download failed
+                    self.download_progress[rom_id] = {
+                        'progress': 0.0,
+                        'downloading': False,
+                        'failed': True,
+                        'filename': rom_name
+                    }
+                    
+                    GLib.idle_add(lambda: self.library_section.update_game_progress(rom_id, self.download_progress[rom_id]) 
+                                if hasattr(self, 'library_section') else None)
+                    
+                    GLib.idle_add(lambda n=rom_name, m=message: 
+                                self.log_message(f"✗ Failed to download {n}: {m}"))
+                
+                # Clean up progress and throttling data
+                def cleanup_progress():
+                    time.sleep(3)  # Show completed/failed state for 3 seconds
+                    
+                    # More thorough cleanup
+                    if rom_id in self.download_progress:
+                        del self.download_progress[rom_id]
+                    if rom_id in self._last_progress_update:
+                        del self._last_progress_update[rom_id]
+                    
+                    # Clean up current download tracking
+                    if hasattr(self, '_current_download_rom_id') and self._current_download_rom_id == rom_id:
+                        delattr(self, '_current_download_rom_id')
+                    
+                    GLib.idle_add(lambda: self.library_section.update_game_progress(rom_id, None)
+                                if hasattr(self, 'library_section') else None)
+                    
+                    # Force garbage collection for large downloads
+                    import gc
+                    gc.collect()
+
+                threading.Thread(target=cleanup_progress, daemon=True).start()
+                
+            except Exception as e:
+                # Handle error state
+                if hasattr(self, '_current_download_rom_id'):
+                    rom_id = self._current_download_rom_id
+                    self.download_progress[rom_id] = {
+                        'progress': 0.0,
+                        'downloading': False,
+                        'failed': True,
+                        'filename': game.get('name', 'Unknown')
+                    }
+                    # Clean up throttling data on error
+                    if rom_id in self._last_progress_update:
+                        del self._last_progress_update[rom_id]
+                        
+                    GLib.idle_add(lambda: self.library_section.update_game_progress(rom_id, self.download_progress[rom_id])
+                                if hasattr(self, 'library_section') else None)
+                
+                GLib.idle_add(lambda err=str(e), n=game['name']: 
+                            self.log_message(f"Download error for {n}: {err}"))
+            finally:
+                semaphore.release()  # Always release when done
         
         threading.Thread(target=download, daemon=True).start()
 
@@ -8514,7 +8713,7 @@ class AutoSyncManager:
         # Add lock mechanism
         self.lock = AutoSyncLock()
         self.instance_id = f"{'gui' if parent_window else 'daemon'}_{os.getpid()}"
-            
+
     def start_auto_sync(self):
         """Start all auto-sync components"""
         if self.enabled:
@@ -8756,8 +8955,13 @@ class AutoSyncManager:
         """Check if RetroArch process is actually running (not just flatpak containers)"""
         try:
             import psutil
+            current_pid = os.getpid()  # Exclude our own process
+            
             for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'status']):
                 try:
+                    if proc.info['pid'] == current_pid:  # Skip our own process
+                        continue
+                        
                     name = proc.info['name'].lower()
                     cmdline = proc.info['cmdline'] if proc.info['cmdline'] else []
                     status = proc.info['status']
@@ -8766,22 +8970,24 @@ class AutoSyncManager:
                     if status in ['zombie', 'dead']:
                         continue
                     
-                    # More specific detection
+                    # More specific detection - exclude our own AppImage
                     if name == 'retroarch':  # Exact binary name match
                         return True
                     elif len(cmdline) > 0:
-                        # Check for actual RetroArch execution (not just flatpak container)
                         cmd_str = ' '.join(cmdline).lower()
+                        # Exclude our own app but include real RetroArch
                         if ('retroarch' in cmd_str and 
+                            'romm-retroarch-sync' not in cmd_str and  # Exclude our app
                             ('--menu' in cmd_str or '--verbose' in cmd_str or 
-                            '.so' in cmd_str or 'content' in cmd_str)):
+                            '.so' in cmd_str or 'content' in cmd_str or 
+                            'bwrap' in cmd_str)):  # Include Bazzite's bwrap
                             return True
                     
                 except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                     continue
             return False
         except ImportError:
-            # Fallback: check for flatpak RetroArch more specifically
+            # Fallback logic unchanged
             import subprocess
             try:
                 result = subprocess.run(['flatpak', 'ps'], capture_output=True, text=True, timeout=2)
