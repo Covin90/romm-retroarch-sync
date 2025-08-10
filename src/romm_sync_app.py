@@ -2858,7 +2858,10 @@ class SettingsManager:
                 'rom_directory': str(Path.home() / 'RomMSync' / 'roms'),
                 'save_directory': str(Path.home() / 'RomMSync' / 'saves'),
             }
-            
+            self.config['BIOS'] = {
+                'verify_on_launch': 'false',
+                'backup_existing': 'true',
+            }            
             self.config['AutoSync'] = {
                 'auto_enable_on_connect': 'true',
                 'overwrite_behavior': '0' 
@@ -2946,7 +2949,8 @@ class RomMClient:
     def __init__(self, base_url, username=None, password=None):
         self.base_url = base_url.rstrip('/')
         self.session = requests.Session()
-        
+        self.authenticated = False
+
         # Force HTTP/2 and connection reuse
         from requests.adapters import HTTPAdapter
         from urllib3.util.retry import Retry
@@ -2963,7 +2967,7 @@ class RomMClient:
         self.session.headers.update({
             'Accept-Encoding': 'gzip, deflate',
             'Accept': 'application/json',
-            'User-Agent': 'RomM-RetroArch-Sync/1.1.0',
+            'User-Agent': 'RomM-RetroArch-Sync/1.1.0-test',
             'Connection': 'keep-alive',
             'Keep-Alive': 'timeout=30, max=100'
         })
@@ -2972,13 +2976,25 @@ class RomMClient:
             self.authenticate(username, password)
     
     def authenticate(self, username, password):
-        """Authenticate with RomM using Basic Auth or Token endpoint"""
+        """Authenticate with RomM using Basic Auth, Token, or Session fallback"""
         try:
-            # Method 1: Basic Authentication (simpler approach)
+            # Method 1: Test if we already have a valid session (for OIDC/Authentik users)
+            print("Testing existing session...")
+            test_response = self.session.get(
+                urljoin(self.base_url, '/api/roms'),
+                params={'limit': 1},
+                timeout=10
+            )
+            
+            if test_response.status_code == 200:
+                print("✅ Session authentication successful (OIDC/Authentik)")
+                self.authenticated = True
+                return True
+            
+            # Method 2: Basic Authentication (for traditional setups)
             print("Trying Basic Authentication...")
             import base64
             
-            # Create basic auth header
             credentials = f"{username}:{password}"
             encoded_credentials = base64.b64encode(credentials.encode('utf-8')).decode('utf-8')
             
@@ -2986,27 +3002,22 @@ class RomMClient:
                 'Authorization': f'Basic {encoded_credentials}'
             })
             
-            # Test the authentication by trying to access a protected endpoint
             test_response = self.session.get(
                 urljoin(self.base_url, '/api/roms'),
                 timeout=10
             )
             
-            print(f"Basic auth test response: {test_response.status_code}")
-            
             if test_response.status_code == 200:
-                print("Basic Authentication successful!")
+                print("✅ Basic Authentication successful!")
                 self.authenticated = True
                 return True
-            elif test_response.status_code == 401:
-                print("Basic auth failed, trying token endpoint...")
+            elif test_response.status_code in [401, 403]:
+                print("Basic auth failed (401/403), trying token endpoint...")
                 
-                # Method 2: Token-based authentication
-                # Remove basic auth header first
+                # Method 3: Token-based authentication
                 if 'Authorization' in self.session.headers:
                     del self.session.headers['Authorization']
                 
-                # Request token with required scopes
                 token_data = {
                     'username': username,
                     'password': password,
@@ -3020,45 +3031,32 @@ class RomMClient:
                     timeout=10
                 )
                 
-                print(f"Token response status: {token_response.status_code}")
-                
                 if token_response.status_code == 200:
                     token_data = token_response.json()
                     access_token = token_data.get('access_token')
                     
                     if access_token:
-                        # Use the access token for future requests
                         self.session.headers.update({
                             'Authorization': f'Bearer {access_token}'
                         })
                         
-                        # Test the token
                         test_response = self.session.get(
                             urljoin(self.base_url, '/api/roms'),
                             timeout=10
                         )
                         
                         if test_response.status_code == 200:
-                            print("Token authentication successful!")
+                            print("✅ Token authentication successful!")
                             self.authenticated = True
                             return True
-                
-                print(f"Token auth failed: {token_response.text[:200] if token_response else 'No response'}")
             
             print("All authentication methods failed")
+            self.authenticated = False
             return False
             
-        except requests.exceptions.SSLError as e:
-            print(f"SSL Error: {e}")
-            return False
-        except requests.exceptions.ConnectionError as e:
-            print(f"Connection Error: {e}")
-            return False
-        except requests.exceptions.Timeout as e:
-            print(f"Timeout Error: {e}")
-            return False
         except Exception as e:
             print(f"Authentication error: {e}")
+            self.authenticated = False
             return False
 
     def get_games_count_only(self):
@@ -4363,12 +4361,107 @@ class RomMClient:
             print(f"Error linking screenshot to save state: {e}")
             return False
 
+    def get_platform_bios_list(self, platform_slug):
+        """Get available BIOS files for a platform from RomM"""
+        try:
+            # Try the firmware endpoint first
+            response = self.session.get(
+                urljoin(self.base_url, f'/api/firmware'),
+                params={'platform': platform_slug},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            
+            # Fallback to platform-specific endpoint
+            response = self.session.get(
+                urljoin(self.base_url, f'/api/platforms/{platform_slug}/firmware'),
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+                
+        except Exception as e:
+            print(f"Error fetching BIOS list: {e}")
+        
+        return []
+    
+    def download_bios_file(self, bios_id, download_path, progress_callback=None):
+        """Download a BIOS file from RomM"""
+        try:
+            # Try firmware download endpoint
+            response = self.session.get(
+                urljoin(self.base_url, f'/api/firmware/{bios_id}/download'),
+                stream=True,
+                timeout=30
+            )
+            
+            if response.status_code != 200:
+                # Try alternative endpoint
+                response = self.session.get(
+                    urljoin(self.base_url, f'/api/firmware/{bios_id}/content'),
+                    stream=True,
+                    timeout=30
+                )
+            
+            if response.status_code == 200:
+                total_size = int(response.headers.get('content-length', 0))
+                downloaded = 0
+                
+                with open(download_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            
+                            if progress_callback and total_size > 0:
+                                progress = downloaded / total_size
+                                progress_callback({
+                                    'progress': progress,
+                                    'downloaded': downloaded,
+                                    'total': total_size
+                                })
+                
+                return True
+                
+        except Exception as e:
+            print(f"BIOS download error: {e}")
+        
+        return False
+    
+    def search_bios_files(self, filename):
+        """Search for a specific BIOS file on RomM server"""
+        try:
+            # Search firmware/BIOS files
+            response = self.session.get(
+                urljoin(self.base_url, '/api/search'),
+                params={'q': filename, 'type': 'firmware'},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                results = response.json()
+                for result in results:
+                    if result.get('filename', '').lower() == filename.lower():
+                        return result
+                        
+        except Exception as e:
+            print(f"BIOS search error: {e}")
+        
+        return None
+
 class RetroArchInterface:
     """Interface for RetroArch network commands and file monitoring"""
     
-    def __init__(self):
+    def __init__(self, settings=None):
+        self.settings = settings
         self.settings = SettingsManager()
         self.save_dirs = self.find_retroarch_dirs()
+
+        self.bios_manager = None 
+        self._init_bios_manager()
 
         # Check for custom path override first
         custom_path = self.settings.get('RetroArch', 'custom_path', '').strip()
@@ -4495,6 +4588,33 @@ class RetroArchInterface:
             'dolphin': 'Dolphin',
             'flycast': 'Flycast',
         }
+
+    def _init_bios_manager(self):
+        """Initialize BIOS manager"""
+        try:
+            from bios_manager import BiosManager
+            self.bios_manager = BiosManager(
+                retroarch_interface=self,
+                romm_client=None,  # Will be set when connected
+                log_callback=lambda msg: print(f"[BIOS] {msg}"),
+                settings=self.settings  # Pass the main settings instance
+            )
+        except ImportError as e:
+            print(f"⚠️ BIOS manager not available: {e}")
+            self.bios_manager = None
+
+    def check_game_bios_requirements(self, game):
+        """Check if a game has all required BIOS files"""
+        if not self.bios_manager:
+            return True  # Assume OK if no BIOS manager
+        
+        platform = game.get('platform', '')
+        present, missing = self.bios_manager.check_platform_bios(platform)
+        
+        # Filter to only required files
+        required_missing = [b for b in missing if not b.get('optional', False)]
+        
+        return len(required_missing) == 0
 
     def launch_game_retrodeck(self, rom_path):
         """Launch game through RetroDECK (which handles core selection automatically)"""
@@ -5438,8 +5558,9 @@ class SyncWindow(Gtk.ApplicationWindow):
         
         self.romm_client = None
 
-        self.retroarch = RetroArchInterface()
         self.settings = SettingsManager()
+
+        self.retroarch = RetroArchInterface(self.settings)
 
         self.game_cache = GameDataCache(self.settings)        
         
@@ -5626,24 +5747,103 @@ class SyncWindow(Gtk.ApplicationWindow):
     def map_platform_slug_for_retrodeck(self, platform_slug):
         """Map RomM platform slugs to RetroArch/RetroDECK-compatible names"""
         slug_mapping = {
-            'ps': 'psx',
-            'playstation': 'psx',
-            'ps1': 'psx',
-            'ps2': 'ps2',
-            'playstation-2': 'ps2',
-            'super-nintendo-entertainment-system': 'snes',
+            'turbografx16--1': 'pcengine',
+            'turbografx-16-pc-engine-cd': 'pcenginecd',
+            '3ds': 'n3ds',
+            'ngc': 'gc',
+            'sega-cd': 'segacd',
+            'sms': 'mastersystem',
+            'neogeoaes': 'neogeo',
             'nintendo-entertainment-system': 'nes',
-            'game-boy-advance': 'gba',
+            'famicom': 'famicom',
+            'famicom-disk-system': 'fds',
+            'super-nintendo-entertainment-system': 'snes',
+            'super-famicom': 'sfc',
+            'nintendo-64': 'n64',
+            'nintendo-gamecube': 'gc',
+            'nintendo-wii': 'wii',
+            'nintendo-wii-u': 'wiiu',
+            'nintendo-switch': 'switch',
+            'nintendo-3ds': 'n3ds',
+            'nintendo-ds': 'nds',
             'game-boy': 'gb',
             'game-boy-color': 'gbc',
+            'game-boy-advance': 'gba',
+            'virtual-boy': 'virtualboy',
+            'game-and-watch': 'gameandwatch',
+            'pokemon-mini': 'pokemini',
             'sega-genesis': 'genesis',
             'sega-mega-drive': 'megadrive',
-            'nintendo-64': 'n64',
+            'sega-master-system': 'mastersystem',
+            'sega-game-gear': 'gamegear',
             'sega-saturn': 'saturn',
             'sega-dreamcast': 'dreamcast',
+            'sega-32x': 'sega32x',
+            'sg-1000': 'sg-1000',
+            'mega-cd': 'megacd',
+            'playstation': 'psx',
+            'playstation-2': 'ps2',
+            'playstation-3': 'ps3',
+            'playstation-portable': 'psp',
+            'playstation-vita': 'psvita',
+            'pc-engine': 'pcengine',
+            'pc-engine-cd': 'pcenginecd',
+            'turbografx-16': 'tg16',
+            'turbografx-cd': 'tg-cd',
+            'supergrafx': 'supergrafx',
+            'pc-fx': 'pcfx',
+            'neo-geo': 'neogeo',
+            'neo-geo-cd': 'neogeocd',
+            'neo-geo-pocket': 'ngp',
+            'neo-geo-pocket-color': 'ngpc',
             'atari-2600': 'atari2600',
-            'pc-engine': 'pce',
-            'turbografx-16': 'pce',
+            'atari-5200': 'atari5200',
+            'atari-7800': 'atari7800',
+            'atari-800': 'atari800',
+            'atari-xe': 'atarixe',
+            'atari-jaguar': 'atarijaguar',
+            'atari-jaguar-cd': 'atarijaguarcd',
+            'atari-lynx': 'atarilynx',
+            'atari-st': 'atarist',
+            'commodore-64': 'c64',
+            'vic-20': 'vic20',
+            'amiga': 'amiga',
+            'amiga-600': 'amiga600',
+            'amiga-1200': 'amiga1200',
+            'amiga-cd32': 'amigacd32',
+            'amstrad-cpc': 'amstradcpc',
+            'msx': 'msx',
+            'msx1': 'msx1',
+            'msx2': 'msx2',
+            'msx-turbo-r': 'msxturbor',
+            'zx-spectrum': 'zxspectrum',
+            'zx81': 'zx81',
+            'apple-ii': 'apple2',
+            'apple-iigs': 'apple2gs',
+            'pc-88': 'pc88',
+            'pc-98': 'pc98',
+            'x1': 'x1',
+            'x68000': 'x68000',
+            'wonderswan': 'wonderswan',
+            'wonderswan-color': 'wonderswancolor',
+            'colecovision': 'coleco',
+            'intellivision': 'intellivision',
+            '3do': '3do',
+            'dos': 'dos',
+            'scummvm': 'scummvm',
+            'mame': 'mame',
+            'arcade': 'arcade',
+            'final-burn-neo': 'fbneo',
+            'final-burn-alpha': 'fba',
+            'cave-story': 'cavestory',
+            'doom': 'doom',
+            'openbor': 'openbor',
+            'pico-8': 'pico8',
+            'tic-80': 'tic80',
+            'solarus': 'solarus',
+            'lutro': 'lutro',
+            'ps': 'psx',
+            'ps1': 'psx',
         }
         return slug_mapping.get(platform_slug.lower(), platform_slug)
 
@@ -6004,7 +6204,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             transient_for=self,
             application_name="RomM - RetroArch Sync",
             application_icon="com.romm.retroarch.sync",
-            version="1.1.0",
+            version="1.1.0-test",
             developer_name='Hector Eduardo "Covin" Silveri',
             copyright="© 2025 Hector Eduardo Silveri",
             license_type=Gtk.License.GPL_3_0
@@ -6342,6 +6542,181 @@ class SyncWindow(Gtk.ApplicationWindow):
             self.create_connection_section()  # Combined server & status section
             self.create_library_section()     # Game library tree view
             self.create_settings_section()    # Settings including auto-sync with upload saves
+            self.create_bios_section() 
+
+    def create_bios_section(self):
+        """Create BIOS management section"""
+        bios_group = Adw.PreferencesGroup()
+        bios_group.set_title("BIOS &amp; Firmware")
+        
+        # BIOS status expander
+        self.bios_expander = Adw.ExpanderRow()
+        self.bios_expander.set_title("System BIOS Files")
+        self.bios_expander.set_subtitle("Manage emulator BIOS/firmware files")
+        
+        # Download All button
+        download_container = Gtk.Box()
+        download_container.set_size_request(-1, 18)
+        download_container.set_valign(Gtk.Align.CENTER)
+        
+        download_all_btn = Gtk.Button(label="Download All")
+        download_all_btn.connect('clicked', self.on_download_all_bios)
+        download_all_btn.set_size_request(100, -1)
+        download_all_btn.set_valign(Gtk.Align.CENTER)
+        download_container.append(download_all_btn)
+        
+        self.bios_expander.add_suffix(download_container)
+
+        # BIOS path override
+        self.bios_override_row = Adw.EntryRow()
+        self.bios_override_row.set_title("Custom BIOS Directory (Override auto-detection)")
+        self.bios_override_row.set_text(self.settings.get('BIOS', 'custom_path', ''))
+        self.bios_override_row.connect('entry-activated', self.on_bios_override_changed)
+        self.bios_expander.add_row(self.bios_override_row)
+
+        # System directory info
+        self.bios_dir_row = Adw.ActionRow()
+        self.bios_dir_row.set_title("BIOS Directory")
+        self.bios_dir_row.set_subtitle("Checking...")
+        self.bios_expander.add_row(self.bios_dir_row)
+        
+        # Platform status rows (dynamically added)
+        self.bios_platform_rows = {}
+        
+        bios_group.add(self.bios_expander)
+        self.preferences_page.add(bios_group)
+        
+        # Update BIOS directory info
+        self.update_bios_directory_info()
+    
+    def update_bios_directory_info(self):
+        """Update BIOS directory display with debugging"""
+        if self.retroarch.bios_manager:
+            if self.retroarch.bios_manager.system_dir:
+                self.bios_dir_row.set_subtitle(str(self.retroarch.bios_manager.system_dir))
+            else:
+                # Debug RetroDECK paths
+                debug_paths = [
+                    Path.home() / 'retrodeck',
+                    Path.home() / 'retrodeck' / 'bios', 
+                    Path.home() / 'retrodeck' / 'roms',
+                    Path.home() / '.var/app/net.retrodeck.retrodeck',
+                    Path.home() / '.var/app/net.retrodeck.retrodeck/config/retroarch/system'
+                ]
+                
+                existing_paths = []
+                for path in debug_paths:
+                    if path.exists():
+                        existing_paths.append(str(path))
+                
+                if existing_paths:
+                    self.bios_dir_row.set_subtitle(f"Debug - Found: {', '.join(existing_paths[:2])}")
+                else:
+                    self.bios_dir_row.set_subtitle("Not found - no RetroDECK paths detected")
+        else:
+            self.bios_dir_row.set_subtitle("BIOS manager failed to initialize")
+    
+    def on_download_all_bios(self, button):
+        """Download all missing BIOS files for current game platforms"""
+        if not self.retroarch.bios_manager:
+            self.log_message("⚠️ BIOS manager not available")
+            return
+        
+        if not self.romm_client or not self.romm_client.authenticated:
+            self.log_message("⚠️ Please connect to RomM first")
+            return
+        
+        def download_all():
+            try:
+                self.retroarch.bios_manager.romm_client = self.romm_client
+                
+                # Get platforms from current games
+                platforms_in_library = set()
+                for game in self.available_games:
+                    platform = game.get('platform')
+                    if platform:
+                        platforms_in_library.add(platform)
+                
+                GLib.idle_add(lambda: self.log_message(f"📥 Downloading BIOS for {len(platforms_in_library)} platforms..."))
+                
+                total_downloaded = 0
+                for platform in platforms_in_library:
+                    normalized = self.retroarch.bios_manager.normalize_platform_name(platform)
+                    if self.retroarch.bios_manager.auto_download_missing_bios(normalized):
+                        total_downloaded += 1
+                
+                GLib.idle_add(lambda: self.log_message(f"✅ BIOS download complete for {total_downloaded} platforms"))
+                
+            except Exception as e:
+                GLib.idle_add(lambda: self.log_message(f"❌ BIOS download error: {e}"))
+        
+        threading.Thread(target=download_all, daemon=True).start()
+    
+    def download_missing_bios_files(self, platforms_needing_bios):
+        """Download missing BIOS files for multiple platforms"""
+        if not self.romm_client or not self.romm_client.authenticated:
+            self.log_message("⚠️ Please connect to RomM first")
+            return
+        
+        def download_all():
+            try:
+                self.retroarch.bios_manager.romm_client = self.romm_client
+                total_downloaded = 0
+                total_failed = 0
+                
+                for platform_name, missing_files in platforms_needing_bios:
+                    GLib.idle_add(lambda p=platform_name: 
+                                self.log_message(f"📥 Downloading BIOS for {p}..."))
+                    
+                    for bios_info in missing_files:
+                        bios_file = bios_info['file']
+                        
+                        # Try to download from RomM
+                        if self.retroarch.bios_manager.download_bios_from_romm(platform_name, bios_file):
+                            total_downloaded += 1
+                            GLib.idle_add(lambda f=bios_file: 
+                                        self.log_message(f"   ✅ {f}"))
+                        else:
+                            total_failed += 1
+                            GLib.idle_add(lambda f=bios_file: 
+                                        self.log_message(f"   ❌ {f} - not found on server"))
+                
+                # Summary
+                if total_failed == 0 and total_downloaded > 0:
+                    GLib.idle_add(lambda n=total_downloaded: 
+                                self.log_message(f"✅ Downloaded {n} BIOS files successfully!"))
+                elif total_downloaded > 0:
+                    GLib.idle_add(lambda d=total_downloaded, f=total_failed: 
+                                self.log_message(f"⚠️ Downloaded {d} files, {f} not found on server"))
+                else:
+                    GLib.idle_add(lambda: 
+                                self.log_message("❌ No BIOS files could be downloaded from server"))
+                
+            except Exception as e:
+                GLib.idle_add(lambda: self.log_message(f"❌ BIOS download error: {e}"))
+        
+        threading.Thread(target=download_all, daemon=True).start()
+
+    def on_bios_override_changed(self, entry_row, pspec=None):
+        """Handle BIOS path override change"""
+        custom_path = entry_row.get_text().strip()
+        self.settings.set('BIOS', 'custom_path', custom_path)
+        
+        # Force complete reinitialization of RetroArch interface
+        self.retroarch = RetroArchInterface(self.settings)
+        
+        # Update the directory display
+        self.update_bios_directory_info()
+        
+        if custom_path:
+            self.log_message(f"BIOS path overridden: {custom_path}")
+            try:
+                Path(custom_path).mkdir(parents=True, exist_ok=True)
+                self.log_message(f"✅ BIOS directory ready: {custom_path}")
+            except Exception as e:
+                self.log_message(f"❌ Could not create BIOS directory: {e}")
+        else:
+            self.log_message("BIOS path override cleared, reverting to auto-detection")
 
     def create_connection_section(self):
         """Create combined server section with RomM connection and RetroArch status"""
@@ -6815,7 +7190,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             # Create package.json
             package_json = {
                 "name": "romm-sync-status",
-                "version": "1.1.0",
+                "version": "1.1.0-test",
                 "description": "RomM Sync Status Display",
                 "main": "main.py",
                 "scripts": {},
@@ -7727,11 +8102,26 @@ class SyncWindow(Gtk.ApplicationWindow):
             self.download_game(selected_game)
     
     def launch_game(self, game):
-        """Launch a game using RetroArch"""
+        """Launch a game using RetroArch (with BIOS verification)"""
         if not game.get('is_downloaded'):
             self.log_message("Game is not downloaded")
             return
         
+        # Auto-download missing BIOS if manager is available
+        if self.retroarch.bios_manager:
+            platform = game.get('platform')
+            if platform:
+                normalized = self.retroarch.bios_manager.normalize_platform_name(platform)
+                present, missing = self.retroarch.bios_manager.check_platform_bios(normalized)
+                required_missing = [b for b in missing if not b.get('optional', False)]
+                
+                if required_missing:
+                    # Set RomM client and download silently
+                    self.retroarch.bios_manager.romm_client = self.romm_client
+                    self.retroarch.bios_manager.auto_download_missing_bios(normalized)
+
+    def _do_launch_game(self, game):
+        """Actually launch the game"""
         local_path = game.get('local_path')
         if not local_path or not Path(local_path).exists():
             self.log_message("Game file not found")
@@ -7760,11 +8150,46 @@ class SyncWindow(Gtk.ApplicationWindow):
         # Return True to prevent the window from being destroyed
         return True
 
-    def download_game(self, game, is_bulk_operation=False):     
-        """Download a single game from RomM and its saves (with throttled progress)"""
+    def download_game(self, game, is_bulk_operation=False):
+        """Download a single game from RomM and its saves (with BIOS check)"""
         if not self.romm_client or not self.romm_client.authenticated:
             self.log_message("Please connect to RomM first")
             return
+        
+        # Check BIOS requirements first if enabled
+        auto_download_setting = self.settings.get('BIOS', 'auto_download')
+        has_bios_manager = bool(self.retroarch.bios_manager)
+        
+        self.log_message(f"🔍 BIOS auto-download setting: {auto_download_setting}")
+        self.log_message(f"🔍 BIOS manager available: {has_bios_manager}")
+        
+        if (auto_download_setting == 'true' and has_bios_manager):
+            platform = game.get('platform')
+            if platform:
+                self.log_message(f"🔍 Checking BIOS for platform: {platform}")
+                normalized = self.retroarch.bios_manager.normalize_platform_name(platform)
+                self.log_message(f"🔍 Normalized platform: {normalized}")
+                
+                present, missing = self.retroarch.bios_manager.check_platform_bios(normalized)
+                required_missing = [b for b in missing if not b.get('optional', False)]
+                
+                self.log_message(f"🔍 Required missing BIOS: {len(required_missing)}")
+                
+                if required_missing:
+                    self.log_message(f"📋 Auto-downloading BIOS for {platform}...")
+                    
+                    # Set RomM client
+                    self.retroarch.bios_manager.romm_client = self.romm_client
+                    
+                    # Download all missing BIOS for this platform
+                    if self.retroarch.bios_manager.auto_download_missing_bios(normalized):
+                        self.log_message(f"✅ BIOS ready for {platform}")
+                    else:
+                        self.log_message(f"⚠️ Some BIOS files unavailable for {platform}")
+                else:
+                    self.log_message(f"✅ All required BIOS already present for {platform}")
+        else:
+            self.log_message(f"⚠️ BIOS auto-download disabled or manager unavailable")
         
         def download():
             try:

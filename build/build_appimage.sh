@@ -10,7 +10,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 echo "📁 Project root: $PROJECT_ROOT"
 
 # Add version variable at the top
-VERSION="1.1.0"
+VERSION="1.1.0-test"
 APPIMAGE_NAME="RomM-RetroArch-Sync-v${VERSION}.AppImage"
 
 # Define paths
@@ -50,9 +50,10 @@ mkdir -p "$APPDIR/usr/share/metainfo"
 echo "🧹 Cleaning git metadata from AppDir..."
 find "$APPDIR" -name ".git*" -type f -delete 2>/dev/null || true
 
-# Copy main application
-echo "📋 Copying main application..."
-cp "$SOURCE_APP" "$APPDIR/usr/bin/"
+# Copy application
+echo "📋 Copying application files..."
+cp "$PROJECT_ROOT"/src/*.py "$APPDIR/usr/bin/"
+echo "✅ All Python modules bundled"
 
 # Copy Decky plugin if it exists
 # echo "📱 Checking for Decky plugin..."
