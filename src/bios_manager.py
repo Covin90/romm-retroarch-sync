@@ -418,88 +418,92 @@ class BiosManager:
         return status
     
     def download_bios_from_romm(self, platform_name, bios_filename):
-        """Download a specific BIOS file from RomM's firmware API"""
-        self.log(f"🔍 DEBUG: Download target directory: {self.system_dir}")
-        
-        if not self.romm_client or not self.romm_client.authenticated:
-            self.log("❌ Not connected to RomM")
-            return False
-        
-        if not self.system_dir:
-            self.log("❌ No system directory found")
-            return False
-        
-        try:
-            from urllib.parse import urljoin
+            """Download a specific BIOS file from RomM's firmware API"""
+            self.log(f"🔍 DEBUG: Download target directory: {self.system_dir}")
             
-            # Get platforms to find firmware
-            platforms_response = self.romm_client.session.get(
-                urljoin(self.romm_client.base_url, '/api/platforms'),
-                timeout=10
-            )
-            
-            if platforms_response.status_code != 200:
+            if not self.romm_client or not self.romm_client.authenticated:
+                self.log("❌ Not connected to RomM")
                 return False
             
-            platforms = platforms_response.json()
+            if not self.system_dir:
+                self.log("❌ No system directory found")
+                return False
             
-            # Map our platform names to RomM platform names
-            platform_mappings = {
-                'Sony - PlayStation': ['PlayStation', 'Sony PlayStation', 'PS1', 'PSX'],
-                'Nintendo - Game Boy Advance': ['Game Boy Advance', 'GBA', 'Nintendo Game Boy Advance'],
-                'Nintendo - Game Boy': ['Game Boy', 'GB', 'Nintendo Game Boy'],
-                'Nintendo - Game Boy Color': ['Game Boy Color', 'GBC', 'Nintendo Game Boy Color']
-            }
-            
-            possible_names = platform_mappings.get(platform_name, [platform_name])
-            
-            # Find matching platform and BIOS file
-            for platform in platforms:
-                platform_name_check = platform.get('name', '')
+            try:
+                from urllib.parse import urljoin
                 
-                if any(name.lower() in platform_name_check.lower() or 
-                    platform_name_check.lower() in name.lower() 
-                    for name in possible_names):
+                # This part of your code is correct
+                platforms_response = self.romm_client.session.get(
+                    urljoin(self.romm_client.base_url, '/api/platforms'),
+                    timeout=10
+                )
+                
+                if platforms_response.status_code != 200:
+                    self.log("❌ Failed to get platforms list from RomM.")
+                    return False
+                
+                platforms = platforms_response.json()
+                
+                platform_mappings = {
+                    'Sony - PlayStation': ['PlayStation', 'Sony PlayStation', 'PS1', 'PSX'],
+                    'Nintendo - Game Boy Advance': ['Game Boy Advance', 'GBA', 'Nintendo Game Boy Advance'],
+                    'Nintendo - Game Boy': ['Game Boy', 'GB', 'Nintendo Game Boy'],
+                    'Nintendo - Game Boy Color': ['Game Boy Color', 'GBC', 'Nintendo Game Boy Color']
+                }
+                
+                possible_names = platform_mappings.get(platform_name, [platform_name])
+                
+                for platform in platforms:
+                    platform_name_check = platform.get('name', '')
                     
-                    self.log(f"🔍 Found platform: {platform_name_check}")
-                    firmware_list = platform.get('firmware', [])
-                    
-                    for firmware in firmware_list:
-                        if firmware.get('file_name') == bios_filename:
-                            firmware_id = firmware.get('id')
-                            self.log(f"🔍 Found BIOS: {bios_filename} (ID: {firmware_id})")
-                            
-                            # Download using firmware ID (direct endpoint)
-                            download_url = f'/api/firmware/{firmware_id}'
-                            response = self.romm_client.session.get(
-                                urljoin(self.romm_client.base_url, download_url),
-                                stream=True,
-                                timeout=30
-                            )
-                            
-                            if response.status_code == 200:
-                                download_path = self.system_dir / bios_filename
+                    if any(name.lower() in platform_name_check.lower() or 
+                        platform_name_check.lower() in name.lower() 
+                        for name in possible_names):
+                        
+                        self.log(f"🔍 Found platform: {platform_name_check}")
+                        firmware_list = platform.get('firmware', [])
+                        
+                        for firmware in firmware_list:
+                            if firmware.get('file_name') == bios_filename:
+                                firmware_id = firmware.get('id')
+                                self.log(f"🔍 Found BIOS: {bios_filename} (ID: {firmware_id})")
                                 
-                                with open(download_path, 'wb') as f:
-                                    for chunk in response.iter_content(chunk_size=8192):
-                                        if chunk:
+                                # Construct the download URL using the firmware ID and filename
+                                download_url = f'/api/firmware/{firmware_id}/content/{bios_filename}'
+                                self.log(f"🔍 DEBUG: Constructed download URL: {urljoin(self.romm_client.base_url, download_url)}")
+
+                                # STEP 1: Download the file from the constructed URL
+                                file_response = self.romm_client.session.get(
+                                    urljoin(self.romm_client.base_url, download_url),
+                                    stream=True,
+                                    timeout=60  # Increased timeout for larger files
+                                )
+                                
+                                # STEP 2: Check for a successful response and write the file
+                                if file_response.status_code == 200:
+                                    download_path = self.system_dir / bios_filename
+                                    
+                                    with open(download_path, 'wb') as f:
+                                        for chunk in file_response.iter_content(chunk_size=8192):
                                             f.write(chunk)
-                                
-                                self.log(f"✅ Downloaded {bios_filename}")
-                                return True
-                            else:
-                                self.log(f"❌ Download failed: HTTP {response.status_code}")
-                                return False
-                    
-                    self.log(f"❌ {bios_filename} not in {platform_name_check} firmware list")
-                    break
-            
-            self.log(f"❌ Platform {platform_name} not found on server")
-            return False
-            
-        except Exception as e:
-            self.log(f"❌ Download error: {e}")
-            return False
+                                    
+                                    self.log(f"✅ Downloaded {bios_filename}")
+                                    return True
+                                else:
+                                    self.log(f"❌ Download failed with status code: {file_response.status_code}")
+                                    return False
+                        
+                        self.log(f"❌ {bios_filename} not found in {platform_name_check} firmware list on server.")
+                        break # Stop searching after finding the correct platform
+                
+                self.log(f"❌ Platform matching '{platform_name}' not found on server.")
+                return False
+                
+            except Exception as e:
+                self.log(f"❌ Download error: {e}")
+                import traceback
+                self.log(traceback.format_exc()) # More detailed error for debugging
+                return False
     
     def search_romm_for_bios(self, bios_filename):
         """Search RomM for a BIOS file"""

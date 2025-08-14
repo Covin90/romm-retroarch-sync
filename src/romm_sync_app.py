@@ -1085,6 +1085,15 @@ class EnhancedLibrarySection:
             if isinstance(platform_item, PlatformItem):
                 self.filtered_games.extend(platform_item.games)
 
+    def has_active_downloads(self):
+        """Check if any downloads are currently in progress"""
+        if not hasattr(self.parent, 'download_progress'):
+            return False
+        return any(
+            progress.get('downloading', False) 
+            for progress in self.parent.download_progress.values()
+        )
+
     def cache_collections_data(self):
         """Cache collections data without switching view"""
         if not (self.parent.romm_client and self.parent.romm_client.authenticated):
@@ -1293,6 +1302,9 @@ class EnhancedLibrarySection:
 
     def update_game_progress(self, rom_id, progress_info):
         """Update progress for a specific game"""
+        print(f"🔍 DEBUG: update_game_progress called for ROM {rom_id}")
+        print(f"🔍 DEBUG: Progress info: {progress_info}")
+        
         if progress_info:
             self.game_progress[rom_id] = progress_info
         elif rom_id in self.game_progress:
@@ -1302,34 +1314,27 @@ class EnhancedLibrarySection:
         self._update_game_status_display(rom_id)
         
     def _update_game_status_display(self, rom_id):
-        """Start polling for progress updates without items_changed flicker"""
-        # Find the game cells and start polling for this ROM
-        if not hasattr(self, '_polling_roms'):
-            self._polling_roms = set()
+        """Update game status display by directly updating cells"""
+        print(f"🔍 DEBUG: _update_game_status_display called for ROM {rom_id}")
         
-        if rom_id not in self._polling_roms:
-            self._polling_roms.add(rom_id)
-            
-            def poll_progress():
-                progress_info = self.game_progress.get(rom_id)
-                if not progress_info or not progress_info.get('downloading'):
-                    self._polling_roms.discard(rom_id)
-                    return False  # Stop polling
-                
-                # Force a minimal refresh by updating a dummy property
-                model = self.library_model.tree_model
-                for i in range(model.get_n_items() if model else 0):
-                    tree_item = model.get_item(i)
-                    if tree_item and tree_item.get_depth() == 1:  # Game level
-                        item = tree_item.get_item()
-                        if isinstance(item, GameItem) and item.game_data.get('rom_id') == rom_id:
-                            # Trigger a minimal update
-                            item.notify('name')  # This forces cell refresh without items_changed
-                            break
-                
-                return True  # Continue polling
-            
-            GLib.timeout_add(200, poll_progress)
+        # Find and update the GameItem cells directly
+        def update_cells():
+            model = self.library_model.tree_model
+            for i in range(model.get_n_items() if model else 0):
+                tree_item = model.get_item(i)
+                if tree_item and tree_item.get_depth() == 1:  # Game level
+                    item = tree_item.get_item()
+                    if isinstance(item, GameItem) and item.game_data.get('rom_id') == rom_id:
+                        print(f"🔍 DEBUG: Found GameItem, forcing cell update")
+                        # Force cells to update by emitting property changes
+                        item.notify('is-downloaded')
+                        item.notify('size-text') 
+                        # Also trigger the name signal which cells are connected to
+                        item.notify('name')
+                        break
+            return False
+        
+        GLib.idle_add(update_cells)
 
     def on_open_in_romm_clicked(self, button):
         """Opens the selected game or platform page in the default web browser."""
@@ -1512,15 +1517,42 @@ class EnhancedLibrarySection:
     def get_selected_games(self):
         """Get list of selected game data (not GameItem objects)"""
         selected_games = []
-        # Use filtered games instead of all available games
-        games_to_check = self.filtered_games if hasattr(self, 'filtered_games') else self.parent.available_games
+        
+        # Use the correct games source based on view mode
+        if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+            # In collection mode, use collections_games
+            games_to_check = getattr(self, 'collections_games', [])
+        else:
+            # In platform mode, use filtered games
+            games_to_check = self.filtered_games if hasattr(self, 'filtered_games') else self.parent.available_games
+        
+        print(f"🔍 get_selected_games DEBUG:")
+        print(f"  View mode: {getattr(self, 'current_view_mode', 'unknown')}")
+        print(f"  Games to check: {len(games_to_check)}")
+        print(f"  Selected ROM IDs: {len(self.selected_rom_ids)}")
+        print(f"  Selected game keys: {len(self.selected_game_keys)} - {list(self.selected_game_keys)}")
         
         for game in games_to_check:
             identifier_type, identifier_value = self.get_game_identifier(game)
-            if identifier_type == 'rom_id' and identifier_value in self.selected_rom_ids:
-                selected_games.append(game)
-            elif identifier_type == 'game_key' and identifier_value in self.selected_game_keys:
-                selected_games.append(game)
+            
+            # Add collection mode handling
+            if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+                # Check collection keys
+                rom_id = game.get('rom_id')
+                collection_name = game.get('collection', '')
+                if rom_id and collection_name:
+                    collection_key = f"collection:{rom_id}:{collection_name}"
+                    if collection_key in self.selected_game_keys:
+                        selected_games.append(game)
+                        print(f"  ✅ Found selected game: {game.get('name')} (collection key: {collection_key})")
+            else:
+                # Standard platform mode logic
+                if identifier_type == 'rom_id' and identifier_value in self.selected_rom_ids:
+                    selected_games.append(game)
+                elif identifier_type == 'game_key' and identifier_value in self.selected_game_keys:
+                    selected_games.append(game)
+        
+        print(f"  📊 Final selected games: {len(selected_games)}")
         return selected_games
 
     def get_game_identifier(self, game_data):
@@ -1953,9 +1985,23 @@ class EnhancedLibrarySection:
             # This means when platform_item.notify('name') is called, the label will automatically update
             item.bind_property('name', label, 'label', GObject.BindingFlags.SYNC_CREATE)
         else:
-            icon.set_from_icon_name("object-select-symbolic" if item.is_downloaded else "folder-download-symbolic")
-            # For games, we can still set directly since they update via items_changed
-            label.set_text(item.name)
+            # For games, set up dynamic icon updates
+            def update_icon_and_name(*args):
+                # Update icon based on download status
+                if item.game_data.get('is_downloaded', False):
+                    icon.set_from_icon_name("object-select-symbolic")
+                else:
+                    icon.set_from_icon_name("folder-download-symbolic")
+                
+                # Update label
+                label.set_text(item.name)
+            
+            # Connect to property changes that might affect the icon
+            item.connect('notify::name', update_icon_and_name)
+            item.connect('notify::is-downloaded', update_icon_and_name)
+            
+            # Initial update
+            update_icon_and_name()
 
     def bind_status_cell(self, factory, list_item):
         """Show percentage during downloads, normal status otherwise"""
@@ -1969,17 +2015,24 @@ class EnhancedLibrarySection:
             # Connect to name property changes to update status
             def update_status(*args):
                 rom_id = item.game_data.get('rom_id')
-                progress_info = self.game_progress.get(rom_id) if rom_id else None
+                progress_info = self.parent.download_progress.get(rom_id) if rom_id else None
+                
+                print(f"🔍 DEBUG: update_status called for ROM {rom_id}, progress: {progress_info}")
                 
                 if progress_info and progress_info.get('downloading'):
                     progress = progress_info.get('progress', 0.0)
                     label.set_text(f"{progress*100:.0f}%")
+                    print(f"🔍 DEBUG: Status set to {progress*100:.0f}%")
                 elif progress_info and progress_info.get('completed'):
                     label.set_text("✅")
+                    print(f"🔍 DEBUG: Status set to completed")
                 elif progress_info and progress_info.get('failed'):
                     label.set_text("❌")
+                    print(f"🔍 DEBUG: Status set to failed")
                 else:
-                    label.set_text("✅" if item.is_downloaded else "⬇️")
+                    status = "✅" if item.is_downloaded else "⬇️"
+                    label.set_text(status)
+                    print(f"🔍 DEBUG: Status set to default: {status} (downloaded: {item.is_downloaded})")
             
             item.connect('notify::name', update_status)
             update_status()  # Initial update
@@ -1995,12 +2048,14 @@ class EnhancedLibrarySection:
         elif isinstance(item, GameItem):
             def update_size(*args):
                 rom_id = item.game_data.get('rom_id')
-                progress_info = self.game_progress.get(rom_id) if rom_id else None
+                progress_info = self.parent.download_progress.get(rom_id) if rom_id else None
+                
+                print(f"🔍 DEBUG: update_size called for ROM {rom_id}, progress: {progress_info}")
                 
                 if progress_info and progress_info.get('downloading'):
                     downloaded = progress_info.get('downloaded', 0)
                     total = progress_info.get('total', 0)
-                    speed = progress_info.get('speed', 0)  # Add this line
+                    speed = progress_info.get('speed', 0)
                     
                     def format_size_compact(bytes_val):
                         if bytes_val >= 1024**3:
@@ -2015,14 +2070,18 @@ class EnhancedLibrarySection:
                     else:
                         size_text = format_size_compact(downloaded)
                     
-                    # Add speed display back
                     if speed > 0:
                         speed_str = format_size_compact(speed)
-                        label.set_text(f"{size_text} @{speed_str}/s")
+                        final_text = f"{size_text} @{speed_str}/s"
                     else:
-                        label.set_text(f"{size_text} ...")
+                        final_text = f"{size_text} ..."
+                        
+                    label.set_text(final_text)
+                    print(f"🔍 DEBUG: Size set to: {final_text}")
                 else:
-                    label.set_text(item.size_text)
+                    size_text = item.size_text
+                    label.set_text(size_text)
+                    print(f"🔍 DEBUG: Size set to default: {size_text}")
             
             item.connect('notify::name', update_size)
             update_size()  # Initial update
@@ -2150,37 +2209,44 @@ class EnhancedLibrarySection:
         if getattr(self, '_selection_blocked', False):
             return
         
+        print(f"🔍 update_action_buttons: Getting selected games...")
+        selected_games = self.get_selected_games()  # This should trigger our debug
+        print(f"🔍 update_action_buttons: Got {len(selected_games)} selected games")
+        
+        # DEBUG: Show current selection state
+        print(f"🔍 DEBUG update_action_buttons called")
+        print(f"🔍 DEBUG   selected_rom_ids: {len(self.selected_rom_ids)} items")
+        print(f"🔍 DEBUG   selected_game_keys: {len(self.selected_game_keys)} items")
+        print(f"🔍 DEBUG   selected_checkboxes: {len(self.selected_checkboxes)} items")
+        print(f"🔍 DEBUG   selected_game: {self.selected_game.get('name') if self.selected_game else None}")
+        
         is_connected = self.parent.romm_client and self.parent.romm_client.authenticated
         
-        # Check for checkbox selections first (to determine priority)
+        # Priority 2: Check for checkbox selections first (to determine priority)
         selected_games = []
-        for game in self.parent.available_games:
-            identifier_type, identifier_value = self.get_game_identifier(game)
-            if identifier_type == 'rom_id' and identifier_value in self.selected_rom_ids:
-                selected_games.append(game)
-            elif identifier_type == 'game_key' and identifier_value in self.selected_game_keys:
-                selected_games.append(game)
-        
-        # Priority 1: Check for single row selection (game or platform) 
-        # BUT only if there are no checkbox selections
-        if self.selected_game and not selected_games:
-            # Single game row selected with no checkbox selections
-            game = self.selected_game
-            is_downloaded = game.get('is_downloaded', False)
-            
-            if is_downloaded:
-                self.action_button.set_label("Launch")
-                self.action_button.remove_css_class('warning')
-                self.action_button.add_css_class('suggested-action')
+
+        # FIX: Use correct games source based on view mode
+        if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+            games_to_check = getattr(self, 'collections_games', [])
+        else:
+            games_to_check = self.parent.available_games
+
+        for game in games_to_check:  # CHANGED: was self.parent.available_games
+            # Handle collection mode differently
+            if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+                rom_id = game.get('rom_id')
+                collection_name = game.get('collection', '')
+                if rom_id and collection_name:
+                    collection_key = f"collection:{rom_id}:{collection_name}"
+                    if collection_key in self.selected_game_keys:
+                        selected_games.append(game)
             else:
-                self.action_button.set_label("Download")
-                self.action_button.remove_css_class('suggested-action')
-                self.action_button.add_css_class('warning')
-            
-            self.action_button.set_sensitive(True)
-            self.delete_button.set_sensitive(is_downloaded)
-            self.open_in_romm_button.set_sensitive(is_connected and game.get('rom_id'))
-            return
+                # Standard platform mode logic
+                identifier_type, identifier_value = self.get_game_identifier(game)
+                if identifier_type == 'rom_id' and identifier_value in self.selected_rom_ids:
+                    selected_games.append(game)
+                elif identifier_type == 'game_key' and identifier_value in self.selected_game_keys:
+                    selected_games.append(game)
         
         # Priority 2: Handle checkbox selections (takes precedence when present)
         if selected_games:
@@ -2191,6 +2257,17 @@ class EnhancedLibrarySection:
                 # Single checkbox selection
                 game = selected_games[0]
                 is_downloaded = game.get('is_downloaded', False)
+                
+                # ADD THIS CHECK for collections view:
+                if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+                    # In collections, ensure we check the actual download status
+                    rom_id = game.get('rom_id')
+                    if rom_id:
+                        # Cross-reference with main games list for accurate download status
+                        for main_game in self.parent.available_games:
+                            if main_game.get('rom_id') == rom_id:
+                                is_downloaded = main_game.get('is_downloaded', False)
+                                break
                 
                 if is_downloaded:
                     self.action_button.set_label("Launch")
@@ -2306,26 +2383,41 @@ class EnhancedLibrarySection:
 
         # Count selected games using the same logic as action buttons
         selected_count = 0
-        for game in self.parent.available_games:
-            identifier_type, identifier_value = self.get_game_identifier(game)
-            if identifier_type == 'rom_id' and identifier_value in self.selected_rom_ids:
-                selected_count += 1
-            elif identifier_type == 'game_key' and identifier_value in self.selected_game_keys:
-                selected_count += 1
         
+        # FIX: Use correct games source based on view mode
+        if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+            games_to_check = getattr(self, 'collections_games', [])
+        else:
+            games_to_check = self.parent.available_games
+        
+        for game in games_to_check:  # CHANGED: was self.parent.available_games
+            # Handle collection mode differently
+            if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+                rom_id = game.get('rom_id')
+                collection_name = game.get('collection', '')
+                if rom_id and collection_name:
+                    collection_key = f"collection:{rom_id}:{collection_name}"
+                    if collection_key in self.selected_game_keys:
+                        selected_count += 1
+            else:
+                # Standard platform mode logic
+                identifier_type, identifier_value = self.get_game_identifier(game)
+                if identifier_type == 'rom_id' and identifier_value in self.selected_rom_ids:
+                    selected_count += 1
+                elif identifier_type == 'game_key' and identifier_value in self.selected_game_keys:
+                    selected_count += 1
+        
+        # Rest of the method unchanged...
         if self.selected_game and selected_count == 0:
-            # Single row selection, no checkboxes
             game_name = self.selected_game.get('name', 'Unknown')
             self.selection_label.set_text(f"{game_name}")
         elif selected_count > 0:
-            # Checkbox selections
             if self.selected_game:
                 game_name = self.selected_game.get('name', 'Unknown')
                 self.selection_label.set_text(f"Row: {game_name} | {selected_count} checked")
             else:
                 self.selection_label.set_text(f"{selected_count} games checked")
         else:
-            # No selection
             self.selection_label.set_text("No selection")
 
     def on_search_changed(self, search_entry):
@@ -2420,15 +2512,30 @@ class EnhancedLibrarySection:
                 self.parent.refresh_games_list()
     
     def on_action_clicked(self, button):
-            """Handle main action button (download/launch) for single or multiple items"""
-            selected_games = []
-            
-            # Priority 1: If there's a row selection (single game clicked), use that exclusively
-            if self.selected_game:
-                selected_games = [self.selected_game]
+        """Handle main action button (download/launch) for single or multiple items"""
+        selected_games = []
+        
+        # Priority 1: If there's a row selection (single game clicked), use that exclusively
+        if self.selected_game:
+            selected_games = [self.selected_game]
+        else:
+            # FIX: Use correct games source based on view mode
+            if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+                games_to_check = getattr(self, 'collections_games', [])
             else:
-                # Priority 2: Use ROM ID/game key tracking (same as update_action_buttons)
-                for game in self.parent.available_games:
+                games_to_check = self.parent.available_games
+            
+            for game in games_to_check:  # CHANGED: was self.parent.available_games
+                # Handle collection mode differently
+                if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+                    rom_id = game.get('rom_id')
+                    collection_name = game.get('collection', '')
+                    if rom_id and collection_name:
+                        collection_key = f"collection:{rom_id}:{collection_name}"
+                        if collection_key in self.selected_game_keys:
+                            selected_games.append(game)
+                else:
+                    # Standard platform mode logic
                     identifier_type, identifier_value = self.get_game_identifier(game)
                     if identifier_type == 'rom_id' and identifier_value in self.selected_rom_ids:
                         selected_games.append(game)
@@ -2471,13 +2578,28 @@ class EnhancedLibrarySection:
         if self.selected_game:
             selected_games = [self.selected_game]
         else:
-            # Priority 2: Use ROM ID/game key tracking (same as update_action_buttons)
-            for game in self.parent.available_games:
-                identifier_type, identifier_value = self.get_game_identifier(game)
-                if identifier_type == 'rom_id' and identifier_value in self.selected_rom_ids:
-                    selected_games.append(game)
-                elif identifier_type == 'game_key' and identifier_value in self.selected_game_keys:
-                    selected_games.append(game)
+            # FIX: Use correct games source based on view mode
+            if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+                games_to_check = getattr(self, 'collections_games', [])
+            else:
+                games_to_check = self.parent.available_games
+            
+            for game in games_to_check:  # CHANGED: was self.parent.available_games
+                # Handle collection mode differently
+                if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+                    rom_id = game.get('rom_id')
+                    collection_name = game.get('collection', '')
+                    if rom_id and collection_name:
+                        collection_key = f"collection:{rom_id}:{collection_name}"
+                        if collection_key in self.selected_game_keys:
+                            selected_games.append(game)
+                else:
+                    # Standard platform mode logic
+                    identifier_type, identifier_value = self.get_game_identifier(game)
+                    if identifier_type == 'rom_id' and identifier_value in self.selected_rom_ids:
+                        selected_games.append(game)
+                    elif identifier_type == 'game_key' and identifier_value in self.selected_game_keys:
+                        selected_games.append(game)
         
         downloaded_games = [g for g in selected_games if g.get('is_downloaded', False)]
         
@@ -2632,18 +2754,50 @@ class EnhancedLibrarySection:
             checkbox.tree_item = tree_item
             checkbox.is_platform = False
             
-            # Check if this game is selected using dual tracking
+            # Check if this game is selected using collection-aware tracking
             game_data = item.game_data
-            identifier_type, identifier_value = self.get_game_identifier(game_data)
             
-            should_be_active = False  # Define the variable first
-            if identifier_type == 'rom_id':
-                should_be_active = identifier_value in self.selected_rom_ids
-            elif identifier_type == 'game_key':
-                should_be_active = identifier_value in self.selected_game_keys
+            should_be_active = False
+            if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+                # Collections view: use collection-aware identifier
+                rom_id = game_data.get('rom_id')
+                collection_name = game_data.get('collection', '')
+                game_name = game_data.get('name', 'NO_NAME')
+                
+                if rom_id and collection_name:
+                    collection_key = f"collection:{rom_id}:{collection_name}"
+                    should_be_active = collection_key in self.selected_game_keys
+                    print(f"🔍 BIND: {game_name} | Key: {collection_key} | In selected: {should_be_active}")
+                    print(f"🔍 BIND: Available keys: {list(self.selected_game_keys)}")
+                else:
+                    # Fallback for games without ROM ID
+                    name_key = f"collection:{game_data.get('name', '')}:{game_data.get('platform', '')}:{collection_name}"
+                    should_be_active = name_key in self.selected_game_keys
+                    print(f"🔍 BIND: {game_name} | Name Key: {name_key} | In selected: {should_be_active}")
+            else:
+                # Platform view: use standard identifier
+                identifier_type, identifier_value = self.get_game_identifier(game_data)
+                if identifier_type == 'rom_id':
+                    should_be_active = identifier_value in self.selected_rom_ids
+                elif identifier_type == 'game_key':
+                    should_be_active = identifier_value in self.selected_game_keys
             
             checkbox.set_active(should_be_active)
 
+            # Force immediate visual update for collections
+            if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+                def force_checkbox_update():
+                    try:
+                        checkbox._updating = True
+                        checkbox.set_active(should_be_active)  
+                        checkbox._updating = False
+                        return False
+                    except:
+                        return False
+                
+                GLib.timeout_add(1, force_checkbox_update)
+
+            print(f"🔍 BIND: Set {game_name} checkbox to {should_be_active}")
             
         elif isinstance(item, PlatformItem):
             checkbox.set_visible(True)
@@ -2655,25 +2809,49 @@ class EnhancedLibrarySection:
             total_games = len(item.games)
             selected_games = 0
             
+            print(f"🔍 PLATFORM BIND: {item.platform_name}")
+            print(f"  🔑 All selected keys: {list(self.selected_game_keys)}")
+
             for game in item.games:
-                identifier_type, identifier_value = self.get_game_identifier(game)
-                if identifier_type == 'rom_id' and identifier_value in self.selected_rom_ids:
-                    selected_games += 1
-                elif identifier_type == 'game_key' and identifier_value in self.selected_game_keys:
-                    selected_games += 1
+                if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+                    # Collections view: use collection-aware identifier
+                    rom_id = game.get('rom_id')
+                    collection_name = game.get('collection', item.platform_name)
+                    if rom_id and collection_name:
+                        collection_key = f"collection:{rom_id}:{collection_name}"
+                        is_selected = collection_key in self.selected_game_keys
+                        print(f"  🎯 Game: {game.get('name')} | Key: {collection_key} | Selected: {is_selected}")
+                        if is_selected:
+                            selected_games += 1
+                    else:
+                        name_key = f"collection:{game.get('name', '')}:{game.get('platform', '')}:{collection_name}"
+                        is_selected = name_key in self.selected_game_keys
+                        print(f"  🎯 Game: {game.get('name')} | Name Key: {name_key} | Selected: {is_selected}")
+                        if is_selected:
+                            selected_games += 1
+                else:
+                    # Platform view: use standard identifier
+                    identifier_type, identifier_value = self.get_game_identifier(game)
+                    if identifier_type == 'rom_id' and identifier_value in self.selected_rom_ids:
+                        selected_games += 1
+                    elif identifier_type == 'game_key' and identifier_value in self.selected_game_keys:
+                        selected_games += 1
             
+            print(f"  📊 Platform checkbox: {selected_games}/{total_games} games selected")
+            
+            # Set platform checkbox state
             if selected_games == 0:
-                # No games selected
                 checkbox.set_active(False)
                 checkbox.set_inconsistent(False)
+                print(f"    -> Setting platform checkbox: UNCHECKED")
             elif selected_games == total_games and total_games > 0:
-                # All games selected
                 checkbox.set_active(True)
                 checkbox.set_inconsistent(False)
+                print(f"    -> Setting platform checkbox: CHECKED")
             else:
-                # Some games selected (partial)
                 checkbox.set_active(False)
                 checkbox.set_inconsistent(True)
+                print(f"    -> Setting platform checkbox: INCONSISTENT")
 
     def on_checkbox_toggled(self, checkbox):
         # Prevent recursive calls during updates
@@ -2683,64 +2861,171 @@ class EnhancedLibrarySection:
         if hasattr(checkbox, 'is_platform') and checkbox.is_platform:
             # Platform checkbox toggled
             platform_item = checkbox.platform_item
-            should_select = checkbox.get_active()
             
-            # If checkbox was inconsistent, clicking it should select all
+            # DEBUG: Initial state
+            print(f"🔍 DEBUG Platform checkbox clicked: {platform_item.platform_name}")
+            print(f"🔍 DEBUG Initial active: {checkbox.get_active()}, inconsistent: {checkbox.get_inconsistent()}")
+            
+            # Determine what the user wants based on current state
             if checkbox.get_inconsistent():
                 should_select = True
                 checkbox.set_inconsistent(False)
                 checkbox.set_active(True)
+                print(f"🔍 DEBUG Was inconsistent, now selecting all")
+            else:
+                should_select = checkbox.get_active()
+                print(f"🔍 DEBUG Normal toggle, should_select: {should_select}")
             
-            # Create unique identifiers for games (works with or without ROM IDs)
-            platform_game_keys = set()
-            for game in platform_item.games:
-                game_key = f"{game.get('name', '')}|{game.get('platform', '')}"
-                platform_game_keys.add(game_key)
+            # DEBUG: Show games in platform
+            print(f"🔍 DEBUG Games in platform: {len(platform_item.games)}")
             
-            # Update selections
+            # Collection/platform checkbox section:
             if should_select:
-                # Add all games in this platform
+                print(f"🔍 DEBUG SELECTING all games in {platform_item.platform_name}")
+                # Add all games in this platform/collection
                 for game in platform_item.games:
-                    identifier_type, identifier_value = self.get_game_identifier(game)
+                    game_name = game.get('name', 'NO_NAME')
+                    if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+                        # Collections logic...
+                        rom_id = game.get('rom_id')
+                        collection_name = game.get('collection', platform_item.platform_name)
+                        if rom_id:
+                            collection_key = f"collection:{rom_id}:{collection_name}"
+                            self.selected_game_keys.add(collection_key)
+                            print(f"🔍 DEBUG   Added collection key: {collection_key}")
+                        else:
+                            name_key = f"collection:{game.get('name', '')}:{game.get('platform', '')}:{collection_name}"
+                            self.selected_game_keys.add(name_key)
+                            print(f"🔍 DEBUG   Added name key: {name_key}")
+                    else:
+                        # Platform view: use standard identifier
+                        identifier_type, identifier_value = self.get_game_identifier(game)
+                        if identifier_type == 'rom_id':
+                            self.selected_rom_ids.add(identifier_value)
+                            print(f"🔍 DEBUG   Added ROM ID: {identifier_value} for {game_name}")
+                        else:
+                            self.selected_game_keys.add(identifier_value)
+                            print(f"🔍 DEBUG   Added game key: {identifier_value} for {game_name}")
+            else:
+                print(f"🔍 DEBUG DESELECTING all games in {platform_item.platform_name}")
+                # Remove logic - same but with discard()
+                for game in platform_item.games:
+                    if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+                        rom_id = game.get('rom_id')
+                        collection_name = game.get('collection', platform_item.platform_name)
+                        if rom_id:
+                            collection_key = f"collection:{rom_id}:{collection_name}"
+                            self.selected_game_keys.discard(collection_key)
+                        else:
+                            name_key = f"collection:{game.get('name', '')}:{game.get('platform', '')}:{collection_name}"
+                            self.selected_game_keys.discard(name_key)
+                    else:
+                        identifier_type, identifier_value = self.get_game_identifier(game)
+                        if identifier_type == 'rom_id':
+                            self.selected_rom_ids.discard(identifier_value)
+                        else:
+                            self.selected_game_keys.discard(identifier_value)
+
+            print(f"🔍 DEBUG Final checkbox state: active={checkbox.get_active()}, inconsistent={checkbox.get_inconsistent()}")
+            print(f"🔍 DEBUG Selected ROM IDs count: {len(self.selected_rom_ids)}")
+            print(f"🔍 DEBUG Selected game keys count: {len(self.selected_game_keys)}")
+            
+            # CRITICAL: Sync the selected_checkboxes set with the new selections
+            self.sync_selected_checkboxes()
+
+            # Update button states and selection label
+            self.update_action_buttons()
+            self.update_selection_label()
+
+            # ADD THIS: Prevent platform checkbox from being reset during rebind
+            if hasattr(checkbox, 'is_platform') and checkbox.is_platform and should_select:
+                def preserve_platform_checkbox():
+                    try:
+                        # Force the platform checkbox to stay checked
+                        checkbox._updating = True
+                        checkbox.set_active(True)
+                        checkbox.set_inconsistent(False)
+                        checkbox._updating = False
+                        return False
+                    except:
+                        return False
+                
+                # Schedule this to run after any rebinding
+                GLib.timeout_add(10, preserve_platform_checkbox)
+                GLib.timeout_add(50, preserve_platform_checkbox)  # Double-check
+
+            # IMMEDIATE UI REFRESH for collection checkboxes
+            if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+                # Force immediate checkbox update for collections
+                def force_collection_checkbox_sync():
+                    try:
+                        model = self.library_model.tree_model
+                        for i in range(model.get_n_items()):
+                            tree_item = model.get_item(i)
+                            if tree_item and tree_item.get_depth() == 1:  # Game level
+                                # Trigger items_changed for this specific item to refresh its checkbox
+                                parent_tree_item = tree_item.get_parent()
+                                if parent_tree_item:
+                                    parent_platform_item = parent_tree_item.get_item()
+                                    if isinstance(parent_platform_item, PlatformItem):
+                                        if parent_platform_item.platform_name == platform_item.platform_name:
+                                            # Force this game checkbox to refresh
+                                            platform_item.child_store.items_changed(
+                                                i - parent_tree_item.get_position() - 1, 1, 1
+                                            )
+                        return False
+                    except Exception as e:
+                        print(f"Collection checkbox sync error: {e}")
+                        return False
+                
+                GLib.timeout_add(10, force_collection_checkbox_sync)
+            else:
+                # Standard platform checkbox sync
+                GLib.idle_add(self.force_checkbox_sync)
+
+            GLib.idle_add(self.refresh_all_platform_checkboxes)
+                            
+        elif hasattr(checkbox, 'game_item'):
+            # Game checkbox toggled
+            game_data = checkbox.game_item.game_data
+            
+            if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+                # Collections view: use collection-aware identifier
+                rom_id = game_data.get('rom_id')
+                collection_name = game_data.get('collection', '')
+                
+                if checkbox.get_active():
+                    if rom_id and collection_name:
+                        collection_key = f"collection:{rom_id}:{collection_name}"
+                        self.selected_game_keys.add(collection_key)
+                    else:
+                        name_key = f"collection:{game_data.get('name', '')}:{game_data.get('platform', '')}:{collection_name}"
+                        self.selected_game_keys.add(name_key)
+                    self.selected_checkboxes.add(checkbox.game_item)
+                else:
+                    if rom_id and collection_name:
+                        collection_key = f"collection:{rom_id}:{collection_name}"
+                        self.selected_game_keys.discard(collection_key)
+                    else:
+                        name_key = f"collection:{game_data.get('name', '')}:{game_data.get('platform', '')}:{collection_name}"
+                        self.selected_game_keys.discard(name_key)
+                    self.selected_checkboxes.discard(checkbox.game_item)
+            else:
+                # Platform view: use standard identifier
+                identifier_type, identifier_value = self.get_game_identifier(game_data)
+                
+                if checkbox.get_active():
                     if identifier_type == 'rom_id':
                         self.selected_rom_ids.add(identifier_value)
                     else:
                         self.selected_game_keys.add(identifier_value)
-            else:
-                # Remove all games in this platform
-                for game in platform_item.games:
-                    identifier_type, identifier_value = self.get_game_identifier(game)
+                    self.selected_checkboxes.add(checkbox.game_item)
+                else:
                     if identifier_type == 'rom_id':
                         self.selected_rom_ids.discard(identifier_value)
                     else:
                         self.selected_game_keys.discard(identifier_value)
-            
-            # CRITICAL: Sync the selected_checkboxes set with the new selections
-            self.sync_selected_checkboxes()
-            
-            # Directly update visible game checkboxes without rebuilding
-            self._update_visible_game_checkboxes(platform_game_keys, should_select)
-
-            # Force sync in case direct update didn't work
-            GLib.idle_add(self.force_checkbox_sync)
-                            
-        elif hasattr(checkbox, 'game_item'):
-            # Game checkbox toggled - handle both ROM ID and non-ROM ID games
-            game_data = checkbox.game_item.game_data
-            identifier_type, identifier_value = self.get_game_identifier(game_data)
-            
-            if checkbox.get_active():
-                if identifier_type == 'rom_id':
-                    self.selected_rom_ids.add(identifier_value)
-                else:
-                    self.selected_game_keys.add(identifier_value)
-                self.selected_checkboxes.add(checkbox.game_item)
-            else:
-                if identifier_type == 'rom_id':
-                    self.selected_rom_ids.discard(identifier_value)
-                else:
-                    self.selected_game_keys.discard(identifier_value)
-                self.selected_checkboxes.discard(checkbox.game_item)
+                    self.selected_checkboxes.discard(checkbox.game_item)
             
             # Update parent platform checkbox state
             self.update_platform_checkbox_for_game(checkbox.game_item.game_data)
@@ -3526,7 +3811,7 @@ class RomMClient:
                 return False, f"Could not get ROM details: HTTP {rom_details_response.status_code}"
             
             rom_details = rom_details_response.json()
-            print(f"ROM details keys: {list(rom_details.keys())}")
+            # print(f"ROM details keys: {list(rom_details.keys())}")
             
             # Try to find the filename in the ROM details
             filename = None
@@ -6238,62 +6523,6 @@ class SyncWindow(Gtk.ApplicationWindow):
         self.log_message("📱 Decky plugin installation disabled (install manually)")
         return False
 
-    def debug_decky_permissions(self):
-        """Debug Decky plugin directory permissions"""
-        try:
-            import pwd
-            import grp
-            
-            # Check the homebrew directory structure
-            paths_to_check = [
-                Path.home() / 'homebrew',
-                Path.home() / 'homebrew' / 'plugins',
-            ]
-            
-            current_user = pwd.getpwuid(os.getuid()).pw_name
-            self.log_message(f"🔍 Current user: {current_user}")
-            
-            for path in paths_to_check:
-                if path.exists():
-                    stat_info = path.stat()
-                    owner = pwd.getpwuid(stat_info.st_uid).pw_name
-                    group = grp.getgrgid(stat_info.st_gid).gr_name
-                    perms = oct(stat_info.st_mode)[-3:]
-                    
-                    self.log_message(f"📁 {path}")
-                    self.log_message(f"   Owner: {owner}, Group: {group}, Permissions: {perms}")
-                    self.log_message(f"   Writable by current user: {os.access(path, os.W_OK)}")
-                else:
-                    self.log_message(f"❌ {path} does not exist")
-                    # Try to create it
-                    try:
-                        path.mkdir(parents=True, exist_ok=True)
-                        self.log_message(f"✅ Created {path}")
-                    except Exception as e:
-                        self.log_message(f"❌ Failed to create {path}: {e}")
-            
-            # Check if we can fix permissions
-            plugins_dir = Path.home() / 'homebrew' / 'plugins'
-            if plugins_dir.exists():
-                try:
-                    # Try to change ownership to current user
-                    import subprocess
-                    result = subprocess.run(['whoami'], capture_output=True, text=True)
-                    current_user = result.stdout.strip()
-                    
-                    self.log_message(f"🔧 Attempting to fix ownership for {current_user}...")
-                    
-                    # This might require sudo, so we'll suggest the fix
-                    fix_command = f"sudo chown -R {current_user}:{current_user} {Path.home() / 'homebrew'}"
-                    self.log_message(f"💡 To fix permissions, run in terminal:")
-                    self.log_message(f"   {fix_command}")
-                    
-                except Exception as e:
-                    self.log_message(f"❌ Permission fix error: {e}")
-                    
-        except Exception as e:
-            self.log_message(f"❌ Debug error: {e}")
-
     def remove_decky_plugin(self):
         """Remove companion Decky plugin - DISABLED"""
         # Plugin removal disabled  
@@ -6531,26 +6760,6 @@ class SyncWindow(Gtk.ApplicationWindow):
             print("❌ No icon found in any location")
         
     print("================================")
-
-    def set_window_icon(self):
-        """Set window icon using custom romm_icon.png only"""
-        try:
-            import os
-            from gi.repository import GdkPixbuf
-            
-            # Try custom icon only
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            custom_icon_path = os.path.join(script_dir, 'romm_icon.png')
-            
-            if os.path.exists(custom_icon_path):
-                pixbuf = GdkPixbuf.Pixbuf.new_from_file(custom_icon_path)
-                self.set_icon(pixbuf)
-                print(f"Using custom window icon: {custom_icon_path}")
-            else:
-                print("Custom icon not found, using system default")
-                
-        except Exception as e:
-            print(f"Failed to set window icon: {e}")
 
     def integrate_appimage(self):
         """Set up icon theme for AppImage without desktop file creation"""
@@ -7440,11 +7649,6 @@ class SyncWindow(Gtk.ApplicationWindow):
             self.log_message(f"❌ Simple plugin creation failed: {e}")
             return False
 
-    def create_status_section(self):
-        """Status section is now combined with connection section, so this is empty"""
-        # This method is now empty since we moved everything to create_connection_section
-        pass
-
     def create_library_section(self):
         """Create the enhanced library section with tree view (moved from quick actions)"""
         # Create enhanced library section with tree view
@@ -7487,12 +7691,6 @@ class SyncWindow(Gtk.ApplicationWindow):
     def on_auto_enable_sync_changed(self, switch_row, pspec):
         """Handle auto-enable sync setting change"""
         self.settings.set('AutoSync', 'auto_enable_on_connect', str(switch_row.get_active()).lower())
-
-    def create_quick_actions_section(self):
-        """Create the enhanced library section with tree view (quick actions removed)"""
-        # Create enhanced library section with tree view
-        self.library_section = EnhancedLibrarySection(self)
-        self.preferences_page.add(self.library_section.library_group)
 
     def create_settings_section(self):
         """Create settings section with merged download and sync settings"""
@@ -8524,46 +8722,81 @@ class SyncWindow(Gtk.ApplicationWindow):
                         game['is_downloaded'] = True
                         game['local_path'] = str(download_path)
                         game['local_size'] = file_size
-                                                
+
+                        print(f"🔍 DEBUG: About to call update_ui() via GLib.idle_add")
+
                         # Update UI - update both the underlying games list AND current view
                         def update_ui():
-                            if hasattr(self, 'library_section'):
-                                # ALWAYS update the underlying available_games list first
-                                for i, existing_game in enumerate(self.available_games):
-                                    if existing_game.get('rom_id') == game.get('rom_id'):
-                                        self.available_games[i] = game  # Update the master list
-                                        break
+                            print(f"🔍 DEBUG: update_ui() called for ROM {rom_id}")
+                            
+                            # ALWAYS update the underlying available_games list first
+                            for i, existing_game in enumerate(self.available_games):
+                                if existing_game.get('rom_id') == game.get('rom_id'):
+                                    self.available_games[i] = game
+                                    break
+                            
+                            # Update collections view data if in collections mode
+                            if (hasattr(self.library_section, 'current_view_mode') and 
+                                self.library_section.current_view_mode == 'collection'):
                                 
-                                # Check if we're in collections view
-                                if (hasattr(self.library_section, 'current_view_mode') and 
-                                    self.library_section.current_view_mode == 'collection'):
-                                    
-                                    # Update the collections_games list
-                                    if hasattr(self.library_section, 'collections_games'):
-                                        for i, collection_game in enumerate(self.library_section.collections_games):
-                                            if collection_game.get('rom_id') == game.get('rom_id'):
-                                                # Preserve collection info but update download status
-                                                updated_collection_game = game.copy()
-                                                updated_collection_game['collection'] = collection_game.get('collection')
-                                                self.library_section.collections_games[i] = updated_collection_game
-                                                break
-                                    
-                                    # Force immediate UI update in collections view
-                                    def refresh_collections_ui():
-                                        if hasattr(self.library_section, 'collections_games'):
-                                            self.library_section.library_model.update_library(self.library_section.collections_games, group_by='collection')
-                                        return False
-                                    
-                                    self.log_message(f"✓ {rom_name} downloaded")
-                                    GLib.idle_add(refresh_collections_ui)
-                                    
-                                else:
-                                    # Normal platform view update
-                                    self.library_section.update_single_game(game, skip_platform_update=is_bulk_operation)
-                            else:
-                                self.refresh_games_list()
+                                # Update collections_games list
+                                if hasattr(self.library_section, 'collections_games'):
+                                    for i, collection_game in enumerate(self.library_section.collections_games):
+                                        if collection_game.get('rom_id') == game.get('rom_id'):
+                                            updated_collection_game = game.copy()
+                                            updated_collection_game['collection'] = collection_game.get('collection')
+                                            self.library_section.collections_games[i] = updated_collection_game
+                                            break
+                            
+                            # Call update_single_game as fallback
+                            self.library_section.update_single_game(game, skip_platform_update=is_bulk_operation)
 
                         GLib.idle_add(update_ui)
+                        print(f"🔍 DEBUG: GLib.idle_add(update_ui) called")
+                                    
+                        # Find and debug the GameItem
+                        def debug_and_update():
+                            model = self.library_section.library_model.tree_model
+                            print(f"🔍 DEBUG: Searching tree model with {model.get_n_items() if model else 0} items")
+                            
+                            found_item = False
+                            for i in range(model.get_n_items() if model else 0):
+                                tree_item = model.get_item(i)
+                                if tree_item and tree_item.get_depth() == 1:  # Game level
+                                    item = tree_item.get_item()
+                                    if isinstance(item, GameItem):
+                                        print(f"🔍 DEBUG: Found GameItem {item.game_data.get('name')} ROM ID: {item.game_data.get('rom_id')}")
+                                        if item.game_data.get('rom_id') == rom_id:
+                                            print(f"🔍 DEBUG: MATCH! Found target GameItem at index {i}")
+                                            print(f"🔍 DEBUG: GameItem data before: is_downloaded={item.game_data.get('is_downloaded')}")
+                                            
+                                            # Update data
+                                            item.game_data.update(game)
+                                            print(f"🔍 DEBUG: GameItem data after: is_downloaded={item.game_data.get('is_downloaded')}")
+                                            
+                                            # Test progress tracking
+                                            print(f"🔍 DEBUG: Testing progress tracking...")
+                                            test_progress = {'progress': 0.5, 'downloading': True, 'filename': rom_name}
+                                            self.library_section.update_game_progress(rom_id, test_progress)
+                                            print(f"🔍 DEBUG: Progress tracking test sent")
+                                            
+                                            found_item = True
+                                            break
+                            
+                            if not found_item:
+                                print(f"🔍 DEBUG: GameItem NOT FOUND in tree!")
+                                print(f"🔍 DEBUG: Looking for ROM ID: {rom_id}")
+                                print(f"🔍 DEBUG: All GameItems in tree:")
+                                for i in range(model.get_n_items() if model else 0):
+                                    tree_item = model.get_item(i)
+                                    if tree_item and tree_item.get_depth() == 1:
+                                        item = tree_item.get_item()
+                                        if isinstance(item, GameItem):
+                                            print(f"  - {item.game_data.get('name')} (ROM ID: {item.game_data.get('rom_id')})")
+                            
+                            return False
+                        
+                        GLib.idle_add(debug_and_update)
 
                         # Bulk operation handling
                         if is_bulk_operation and hasattr(self, 'library_section'):
@@ -8740,8 +8973,62 @@ class SyncWindow(Gtk.ApplicationWindow):
                         game['local_path'] = str(download_path)
                         game['local_size'] = file_size
                         
-                        # Update UI
-                        GLib.idle_add(lambda: self.library_section.update_single_game(game, skip_platform_update=is_bulk_operation) if hasattr(self, 'library_section') else self.refresh_games_list())
+                        # Update UI 
+                        def update_ui():
+                            print(f"🔍 DEBUG: update_ui() called for ROM {rom_id}")
+                            
+                            # Update master games list
+                            for i, existing_game in enumerate(self.available_games):
+                                if existing_game.get('rom_id') == game.get('rom_id'):
+                                    self.available_games[i] = game
+                                    break
+                            
+                            # Update collections cache if in collections view
+                            if hasattr(self.library_section, 'collections_games'):
+                                updated_any = False
+                                for i, collection_game in enumerate(self.library_section.collections_games):
+                                    if collection_game.get('rom_id') == game.get('rom_id'):
+                                        updated_game = game.copy()
+                                        updated_game['collection'] = collection_game.get('collection')
+                                        self.library_section.collections_games[i] = updated_game
+                                        updated_any = True
+                                
+                                # If we updated any collection games, reload the entire collections view
+                                if updated_any:
+                                    def reload_collections():
+                                        self.library_section.library_model.update_library(
+                                            self.library_section.collections_games, 
+                                            group_by='collection'
+                                        )
+                                        return False
+                                    
+                                    GLib.timeout_add(100, reload_collections)
+                            
+                            # Update the GameItem directly
+                            model = self.library_section.library_model.tree_model
+                            for i in range(model.get_n_items() if model else 0):
+                                tree_item = model.get_item(i)
+                                if tree_item and tree_item.get_depth() == 1:
+                                    item = tree_item.get_item()
+                                    if isinstance(item, GameItem) and item.game_data.get('rom_id') == game.get('rom_id'):
+                                        item.game_data.update(game)
+
+                            # Clear selections after download completes
+                            if hasattr(self, 'library_section'):
+                                def clear_selections():
+                                    self.library_section.selected_checkboxes.clear()
+                                    self.library_section.selected_rom_ids.clear()
+                                    self.library_section.selected_game_keys.clear()
+                                    self.library_section.selected_game = None
+                                    self.library_section.update_action_buttons()
+                                    self.library_section.update_selection_label()
+                                    self.library_section.force_checkbox_sync()
+                                
+                                # Clear selections after a short delay
+                                GLib.timeout_add(1000, lambda: (clear_selections(), False)[1])
+
+                        GLib.idle_add(update_ui)
+                        print(f"🔍 DEBUG: GLib.idle_add(update_ui) called")
 
                         # Bulk operation handling
                         if is_bulk_operation and hasattr(self, 'library_section'):
@@ -9575,28 +9862,6 @@ class AutoSyncManager:
             pass
         return None
 
-    def debug_retroarch_history(self):
-        """Debug RetroArch history playlist contents"""
-        try:
-            history_path = Path.home() / '.var/app/org.libretro.RetroArch/config/retroarch/content_history.lpl'
-            
-            if history_path.exists():
-                self.log(f"📄 Reading RetroArch history: {history_path}")
-                with open(history_path, 'r', encoding='utf-8') as f:
-                    lines = f.readlines()
-                
-                self.log(f"📋 History has {len(lines)} lines")
-                
-                # Show first 12 lines (2 entries)
-                for i, line in enumerate(lines[:12]):
-                    self.log(f"Line {i}: {line.strip()}")
-                    
-            else:
-                self.log(f"❌ History file not found: {history_path}")
-                
-        except Exception as e:
-            self.log(f"❌ History debug error: {e}")
-
     def set_games_list(self, games):
         """Set the games list for daemon mode"""
         self.available_games = games
@@ -9751,26 +10016,6 @@ class AutoSyncManager:
                 
         except Exception:
             return False
-
-    def debug_retroarch_config(self):
-        """Debug RetroArch config file contents"""
-        try:
-            config_path = Path.home() / '.var/app/org.libretro.RetroArch/config/retroarch/retroarch.cfg'
-            
-            if config_path.exists():
-                self.log(f"📄 Reading RetroArch config: {config_path}")
-                with open(config_path, 'r') as f:
-                    lines = f.readlines()
-                    
-                # Look for content-related entries
-                for line in lines:
-                    if any(keyword in line.lower() for keyword in ['content', 'recent', 'playlist', 'history']):
-                        self.log(f"🔍 Config: {line.strip()}")
-            else:
-                self.log(f"❌ Config file not found: {config_path}")
-                
-        except Exception as e:
-            self.log(f"❌ Config debug error: {e}")
 
     def get_retroarch_current_game(self):
         """Get currently loaded game from RetroArch history playlist (JSON format)"""
