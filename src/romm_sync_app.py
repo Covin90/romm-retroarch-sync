@@ -2797,7 +2797,7 @@ class EnhancedLibrarySection:
                 
                 GLib.timeout_add(1, force_checkbox_update)
 
-            print(f"🔍 BIND: Set {game_name} checkbox to {should_be_active}")
+            print(f"🔍 BIND: Set {item.game_data.get('name', 'Unknown')} checkbox to {should_be_active}")
             
         elif isinstance(item, PlatformItem):
             checkbox.set_visible(True)
@@ -6288,6 +6288,10 @@ class SyncWindow(Gtk.ApplicationWindow):
             'playstation-3': 'ps3',
             'playstation-portable': 'psp',
             'playstation-vita': 'psvita',
+            'ps': 'psx',
+            'ps1': 'psx',
+            'sony-playstation': 'psx',
+            'sony-ps1': 'psx',
             'pc-engine': 'pcengine',
             'pc-engine-cd': 'pcenginecd',
             'turbografx-16': 'tg16',
@@ -6608,10 +6612,16 @@ class SyncWindow(Gtk.ApplicationWindow):
         file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
         
         # Use short platform slug for local directory structure (mapped for RetroDECK compatibility)
-        mapped_slug = self.map_platform_slug_for_retrodeck(platform_slug)
+        if self.retroarch.is_retrodeck_installation():
+            mapped_slug = self.map_platform_slug_for_retrodeck(platform_slug)
+        else:
+            mapped_slug = platform_slug  # Use original slug for regular RetroArch
         platform_dir = download_dir / mapped_slug
+        print(f"DEBUG: Download path: {platform_dir}")
         local_path = platform_dir / file_name
         is_downloaded = local_path.exists() and local_path.stat().st_size > 1024
+
+        print(f"DEBUG: Platform slug for PlayStation: '{platform_slug}' -> '{mapped_slug}'")
         
         display_name = Path(file_name).stem if file_name else rom.get('name', 'Unknown')
         
@@ -8611,18 +8621,22 @@ class SyncWindow(Gtk.ApplicationWindow):
 
     def download_game(self, game, is_bulk_operation=False):
         """Download a single game from RomM and its saves (with BIOS check)"""
+        print(f"DEBUG DOWNLOAD START: {game.get('name')} - ROM ID: {game.get('rom_id')}")
+        
         if not self.romm_client or not self.romm_client.authenticated:
             self.log_message("Please connect to RomM first")
             return
         
         # Check BIOS requirements first if enabled
-        auto_download_setting = self.settings.get('BIOS', 'auto_download')
+        auto_download_setting = 'false'  # Force disable
         has_bios_manager = bool(self.retroarch.bios_manager)
         
         self.log_message(f"🔍 BIOS auto-download setting: {auto_download_setting}")
         self.log_message(f"🔍 BIOS manager available: {has_bios_manager}")
         
-        if (auto_download_setting == 'true' and has_bios_manager):
+        # FIX: Handle missing/empty setting - default to enabled
+        auto_download_enabled = auto_download_setting in ['true', '', None]  # Default to enabled if not set
+        if (auto_download_enabled and has_bios_manager):
             platform = game.get('platform')
             if platform:
                 self.log_message(f"🔍 Checking BIOS for platform: {platform}")
@@ -8652,11 +8666,13 @@ class SyncWindow(Gtk.ApplicationWindow):
         
         def download():
             try:
+                print(f"DEBUG THREAD START: Starting download thread for {game['name']}")
                 rom_name = game['name']
                 rom_id = game['rom_id']
                 platform = game['platform']
                 platform_slug = game.get('platform_slug', platform)
                 file_name = game['file_name']
+                print(f"DEBUG VARS: rom_id={rom_id}, platform={platform}, platform_slug={platform_slug}, file_name={file_name}")
                 
                 # Track current download for progress updates
                 self._current_download_rom_id = rom_id
@@ -8678,9 +8694,16 @@ class SyncWindow(Gtk.ApplicationWindow):
                 
                 # Get download directory and create platform directory
                 download_dir = Path(self.rom_dir_row.get_text())
-                platform_dir = download_dir / platform_slug
+                # Use mapped slug for RetroDECK compatibility
+                if self.retroarch.is_retrodeck_installation():
+                    mapped_slug = self.map_platform_slug_for_retrodeck(platform_slug)
+                else:
+                    mapped_slug = platform_slug
+                platform_dir = download_dir / mapped_slug
                 platform_dir.mkdir(parents=True, exist_ok=True)
                 download_path = platform_dir / file_name
+                print(f"DEBUG DOWNLOAD: platform_slug='{platform_slug}', download_path='{download_path}'")
+                print(f"DEBUG ACTUAL DOWNLOAD: Creating folder '{platform_dir}' for file '{file_name}'")
                 
                 # Log file size for large downloads
                 try:
@@ -8877,6 +8900,10 @@ class SyncWindow(Gtk.ApplicationWindow):
                 threading.Thread(target=cleanup_progress, daemon=True).start()
                 
             except Exception as e:
+                print(f"DEBUG DOWNLOAD ERROR: {e}")
+                print(f"DEBUG ERROR TYPE: {type(e)}")
+                import traceback
+                traceback.print_exc()
                 # Handle error state
                 if hasattr(self, '_current_download_rom_id'):
                     rom_id = self._current_download_rom_id
@@ -8928,7 +8955,12 @@ class SyncWindow(Gtk.ApplicationWindow):
                 
                 # Get download directory and create platform directory
                 download_dir = Path(self.rom_dir_row.get_text())
-                platform_dir = download_dir / platform_slug
+                # Use mapped slug for RetroDECK compatibility
+                if self.retroarch.is_retrodeck_installation():
+                    mapped_slug = self.map_platform_slug_for_retrodeck(platform_slug)
+                else:
+                    mapped_slug = platform_slug
+                platform_dir = download_dir / mapped_slug
                 platform_dir.mkdir(parents=True, exist_ok=True)
                 download_path = platform_dir / file_name
                 
