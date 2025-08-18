@@ -1320,18 +1320,44 @@ class EnhancedLibrarySection:
         # Find and update the GameItem cells directly
         def update_cells():
             model = self.library_model.tree_model
+            updated_any = False
+            selected_collection = None
+            
+            # In collections view, try to determine which collection is currently selected
+            if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+                if self.selected_game and self.selected_game.get('rom_id') == rom_id:
+                    selected_collection = self.selected_game.get('collection')
+            
             for i in range(model.get_n_items() if model else 0):
                 tree_item = model.get_item(i)
                 if tree_item and tree_item.get_depth() == 1:  # Game level
                     item = tree_item.get_item()
                     if isinstance(item, GameItem) and item.game_data.get('rom_id') == rom_id:
+                        # In collections view, prioritize the selected collection
+                        if selected_collection and item.game_data.get('collection') != selected_collection:
+                            continue
+                        
                         print(f"🔍 DEBUG: Found GameItem, forcing cell update")
-                        # Force cells to update by emitting property changes
                         item.notify('is-downloaded')
                         item.notify('size-text') 
-                        # Also trigger the name signal which cells are connected to
                         item.notify('name')
-                        break
+                        updated_any = True
+                        
+                        # If we found the selected collection, stop here
+                        if selected_collection:
+                            break
+            
+            # If no selected collection or not found, update all instances
+            if not updated_any:
+                for i in range(model.get_n_items() if model else 0):
+                    tree_item = model.get_item(i)
+                    if tree_item and tree_item.get_depth() == 1:
+                        item = tree_item.get_item()
+                        if isinstance(item, GameItem) and item.game_data.get('rom_id') == rom_id:
+                            item.notify('is-downloaded')
+                            item.notify('size-text') 
+                            item.notify('name')
+            
             return False
         
         GLib.idle_add(update_cells)
@@ -2209,6 +2235,26 @@ class EnhancedLibrarySection:
         if getattr(self, '_selection_blocked', False):
             return
         
+        # ADD THIS BLOCK HERE:
+        # Priority 1: Check for single row selection first
+        if self.selected_game:
+            is_downloaded = self.selected_game.get('is_downloaded', False)
+            is_connected = self.parent.romm_client and self.parent.romm_client.authenticated
+            
+            if is_downloaded:
+                self.action_button.set_label("Launch")
+                self.action_button.remove_css_class('warning')
+                self.action_button.add_css_class('suggested-action')
+            else:
+                self.action_button.set_label("Download")
+                self.action_button.remove_css_class('suggested-action')
+                self.action_button.add_css_class('warning')
+            
+            self.action_button.set_sensitive(True)
+            self.delete_button.set_sensitive(is_downloaded)
+            self.open_in_romm_button.set_sensitive(is_connected and self.selected_game.get('rom_id'))
+            return  # Exit early, don't check other selections
+        
         print(f"🔍 update_action_buttons: Getting selected games...")
         selected_games = self.get_selected_games()  # This should trigger our debug
         print(f"🔍 update_action_buttons: Got {len(selected_games)} selected games")
@@ -2513,6 +2559,20 @@ class EnhancedLibrarySection:
     
     def on_action_clicked(self, button):
         """Handle main action button (download/launch) for single or multiple items"""
+        
+        # ADD THIS BLOCK FIRST:
+        # Priority: Handle single row selection directly  
+        if self.selected_game:
+            game = self.selected_game
+            if game.get('is_downloaded', False):
+                # Launch the game
+                if hasattr(self.parent, 'launch_game'):
+                    self.parent.launch_game(game)
+            else:
+                # Download the game  
+                if hasattr(self.parent, 'download_game'):
+                    self.parent.download_game(game)
+            return  # Exit early, don't process checkbox logic
         selected_games = []
         
         # Priority 1: If there's a row selection (single game clicked), use that exclusively
@@ -2664,9 +2724,13 @@ class EnhancedLibrarySection:
         for i in range(self.library_model.root_store.get_n_items()):
             platform_item = self.library_model.root_store.get_item(i)
             
-            # We need to check the platform name from the item's data, not its property,
-            # to be sure we find the right one even if the name format changes.
-            if platform_item.platform_name == updated_game_data.get('platform'):
+            # In collections mode, search all collections by ROM ID
+            # In platform mode, match by platform name  
+            should_check_this_platform = (
+                hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection'
+            ) or platform_item.platform_name == updated_game_data.get('platform')
+
+            if should_check_this_platform:
                 # Find the game item in the platform's child store.
                 for j in range(platform_item.child_store.get_n_items()):
                     game_item = platform_item.child_store.get_item(j)
@@ -2726,7 +2790,7 @@ class EnhancedLibrarySection:
                         
                         # Schedule the restoration with a small delay to ensure the tree is updated
                         GLib.timeout_add(50, restore_selection_and_update)
-                        return
+                        break
 
         # Fallback if the item wasn't visible/found in the UI model.
         print(f"⚠️ Could not find UI item to signal change. Falling back to full refresh.")
@@ -8495,13 +8559,28 @@ class SyncWindow(Gtk.ApplicationWindow):
                             if current_mode == 'collection':
                                 # Update collections cache
                                 if hasattr(self.library_section, 'collections_games'):
+                                    updated_collections = set()
                                     for i, collection_game in enumerate(self.library_section.collections_games):
                                         if collection_game.get('rom_id') == game.get('rom_id'):
                                             updated_game = game.copy()
                                             updated_game['collection'] = collection_game.get('collection')
                                             self.library_section.collections_games[i] = updated_game
-                                            print(f"🔍 DEBUG: Updated collections cache after deletion")
-                                            break
+                                            updated_collections.add(collection_game.get('collection'))
+                                    
+                                    # Force collection property updates
+                                    def force_collection_updates():
+                                        model = self.library_section.library_model.tree_model
+                                        for i in range(model.get_n_items() if model else 0):
+                                            tree_item = model.get_item(i)
+                                            if tree_item and tree_item.get_depth() == 0:
+                                                platform_item = tree_item.get_item()
+                                                if isinstance(platform_item, PlatformItem):
+                                                    if platform_item.platform_name in updated_collections:
+                                                        platform_item.notify('status-text')
+                                                        platform_item.notify('size-text')
+                                        return False
+                                    
+                                    GLib.timeout_add(150, force_collection_updates)
                                 
                                 # Force complete reload of collections view
                                 def reload_collections():
@@ -8762,15 +8841,33 @@ class SyncWindow(Gtk.ApplicationWindow):
                             if (hasattr(self.library_section, 'current_view_mode') and 
                                 self.library_section.current_view_mode == 'collection'):
                                 
-                                # Update collections_games list
+                                # Update ALL instances of this game in collections_games list
                                 if hasattr(self.library_section, 'collections_games'):
+                                    updated_collections = set()  # Track which collections were updated
+                                    
                                     for i, collection_game in enumerate(self.library_section.collections_games):
                                         if collection_game.get('rom_id') == game.get('rom_id'):
                                             updated_collection_game = game.copy()
                                             updated_collection_game['collection'] = collection_game.get('collection')
                                             self.library_section.collections_games[i] = updated_collection_game
-                                            break
-                            
+                                            updated_collections.add(collection_game.get('collection'))
+                                    
+                                    # ADD THIS: Force property updates on affected collection platform items
+                                    def force_collection_updates():
+                                        model = self.library_section.library_model.tree_model
+                                        for i in range(model.get_n_items() if model else 0):
+                                            tree_item = model.get_item(i)
+                                            if tree_item and tree_item.get_depth() == 0:  # Collection level
+                                                platform_item = tree_item.get_item()
+                                                if isinstance(platform_item, PlatformItem):
+                                                    if platform_item.platform_name in updated_collections:
+                                                        # Force property notifications to update Status/Size
+                                                        platform_item.notify('status-text')
+                                                        platform_item.notify('size-text')
+                                        return False
+                                    
+                                    GLib.timeout_add(150, force_collection_updates)                          
+
                             # Call update_single_game as fallback
                             self.library_section.update_single_game(game, skip_platform_update=is_bulk_operation)
 
@@ -9015,15 +9112,39 @@ class SyncWindow(Gtk.ApplicationWindow):
                                     self.available_games[i] = game
                                     break
                             
-                            # Update collections cache if in collections view
-                            if hasattr(self.library_section, 'collections_games'):
-                                updated_any = False
-                                for i, collection_game in enumerate(self.library_section.collections_games):
-                                    if collection_game.get('rom_id') == game.get('rom_id'):
-                                        updated_game = game.copy()
-                                        updated_game['collection'] = collection_game.get('collection')
-                                        self.library_section.collections_games[i] = updated_game
-                                        updated_any = True
+                            # Update collections cache AND platform item data
+                            if (hasattr(self.library_section, 'current_view_mode') and 
+                                self.library_section.current_view_mode == 'collection'):
+                                
+                                # Update collections_games cache
+                                if hasattr(self.library_section, 'collections_games'):
+                                    for i, collection_game in enumerate(self.library_section.collections_games):
+                                        if collection_game.get('rom_id') == game.get('rom_id'):
+                                            updated_game = game.copy()
+                                            updated_game['collection'] = collection_game.get('collection')
+                                            self.library_section.collections_games[i] = updated_game
+                                
+                                # Update the actual PlatformItem.games data in the tree model
+                                def update_platform_items():
+                                    model = self.library_section.library_model.tree_model
+                                    if model:
+                                        for i in range(model.get_n_items()):
+                                            tree_item = model.get_item(i)
+                                            if tree_item and tree_item.get_depth() == 0:  # Collection level
+                                                platform_item = tree_item.get_item()
+                                                if isinstance(platform_item, PlatformItem):
+                                                    # Update games in this platform item
+                                                    for j, platform_game in enumerate(platform_item.games):
+                                                        if platform_game.get('rom_id') == game.get('rom_id'):
+                                                            platform_item.games[j] = game.copy()
+                                                            platform_item.games[j]['collection'] = platform_item.platform_name
+                                                    
+                                                    # Force property recalculation
+                                                    platform_item.notify('status-text')
+                                                    platform_item.notify('size-text')
+                                    return False
+                                
+                                GLib.timeout_add(200, update_platform_items)
                                 
                                 # If we updated any collection games, reload the entire collections view
                                 if updated_any:
