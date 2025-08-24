@@ -1018,7 +1018,80 @@ class EnhancedLibrarySection:
         self.collection_auto_sync_enabled = False
         self.collection_sync_thread = None
         self.collection_sync_interval = 120
+        self.actively_syncing_collections = set() 
         self.load_selected_collections()
+
+    def get_collections_for_autosync(self):
+        """Get collections selected for auto-sync (either checked or row-selected)"""
+        collections_for_sync = set()
+        
+        # Add checkbox-selected collections
+        collections_for_sync.update(self.selected_collections_for_sync)
+        
+        # Add row-selected collections (if in collections view)
+        if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+            selection_model = self.column_view.get_model()
+            if selection_model:
+                for i in range(selection_model.get_n_items()):
+                    if selection_model.is_selected(i):
+                        tree_item = selection_model.get_item(i)
+                        if tree_item and tree_item.get_depth() == 0:  # Collection level
+                            item = tree_item.get_item()
+                            if isinstance(item, PlatformItem):
+                                collections_for_sync.add(item.platform_name)
+        
+        return collections_for_sync
+
+    def restore_collection_auto_sync_on_connect(self):
+        """Restore collection auto-sync when connection is established"""
+        try:
+            auto_sync_enabled = self.parent.settings.get('Collections', 'auto_sync_enabled', 'false') == 'true'
+            
+            if auto_sync_enabled and self.selected_collections_for_sync:
+                self.parent.log_message(f"🔄 Restoring collection auto-sync for {len(self.selected_collections_for_sync)} collections")
+                
+                # Start auto-sync and update the UI correctly
+                self.start_collection_auto_sync()
+                self.update_sync_button_state()
+                
+                # Start auto-sync
+                self.start_collection_auto_sync()
+
+                # Ensure collections are marked as actively syncing
+                self.actively_syncing_collections.update(self.selected_collections_for_sync)
+                self.refresh_collection_checkboxes()
+                
+                self.parent.log_message("✅ Collection auto-sync restored successfully")
+                
+        except Exception as e:
+            self.parent.log_message(f"⚠️ Failed to restore collection auto-sync: {e}")
+
+    def get_collection_sync_status(self, collection_name, games):
+        """Determine sync status of a collection"""
+        if not games:
+            return 'empty'
+        
+        downloaded_count = sum(1 for game in games if game.get('is_downloaded', False))
+        total_count = len(games)
+        
+        if downloaded_count == 0:
+            return 'none'
+        elif downloaded_count == total_count:
+            return 'complete'
+        else:
+            return 'partial'
+        
+    def refresh_collection_checkboxes(self):
+        """Refresh collection display after auto-sync state changes"""
+        if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+            # Force rebind of all collection rows
+            model = self.library_model.tree_model
+            if model:
+                for i in range(model.get_n_items()):
+                    tree_item = model.get_item(i)
+                    if tree_item and tree_item.get_depth() == 0:
+                        # Trigger name cell rebind
+                        self.library_model.root_store.items_changed(i, 1, 1)
 
     def save_selected_collections(self):
         """Save selected collections to settings"""
@@ -1040,11 +1113,6 @@ class EnhancedLibrarySection:
             
             # Load auto-sync enabled state
             auto_sync_enabled = self.parent.settings.get('Collections', 'auto_sync_enabled', 'false') == 'true'
-            
-            # If we have selected collections and auto-sync was enabled, restore it
-            if auto_sync_enabled and self.selected_collections_for_sync:
-                # Delay the auto-sync start until after UI is ready and connected
-                GLib.timeout_add(2000, self.restore_auto_sync_state)
 
     def start_collection_auto_sync(self):
         """Start background collection sync and download all non-downloaded games"""
@@ -1058,6 +1126,11 @@ class EnhancedLibrarySection:
         self.initialize_collection_caches()
         
         self.collection_auto_sync_enabled = True
+
+        # Update actively syncing collections
+        self.actively_syncing_collections.update(self.selected_collections_for_sync)
+
+        self.actively_syncing_collections.update(self.selected_collections_for_sync)
         
         def sync_worker():
             while self.collection_auto_sync_enabled:
@@ -1072,6 +1145,8 @@ class EnhancedLibrarySection:
         self.collection_sync_thread = threading.Thread(target=sync_worker, daemon=True)
         self.collection_sync_thread.start()
 
+        self.refresh_collection_checkboxes()
+
     def download_all_collection_games(self):
         """Download all non-downloaded games in selected collections"""
         if not (self.parent.romm_client and self.parent.romm_client.authenticated):
@@ -1085,7 +1160,9 @@ class EnhancedLibrarySection:
                 # Count total games to download
                 for collection in all_collections:
                     collection_name = collection.get('name', '')
-                    if collection_name not in self.selected_collections_for_sync:
+                    # Check both persistent selections and actively syncing collections
+                    if (collection_name not in self.selected_collections_for_sync and 
+                        collection_name not in getattr(self, 'actively_syncing_collections', set())):
                         continue
                     
                     collection_id = collection.get('id')
@@ -1164,6 +1241,7 @@ class EnhancedLibrarySection:
         """Stop background collection sync"""
         self.collection_auto_sync_enabled = False
         self.collection_sync_thread = None
+        self.refresh_collection_checkboxes()
 
     def check_selected_collections_for_changes(self):
         """Check if selected collections have changed and handle additions/removals"""
@@ -1218,8 +1296,8 @@ class EnhancedLibrarySection:
 
     def handle_added_games(self, collection_roms, added_rom_ids, collection_name):
         """Automatically download newly added games"""
-        # Check if auto-download is enabled
-        if not hasattr(self.parent, 'auto_download_new_row') or not self.parent.auto_download_new_row.get_active():
+        # Auto-download is always enabled
+        if False:  # Never skip auto-download
             GLib.idle_add(lambda: self.parent.log_message(f"📥 New games detected in '{collection_name}' but auto-download disabled"))
             return
         
@@ -1261,8 +1339,8 @@ class EnhancedLibrarySection:
 
     def handle_removed_games(self, removed_rom_ids, collection_name):
         """Handle games removed from collection - delete if not in other synced collections"""
-        # Check if auto-delete is enabled
-        if not hasattr(self.parent, 'auto_delete_removed_row') or not self.parent.auto_delete_removed_row.get_active():
+        # Auto-delete is always disabled for safety
+        if True:  # Always skip auto-delete
             GLib.idle_add(lambda: self.parent.log_message(f"📤 Games removed from '{collection_name}' but auto-delete disabled"))
             return
         
@@ -1321,18 +1399,16 @@ class EnhancedLibrarySection:
         threading.Thread(target=check_and_delete, daemon=True).start()
 
     def on_collection_checkbox_changed(self, checkbox, collection_name):
-        """Handle collection selection for auto-sync"""
+        """Handle collection selection (visual state only)"""
+        print(f"🔍 COLLECTION TOGGLE: '{collection_name}' -> {checkbox.get_active()}")
+        print(f"🔍 BEFORE: Selected collections: {list(self.selected_collections_for_sync)}")
+        
         if checkbox.get_active():
             self.selected_collections_for_sync.add(collection_name)
-            
-            # If auto-sync is already enabled and auto-download is on, download this collection's games
-            if (self.collection_auto_sync_enabled and 
-                hasattr(self.parent, 'auto_download_new_row') and 
-                self.parent.auto_download_new_row.get_active()):
-                self.download_single_collection_games(collection_name)
-                
         else:
             self.selected_collections_for_sync.discard(collection_name)
+        
+        print(f"🔍 AFTER: Selected collections: {list(self.selected_collections_for_sync)}")
         
         self.save_selected_collections()
         self.update_sync_button_state()
@@ -1380,83 +1456,131 @@ class EnhancedLibrarySection:
         
         threading.Thread(target=download_collection, daemon=True).start()
 
-    def on_select_all_collections_for_sync(self, button):
-        """Select all visible collections for auto-sync and download their games"""
-        if not hasattr(self, 'collections_games'):
-            return
-        
-        # Get all collection names
-        all_collections = set()
-        for game in self.collections_games:
-            collection_name = game.get('collection')
-            if collection_name:
-                all_collections.add(collection_name)
-        
-        self.selected_collections_for_sync = all_collections
-        self.save_selected_collections()
-        self.refresh_collection_checkboxes()
-        self.update_sync_button_state()
-        
-        # If auto-download is enabled, download all games in all collections
-        if (hasattr(self.parent, 'auto_download_new_row') and 
-            self.parent.auto_download_new_row.get_active()):
-            self.parent.log_message(f"📥 Sync All: downloading games from {len(all_collections)} collections")
-            self.download_all_collection_games()
-
-    def on_select_no_collections_for_sync(self, button):
-        """Deselect all collections from auto-sync"""
-        self.selected_collections_for_sync.clear()
-        self.save_selected_collections()
-        self.stop_collection_auto_sync()
-        self.refresh_collection_checkboxes()
-        self.update_sync_button_state()
-
     def on_toggle_collection_auto_sync(self, toggle_button):
         """Toggle collection auto-sync on/off"""
         if toggle_button.get_active():
-            if self.selected_collections_for_sync:
-                self.start_collection_auto_sync()  # This now includes initial download
-                toggle_button.set_label("Auto-Sync: ON")
-                self.parent.log_message(f"📡 Collection auto-sync enabled for {len(self.selected_collections_for_sync)} collections")
+            # Check both checkbox selections AND row selection
+            selected_collections = self.selected_collections_for_sync.copy()
+            
+            # Add currently selected row if in collections view
+            if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+                selection_model = self.column_view.get_model()
+                for i in range(selection_model.get_n_items()):
+                    if selection_model.is_selected(i):
+                        tree_item = selection_model.get_item(i)
+                        item = tree_item.get_item()
+                        if isinstance(item, PlatformItem):
+                            selected_collections.add(item.platform_name)
+            
+            if selected_collections:
+                # Update the selected collections set
+                self.selected_collections_for_sync = selected_collections
                 
-                # Save the enabled state
+                self.start_collection_auto_sync()
+                toggle_button.set_label("Auto-Sync: ON")
+                self.parent.log_message(f"🔡 Collection auto-sync enabled for {len(selected_collections)} collections")
+                
+                # Save the updated state
                 self.save_selected_collections()
                 
-                # Show download status
-                if (hasattr(self.parent, 'auto_download_new_row') and 
-                    self.parent.auto_download_new_row.get_active()):
-                    self.parent.log_message(f"⬇️ Downloading all missing games from selected collections...")
+                # Refresh UI to show updated selection
+                self.refresh_collection_checkboxes()
+                
+                self.parent.log_message(f"⬇️ Downloading all missing games from selected collections...")
             else:
                 toggle_button.set_active(False)
-                self.parent.log_message("⚠️ Please select collections for sync first")
+                self.parent.log_message("⚠️ Please select collections (checkbox or row) for sync first")
         else:
             self.stop_collection_auto_sync()
+            self.selected_collections_for_sync.clear()  # Clear all selections
+            self.save_selected_collections()  # Save empty selection
+            self.refresh_collection_checkboxes()  # Update UI
+            
             toggle_button.set_label("Auto-Sync: OFF")
-            self.parent.log_message("📴 Collection auto-sync disabled")
+            self.parent.log_message("🔴 Collection auto-sync disabled and selections cleared")
             
             # Save the disabled state
             self.save_selected_collections()
 
-    def refresh_collection_checkboxes(self):
-        """Force refresh collection checkboxes to show sync selection"""
-        # Trigger a rebind of all collection checkboxes
-        GLib.idle_add(self.force_checkbox_sync)
+    def bind_checkbox_cell_with_sync_status(self, factory, list_item):
+        """Enhanced checkbox binding with visual sync status indicators"""
+        tree_item = list_item.get_item()
+        item = tree_item.get_item()
+        checkbox = list_item.get_child()
+        
+        if isinstance(item, GameItem):
+            # Game-level checkboxes (existing logic)
+            checkbox.set_visible(True)
+            checkbox.game_item = item
+            checkbox.tree_item = tree_item
+            checkbox.is_platform = False
+            
+        elif isinstance(item, PlatformItem):
+            checkbox.set_visible(True)
+            checkbox.platform_item = item
+            checkbox.tree_item = tree_item
+            checkbox.is_platform = True
+            
+            # In collections view, show sync selection (no status colors)
+            if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+                # Show different visual states:
+                is_selected = collection_name in self.selected_collections_for_sync
+                is_syncing = is_selected and self.collection_auto_sync_enabled
+
+                if is_syncing:
+                    tooltip = f"🟢 {collection_name} - Selected & Auto-syncing"
+                elif is_selected:
+                    tooltip = f"🟡 {collection_name} - Selected (click button to start sync)"
+                else:
+                    tooltip = f"⚫ {collection_name} - Not selected"
+
+                checkbox.set_tooltip_text(tooltip)
+                
+                # Connect handler
+                def on_collection_sync_toggle(cb):
+                    if not getattr(cb, '_updating', False):
+                        self.on_collection_checkbox_changed(cb, collection_name)
+                
+                if not hasattr(checkbox, '_sync_handler_connected'):
+                    checkbox.connect('toggled', on_collection_sync_toggle)
+                    checkbox._sync_handler_connected = True
+            else:
+                # Platform view - existing logic
+                pass
+
+    def get_collection_sync_status(self, collection_name, games):
+        """Determine sync status of a collection"""
+        if not games:
+            return 'empty'
+        
+        downloaded_count = sum(1 for game in games if game.get('is_downloaded', False))
+        total_count = len(games)
+        
+        if downloaded_count == 0:
+            return 'none'
+        elif downloaded_count == total_count:
+            return 'complete'
+        else:
+            return 'partial'
 
     def update_sync_button_state(self):
-        """Update the auto-sync button state based on selection"""
+        """Update button based on per-collection sync status"""
         if hasattr(self, 'collection_auto_sync_btn'):
-            if self.selected_collections_for_sync:
-                self.collection_auto_sync_btn.set_sensitive(True)
-                if self.collection_auto_sync_enabled:
-                    self.collection_auto_sync_btn.set_label("Auto-Sync: ON")
-                    self.collection_auto_sync_btn.set_active(True)
-                else:
-                    self.collection_auto_sync_btn.set_label("Auto-Sync: OFF")
-                    self.collection_auto_sync_btn.set_active(False)
-            else:
+            current_selections = self.get_collections_for_autosync()
+            
+            if not current_selections:
                 self.collection_auto_sync_btn.set_sensitive(False)
-                self.collection_auto_sync_btn.set_label("Auto-Sync: OFF")
-                self.collection_auto_sync_btn.set_active(False)
+                self.collection_auto_sync_btn.set_label("Select Collections First")
+            else:
+                self.collection_auto_sync_btn.set_sensitive(True)
+                
+                # Check if selected collections are actively syncing
+                actively_syncing = current_selections.intersection(self.actively_syncing_collections)
+                
+                if actively_syncing:
+                    self.collection_auto_sync_btn.set_label(f"Stop Auto-Sync ({len(actively_syncing)})")
+                else:
+                    self.collection_auto_sync_btn.set_label(f"Start Auto-Sync ({len(current_selections)})")
         
         # Also restore UI state on collections view load
         if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
@@ -1484,11 +1608,15 @@ class EnhancedLibrarySection:
                 
                 # Start auto-sync
                 self.start_collection_auto_sync()
+
+                # Ensure UI state is properly restored
+                self.actively_syncing_collections.update(self.selected_collections_for_sync)
+                self.refresh_collection_checkboxes()
                 
                 self.parent.log_message("✅ Collection auto-sync restored successfully")
                 
         except Exception as e:
-            self.parent.log_message(f"❌ Failed to restore auto-sync: {e}")
+            self.parent.log_message(f"⚠️ Failed to restore auto-sync: {e}")
         
         return False  # Don't repeat
 
@@ -1517,6 +1645,44 @@ class EnhancedLibrarySection:
             filtered_games = [game for game in filtered_games if game.get('is_downloaded', False)]
 
         return filtered_games
+
+    def on_toggle_selected_collection_auto_sync(self, button):
+        """Toggle auto-sync and then clear selections"""
+        current_selections = self.get_collections_for_autosync()
+        
+        if not current_selections:
+            self.parent.log_message("Please select collections first")
+            return
+        
+        # Check if selected collections are actively syncing
+        actively_syncing = current_selections.intersection(self.actively_syncing_collections)
+        
+        if actively_syncing:
+            # STOP: Remove selected collections from active sync
+            self.actively_syncing_collections -= current_selections
+            
+            # Stop global sync if no collections left
+            if not self.actively_syncing_collections:
+                self.stop_collection_auto_sync()
+            
+            self.parent.log_message(f"Stopped auto-sync for {len(actively_syncing)} collections")
+        else:
+            # START: Add selected collections to active sync
+            self.actively_syncing_collections.update(current_selections)
+            
+            # Update selected_collections_for_sync to persist the selection
+            self.selected_collections_for_sync.update(current_selections)
+            
+            # Start global sync if not already running
+            if not self.collection_auto_sync_enabled:
+                self.start_collection_auto_sync()
+            
+            self.parent.log_message(f"Started auto-sync for {len(current_selections)} collections")
+        
+        # Save persistent state (DON'T clear selected_collections_for_sync)
+        self.save_selected_collections()
+        self.refresh_collection_checkboxes()
+        self.update_sync_button_state()
 
     def on_toggle_sort(self, button):
         """Toggle between alphabetical and download-status sorting"""
@@ -2274,22 +2440,10 @@ class EnhancedLibrarySection:
         self.collection_sync_box.add_css_class('linked')
         self.collection_sync_box.set_visible(False)  # Hidden by default
 
-        # Select all collections for sync
-        self.select_all_collections_btn = Gtk.Button(label="Sync All")
-        self.select_all_collections_btn.set_tooltip_text("Select all collections for auto-sync")
-        self.select_all_collections_btn.connect('clicked', self.on_select_all_collections_for_sync)
-        self.collection_sync_box.append(self.select_all_collections_btn)
-
-        # Select none
-        self.select_no_collections_btn = Gtk.Button(label="Sync None")
-        self.select_no_collections_btn.set_tooltip_text("Deselect all collections from auto-sync")
-        self.select_no_collections_btn.connect('clicked', self.on_select_no_collections_for_sync)
-        self.collection_sync_box.append(self.select_no_collections_btn)
-
-        # Auto-sync toggle
-        self.collection_auto_sync_btn = Gtk.ToggleButton(label="Auto-Sync: OFF")
-        self.collection_auto_sync_btn.set_tooltip_text("Enable/disable collection auto-sync")
-        self.collection_auto_sync_btn.connect('toggled', self.on_toggle_collection_auto_sync)
+        # Auto-sync for selected collections
+        self.collection_auto_sync_btn = Gtk.Button(label="Enable Auto-Sync")
+        self.collection_auto_sync_btn.set_tooltip_text("Enable/disable auto-sync for selected collections")
+        self.collection_auto_sync_btn.connect('clicked', self.on_toggle_selected_collection_auto_sync)
         self.collection_sync_box.append(self.collection_auto_sync_btn)
 
         toolbar_box.append(self.collection_sync_box)
@@ -2521,6 +2675,15 @@ class EnhancedLibrarySection:
             # IMPORTANT: Bind the label to the 'name' property instead of setting text directly
             # This means when platform_item.notify('name') is called, the label will automatically update
             item.bind_property('name', label, 'label', GObject.BindingFlags.SYNC_CREATE)
+            
+            if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+                collection_name = item.platform_name
+                is_actively_syncing = collection_name in self.actively_syncing_collections
+
+                if collection_name in getattr(self, 'actively_syncing_collections', set()):
+                    label.set_markup(f"🔄 {item.platform_name}")
+                else:
+                    label.set_markup(f"{item.platform_name}")  # Normal
         else:
             # For games, set up dynamic icon updates
             def update_icon_and_name(*args):
@@ -2931,6 +3094,10 @@ class EnhancedLibrarySection:
         
         # Update selection label
         self.update_selection_label()
+
+        # Update collection auto-sync button if in collections view
+        if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+            self.update_sync_button_state()
 
     def update_selection_label(self):
         """Update the selection label text"""
@@ -3380,21 +3547,36 @@ class EnhancedLibrarySection:
             checkbox.tree_item = tree_item
             checkbox.is_platform = True
             
-            # In collections view, show sync selection state
+            # In collections view, show auto-sync status colors
             if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
                 collection_name = item.platform_name
-                is_selected_for_sync = collection_name in self.selected_collections_for_sync
+                is_checked = collection_name in self.selected_collections_for_sync
+                print(f"🔍 BIND: Collection '{collection_name}' checkbox - is_checked: {is_checked}")  # MOVE HERE
                 
-                # Use checkbox to show sync selection (different from game selection)
-                checkbox.set_active(is_selected_for_sync)
+                # Check if this collection is selected for auto-sync (checkbox OR row selection)
+                all_selected_collections = self.get_collections_for_autosync()
+                is_selected_for_sync = collection_name in all_selected_collections
                 
-                # Add visual indicator for sync selection
-                if is_selected_for_sync:
-                    checkbox.set_tooltip_text(f"📡 {collection_name} - Auto-sync enabled")
+                # Apply color and icon based on auto-sync status
+                if is_selected_for_sync and self.collection_auto_sync_enabled:
+                    checkbox.add_css_class('collection-synced')  # Green
+                    status_text = "Auto-sync active"
+                elif is_selected_for_sync:
+                    checkbox.add_css_class('collection-partial-sync')  # Orange
+                    status_text = "Selected (auto-sync paused)"
                 else:
-                    checkbox.set_tooltip_text(f"📴 {collection_name} - Click to enable auto-sync")
+                    checkbox.add_css_class('collection-not-synced')  # Red
+                    status_text = "Not selected"
                 
-                # Connect to sync selection handler
+                # Checkbox shows persistent selection, not row selection
+                checkbox._updating = True
+                checkbox.set_active(is_checked)
+                checkbox._updating = False
+                
+                tooltip = f"{collection_name} - {status_text}"
+                checkbox.set_tooltip_text(tooltip)
+                
+                # Connect handler
                 def on_collection_sync_toggle(cb):
                     if not getattr(cb, '_updating', False):
                         self.on_collection_checkbox_changed(cb, collection_name)
@@ -3402,6 +3584,7 @@ class EnhancedLibrarySection:
                 if not hasattr(checkbox, '_sync_handler_connected'):
                     checkbox.connect('toggled', on_collection_sync_toggle)
                     checkbox._sync_handler_connected = True
+                return
             else:
                 # Normal platform view logic (existing game selection)
                 # Count selected games using the dual tracking system
@@ -3434,136 +3617,76 @@ class EnhancedLibrarySection:
                     checkbox.set_inconsistent(True)
                     print(f"    -> Setting platform checkbox: INCONSISTENT")
 
+                pass
+
     def on_checkbox_toggled(self, checkbox):
-        # Prevent recursive calls during updates
-        if getattr(checkbox, '_updating', False):
-            return
-        
+        """Handle checkbox toggle with debugging"""
         if hasattr(checkbox, 'is_platform') and checkbox.is_platform:
-            # Platform checkbox toggled
+            platform_name = checkbox.platform_item.platform_name
             platform_item = checkbox.platform_item
+            print(f"🔍 MAIN TOGGLE: Platform '{platform_name}' -> {checkbox.get_active()}")
             
-            # DEBUG: Initial state
-            print(f"🔍 DEBUG Platform checkbox clicked: {platform_item.platform_name}")
-            print(f"🔍 DEBUG Initial active: {checkbox.get_active()}, inconsistent: {checkbox.get_inconsistent()}")
+            # Check if this is collections view
+            if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+                print(f"🔍 Collection checkbox handling for '{platform_name}'")
+                
+                # Handle collection selection - select/unselect all games in collection
+                should_select = checkbox.get_active()
+                
+                if should_select:
+                    print(f"🔍 SELECTING all games in collection {platform_name}")
+                    for game in platform_item.games:
+                        rom_id = game.get('rom_id')
+                        collection_name = game.get('collection', platform_name)
+                        if rom_id:
+                            collection_key = f"collection:{rom_id}:{collection_name}"
+                            self.selected_game_keys.add(collection_key)
+                else:
+                    print(f"🔍 DESELECTING all games in collection {platform_name}")
+                    for game in platform_item.games:
+                        rom_id = game.get('rom_id')
+                        collection_name = game.get('collection', platform_name)
+                        if rom_id:
+                            collection_key = f"collection:{rom_id}:{collection_name}"
+                            self.selected_game_keys.discard(collection_key)
+                
+                # Update UI
+                self.sync_selected_checkboxes()
+                self.update_action_buttons()
+                self.update_selection_label()
+                GLib.idle_add(self.force_checkbox_sync)
+                return
             
+            # Platform view logic (restore original logic here)
             # Determine what the user wants based on current state
             if checkbox.get_inconsistent():
                 should_select = True
                 checkbox.set_inconsistent(False)
                 checkbox.set_active(True)
-                print(f"🔍 DEBUG Was inconsistent, now selecting all")
             else:
                 should_select = checkbox.get_active()
-                print(f"🔍 DEBUG Normal toggle, should_select: {should_select}")
             
-            # DEBUG: Show games in platform
-            print(f"🔍 DEBUG Games in platform: {len(platform_item.games)}")
-            
-            # Collection/platform checkbox section:
+            # Add/remove games for platform view
             if should_select:
-                print(f"🔍 DEBUG SELECTING all games in {platform_item.platform_name}")
-                # Add all games in this platform/collection
                 for game in platform_item.games:
-                    game_name = game.get('name', 'NO_NAME')
-                    if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
-                        # Collections logic...
-                        rom_id = game.get('rom_id')
-                        collection_name = game.get('collection', platform_item.platform_name)
-                        if rom_id:
-                            collection_key = f"collection:{rom_id}:{collection_name}"
-                            self.selected_game_keys.add(collection_key)
-                            print(f"🔍 DEBUG   Added collection key: {collection_key}")
-                        else:
-                            name_key = f"collection:{game.get('name', '')}:{game.get('platform', '')}:{collection_name}"
-                            self.selected_game_keys.add(name_key)
-                            print(f"🔍 DEBUG   Added name key: {name_key}")
+                    identifier_type, identifier_value = self.get_game_identifier(game)
+                    if identifier_type == 'rom_id':
+                        self.selected_rom_ids.add(identifier_value)
                     else:
-                        # Platform view: use standard identifier
-                        identifier_type, identifier_value = self.get_game_identifier(game)
-                        if identifier_type == 'rom_id':
-                            self.selected_rom_ids.add(identifier_value)
-                            print(f"🔍 DEBUG   Added ROM ID: {identifier_value} for {game_name}")
-                        else:
-                            self.selected_game_keys.add(identifier_value)
-                            print(f"🔍 DEBUG   Added game key: {identifier_value} for {game_name}")
+                        self.selected_game_keys.add(identifier_value)
             else:
-                print(f"🔍 DEBUG DESELECTING all games in {platform_item.platform_name}")
-                # Remove logic - same but with discard()
                 for game in platform_item.games:
-                    if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
-                        rom_id = game.get('rom_id')
-                        collection_name = game.get('collection', platform_item.platform_name)
-                        if rom_id:
-                            collection_key = f"collection:{rom_id}:{collection_name}"
-                            self.selected_game_keys.discard(collection_key)
-                        else:
-                            name_key = f"collection:{game.get('name', '')}:{game.get('platform', '')}:{collection_name}"
-                            self.selected_game_keys.discard(name_key)
+                    identifier_type, identifier_value = self.get_game_identifier(game)
+                    if identifier_type == 'rom_id':
+                        self.selected_rom_ids.discard(identifier_value)
                     else:
-                        identifier_type, identifier_value = self.get_game_identifier(game)
-                        if identifier_type == 'rom_id':
-                            self.selected_rom_ids.discard(identifier_value)
-                        else:
-                            self.selected_game_keys.discard(identifier_value)
-
-            print(f"🔍 DEBUG Final checkbox state: active={checkbox.get_active()}, inconsistent={checkbox.get_inconsistent()}")
-            print(f"🔍 DEBUG Selected ROM IDs count: {len(self.selected_rom_ids)}")
-            print(f"🔍 DEBUG Selected game keys count: {len(self.selected_game_keys)}")
+                        self.selected_game_keys.discard(identifier_value)
             
-            # CRITICAL: Sync the selected_checkboxes set with the new selections
+            # Update UI
             self.sync_selected_checkboxes()
-
-            # Update button states and selection label
             self.update_action_buttons()
             self.update_selection_label()
-
-            # ADD THIS: Prevent platform checkbox from being reset during rebind
-            if hasattr(checkbox, 'is_platform') and checkbox.is_platform and should_select:
-                def preserve_platform_checkbox():
-                    try:
-                        # Force the platform checkbox to stay checked
-                        checkbox._updating = True
-                        checkbox.set_active(True)
-                        checkbox.set_inconsistent(False)
-                        checkbox._updating = False
-                        return False
-                    except:
-                        return False
-                
-                # Schedule this to run after any rebinding
-                GLib.timeout_add(10, preserve_platform_checkbox)
-                GLib.timeout_add(50, preserve_platform_checkbox)  # Double-check
-
-            # IMMEDIATE UI REFRESH for collection checkboxes
-            if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
-                # Force immediate checkbox update for collections
-                def force_collection_checkbox_sync():
-                    try:
-                        model = self.library_model.tree_model
-                        for i in range(model.get_n_items()):
-                            tree_item = model.get_item(i)
-                            if tree_item and tree_item.get_depth() == 1:  # Game level
-                                # Trigger items_changed for this specific item to refresh its checkbox
-                                parent_tree_item = tree_item.get_parent()
-                                if parent_tree_item:
-                                    parent_platform_item = parent_tree_item.get_item()
-                                    if isinstance(parent_platform_item, PlatformItem):
-                                        if parent_platform_item.platform_name == platform_item.platform_name:
-                                            # Force this game checkbox to refresh
-                                            platform_item.child_store.items_changed(
-                                                i - parent_tree_item.get_position() - 1, 1, 1
-                                            )
-                        return False
-                    except Exception as e:
-                        print(f"Collection checkbox sync error: {e}")
-                        return False
-                
-                GLib.timeout_add(10, force_collection_checkbox_sync)
-            else:
-                # Standard platform checkbox sync
-                GLib.idle_add(self.force_checkbox_sync)
-
+            GLib.idle_add(self.force_checkbox_sync)
             GLib.idle_add(self.refresh_all_platform_checkboxes)
                             
         elif hasattr(checkbox, 'game_item'):
@@ -3756,13 +3879,22 @@ class EnhancedLibrarySection:
                 if hasattr(widget, 'game_item') and hasattr(widget, 'is_platform'):
                     if not widget.is_platform:  # Game checkbox
                         game_data = widget.game_item.game_data
-                        identifier_type, identifier_value = self.get_game_identifier(game_data)
                         
                         should_be_active = False
-                        if identifier_type == 'rom_id' and identifier_value in self.selected_rom_ids:
-                            should_be_active = True
-                        elif identifier_type == 'game_key' and identifier_value in self.selected_game_keys:
-                            should_be_active = True
+                        if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+                            # Collections view: use collection-aware identifier
+                            rom_id = game_data.get('rom_id')
+                            collection_name = game_data.get('collection', '')
+                            if rom_id and collection_name:
+                                collection_key = f"collection:{rom_id}:{collection_name}"
+                                should_be_active = collection_key in self.selected_game_keys
+                        else:
+                            # Platform view: use standard identifier
+                            identifier_type, identifier_value = self.get_game_identifier(game_data)
+                            if identifier_type == 'rom_id' and identifier_value in self.selected_rom_ids:
+                                should_be_active = True
+                            elif identifier_type == 'game_key' and identifier_value in self.selected_game_keys:
+                                should_be_active = True
                         
                         if widget.get_active() != should_be_active:
                             widget._updating = True
@@ -6883,7 +7015,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             'sega-master-system': 'mastersystem',
             'sega-game-gear': 'gamegear',
             'sega-saturn': 'saturn',
-            'sega-dreamcast': 'dreamcast',
+            'sega-dreamcast': 'dc',
             'sega-32x': 'sega32x',
             'sg-1000': 'sg-1000',
             'mega-cd': 'megacd',
@@ -8078,7 +8210,11 @@ class SyncWindow(Gtk.ApplicationWindow):
                     # Auto-sync settings...
                     if self.settings.get('AutoSync', 'auto_enable_on_connect') == 'true':
                         self.autosync_enable_switch.set_active(True)
-                        self.log_message("🔄 Auto-sync enabled automatically")
+                        self.log_message("🔥 Auto-sync enabled automatically")
+
+                    # Restore collection auto-sync if it was enabled
+                    if hasattr(self, 'library_section'):
+                        self.library_section.restore_collection_auto_sync_on_connect()
                     
                     self.update_status_file()
 
@@ -8384,22 +8520,6 @@ class SyncWindow(Gtk.ApplicationWindow):
         collection_sync_row.connect('notify::value', self.on_collection_sync_interval_changed)
         self.autosync_expander.add_row(collection_sync_row)
 
-        # Auto-download new games toggle
-        self.auto_download_new_row = Adw.SwitchRow()
-        self.auto_download_new_row.set_title("Auto-Download New Games")
-        self.auto_download_new_row.set_subtitle("Automatically download games added to synced collections")
-        self.auto_download_new_row.set_active(self.settings.get('Collections', 'auto_download', 'true') == 'true')
-        self.auto_download_new_row.connect('notify::active', self.on_auto_download_changed)
-        self.autosync_expander.add_row(self.auto_download_new_row)
-
-        # Auto-delete removed games toggle  
-        self.auto_delete_removed_row = Adw.SwitchRow()
-        self.auto_delete_removed_row.set_title("Auto-Delete Removed Games")
-        self.auto_delete_removed_row.set_subtitle("Delete games removed from synced collections (if not in other synced collections)")
-        self.auto_delete_removed_row.set_active(self.settings.get('Collections', 'auto_delete', 'false') == 'true')
-        self.auto_delete_removed_row.connect('notify::active', self.on_auto_delete_changed)
-        self.autosync_expander.add_row(self.auto_delete_removed_row)
-
         # Clear collection selection
         clear_collections_row = Adw.ActionRow()
         clear_collections_row.set_title("Clear Collection Selection")
@@ -8536,14 +8656,6 @@ class SyncWindow(Gtk.ApplicationWindow):
             self.library_section.save_selected_collections()
             self.library_section.stop_collection_auto_sync()
             self.log_message("Cleared collection auto-sync selection")
-
-    def on_auto_download_changed(self, switch_row, pspec):
-        """Save auto-download setting"""
-        self.settings.set('Collections', 'auto_download', str(switch_row.get_active()).lower())
-
-    def on_auto_delete_changed(self, switch_row, pspec):
-        """Save auto-delete setting"""
-        self.settings.set('Collections', 'auto_delete', str(switch_row.get_active()).lower())
 
     def on_show_logs_dialog(self, button):
         """Show logs and advanced tools dialog"""
