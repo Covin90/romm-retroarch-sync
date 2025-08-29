@@ -19,22 +19,6 @@ import datetime
 import psutil
 import stat
 
-def log_memory_usage(label="", detailed=False):
-    # Only log memory in debug mode
-    import os
-    if not os.environ.get('ROMM_DEBUG'):
-        return
-    try:
-        import psutil
-        process = psutil.Process(os.getpid())
-        memory_mb = process.memory_info().rss / 1024 / 1024
-        if detailed:
-            print(f"🧠 Memory [{label}]: {memory_mb:.1f} MB (peak: {process.memory_info().peak_wss / 1024 / 1024:.1f} MB)")
-        else:
-            print(f"🧠 Memory [{label}]: {memory_mb:.1f} MB")
-    except:
-        print(f"🧠 Memory [{label}]: Unable to measure")
-
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import queue
@@ -1014,11 +998,11 @@ class EnhancedLibrarySection:
         self.collections_cache_time = 0
         self.collections_cache_duration = 300
         # Collection auto-sync attributes
-        self.selected_collections_for_sync = set()
+        self.selected_collections_for_sync = set()  # UI selection state
+        self.actively_syncing_collections = set()   # Auto-sync running state
         self.collection_auto_sync_enabled = False
         self.collection_sync_thread = None
         self.collection_sync_interval = 120
-        self.actively_syncing_collections = set() 
         self.load_selected_collections()
 
     def get_collections_for_autosync(self):
@@ -1042,27 +1026,154 @@ class EnhancedLibrarySection:
         
         return collections_for_sync
 
+    def remove_orphaned_games_on_startup(self):
+        """Remove games that are no longer in any synced collections"""
+        if not self.actively_syncing_collections:
+            return
+        
+        def check_and_remove():
+            try:
+                # Get current collection contents
+                all_collections = self.parent.romm_client.get_collections()
+                all_synced_rom_ids = set()
+                
+                for collection in all_collections:
+                    if collection.get('name') in self.actively_syncing_collections:
+                        collection_roms = self.parent.romm_client.get_collection_roms(collection.get('id'))
+                        all_synced_rom_ids.update(rom.get('id') for rom in collection_roms if rom.get('id'))
+                
+                # Check local games
+                removed_count = 0
+                for game in self.parent.available_games:
+                    if (game.get('is_downloaded') and 
+                        game.get('rom_id') not in all_synced_rom_ids and
+                        game.get('rom_id')):
+                        
+                        # This game is no longer in any synced collection
+                        GLib.idle_add(lambda g=game: self.parent.delete_game_file(g, is_bulk_operation=True))
+                        removed_count += 1
+                
+                if removed_count > 0:
+                    GLib.idle_add(lambda count=removed_count: 
+                                self.parent.log_message(f"🗑️ Auto-sync startup: removed {count} orphaned games"))
+                
+            except Exception as e:
+                GLib.idle_add(lambda err=str(e): 
+                            self.parent.log_message(f"❌ Startup cleanup error: {err}"))
+        
+        threading.Thread(target=check_and_remove, daemon=True).start()
+
+    def download_all_actively_syncing_games(self):
+        """Download all non-downloaded games in actively syncing collections"""
+        if not (self.parent.romm_client and self.parent.romm_client.authenticated):
+            return
+        
+        def download_all():
+            try:
+                all_collections = self.parent.romm_client.get_collections()
+                total_to_download = 0
+                
+                for collection in all_collections:
+                    collection_name = collection.get('name', '')
+                    if collection_name not in self.actively_syncing_collections:
+                        continue
+                    
+                    collection_id = collection.get('id')
+                    collection_roms = self.parent.romm_client.get_collection_roms(collection_id)
+                    
+                    download_dir = Path(self.parent.rom_dir_row.get_text())
+                    games_to_download = []
+                    
+                    for rom in collection_roms:
+                        processed_game = self.parent.process_single_rom(rom, download_dir)
+                        
+                        if not processed_game.get('is_downloaded'):
+                            games_to_download.append(processed_game)
+                    
+                    if games_to_download:
+                        total_to_download += len(games_to_download)
+                        GLib.idle_add(lambda name=collection_name, count=len(games_to_download): 
+                                    self.parent.log_message(f"⬇️ Auto-sync: downloading {count} games from '{name}'"))
+                        
+                        for game in games_to_download:
+                            GLib.idle_add(lambda g=game: 
+                                        self.parent.download_game(g, is_bulk_operation=True))
+                
+                if total_to_download > 0:
+                    GLib.idle_add(lambda count=total_to_download: 
+                                self.parent.log_message(f"🎯 Auto-sync restored: started download of {count} total games"))
+                else:
+                    GLib.idle_add(lambda: 
+                                self.parent.log_message(f"✅ Auto-sync restored: all collections already complete"))
+                
+            except Exception as e:
+                GLib.idle_add(lambda err=str(e): 
+                            self.parent.log_message(f"❌ Auto-sync restore error: {err}"))
+        
+        threading.Thread(target=download_all, daemon=True).start()
+
+    def download_game_directly(self, game):
+        """Download game directly without UI interaction"""
+        try:
+            rom_id = game['rom_id']
+            rom_name = game['name']
+            platform_slug = game.get('platform_slug', game.get('platform', 'Unknown'))
+            file_name = game['file_name']
+            
+            # Get download directory
+            download_dir = Path(self.parent.rom_dir_row.get_text())
+            
+            # Use mapped slug for RetroDECK compatibility
+            if self.parent.retroarch.is_retrodeck_installation():
+                mapped_slug = self.parent.map_platform_slug_for_retrodeck(platform_slug)
+            else:
+                mapped_slug = platform_slug
+            
+            platform_dir = download_dir / mapped_slug
+            platform_dir.mkdir(parents=True, exist_ok=True)
+            download_path = platform_dir / file_name
+            
+            # Skip if already downloaded
+            if download_path.exists() and download_path.stat().st_size > 1024:
+                return True
+            
+            # Download using RomM client directly with progress callback
+            def progress_callback(progress_info):
+                # Simple progress logging without UI updates
+                if progress_info.get('progress', 0) >= 1.0:
+                    print(f"✅ Download complete: {rom_name}")
+            
+            # Download using RomM client
+            success, message = self.parent.romm_client.download_rom(
+                rom_id, rom_name, download_path, progress_callback
+            )
+            
+            return success
+                
+        except Exception as e:
+            print(f"❌ Direct download error: {e}")
+            return False
+
     def restore_collection_auto_sync_on_connect(self):
         """Restore collection auto-sync when connection is established"""
         try:
-            auto_sync_enabled = self.parent.settings.get('Collections', 'auto_sync_enabled', 'false') == 'true'
+            if not self.actively_syncing_collections or not self.collection_auto_sync_enabled:
+                return
+                
+            self.parent.log_message(f"🔄 Restoring collection auto-sync for {len(self.actively_syncing_collections)} collections")
             
-            if auto_sync_enabled and self.selected_collections_for_sync:
-                self.parent.log_message(f"🔄 Restoring collection auto-sync for {len(self.selected_collections_for_sync)} collections")
-                
-                # Start auto-sync and update the UI correctly
-                self.start_collection_auto_sync()
-                self.update_sync_button_state()
-                
-                # Start auto-sync
-                self.start_collection_auto_sync()
-
-                # Ensure collections are marked as actively syncing
-                self.actively_syncing_collections.update(self.selected_collections_for_sync)
-                self.refresh_collection_checkboxes()
-                
-                self.parent.log_message("✅ Collection auto-sync restored successfully")
-                
+            # Download missing games
+            self.download_all_actively_syncing_games()
+            
+            # Remove orphaned games (if auto-delete enabled)
+            self.remove_orphaned_games_on_startup()
+            
+            # Start background monitoring
+            self.start_collection_auto_sync()
+            self.update_sync_button_state()
+            
+            self.parent.log_message("✅ Collection auto-sync restored successfully")
+            
         except Exception as e:
             self.parent.log_message(f"⚠️ Failed to restore collection auto-sync: {e}")
 
@@ -1094,30 +1205,43 @@ class EnhancedLibrarySection:
                         self.library_model.root_store.items_changed(i, 1, 1)
 
     def save_selected_collections(self):
-        """Save selected collections to settings"""
+        """Save both UI selection and active sync states"""
         if hasattr(self.parent, 'settings'):
+            # UI selection state
             collections_str = '|'.join(self.selected_collections_for_sync)
             self.parent.settings.set('Collections', 'selected_for_sync', collections_str)
-            # Also save the auto-sync enabled state
+            
+            # Active sync state (what's actually running)
+            active_str = '|'.join(self.actively_syncing_collections)
+            self.parent.settings.set('Collections', 'actively_syncing', active_str)
+            
             self.parent.settings.set('Collections', 'auto_sync_enabled', str(self.collection_auto_sync_enabled).lower())
 
     def load_selected_collections(self):
-        """Load selected collections from settings"""
+        """Load settings and restore actively syncing collections"""
         if hasattr(self.parent, 'settings'):
-            collections_str = self.parent.settings.get('Collections', 'selected_for_sync', '')
-            if collections_str:
-                self.selected_collections_for_sync = set(collections_str.split('|'))
-            # Load interval in seconds (no conversion needed)
+            # Restore actively syncing collections (not UI selections)
+            actively_syncing_str = self.parent.settings.get('Collections', 'actively_syncing', '')
+            if actively_syncing_str:
+                self.actively_syncing_collections = set(actively_syncing_str.split('|'))
+            
+            # Keep UI selections empty on startup
+            self.selected_collections_for_sync = set()
+            
+            # Load other settings
             interval = int(self.parent.settings.get('Collections', 'sync_interval', '120'))
             self.collection_sync_interval = interval
             
-            # Load auto-sync enabled state
             auto_sync_enabled = self.parent.settings.get('Collections', 'auto_sync_enabled', 'false') == 'true'
+            self.collection_auto_sync_enabled = auto_sync_enabled
 
     def start_collection_auto_sync(self):
         """Start background collection sync and download all non-downloaded games"""
-        if not self.selected_collections_for_sync or self.collection_sync_thread:
+        if not self.actively_syncing_collections or self.collection_sync_thread:
+            self.parent.log_message(f"🚫 Collection sync not started: actively_syncing={len(self.actively_syncing_collections)}, thread_exists={bool(self.collection_sync_thread)}")
             return
+        
+        self.parent.log_message(f"🎯 Starting collection sync for {len(self.actively_syncing_collections)} collections...")
         
         # Download all existing games in selected collections first
         self.download_all_collection_games()
@@ -1133,17 +1257,24 @@ class EnhancedLibrarySection:
         self.actively_syncing_collections.update(self.selected_collections_for_sync)
         
         def sync_worker():
+            self.parent.log_message(f"🚀 Collection sync worker thread started with {self.collection_sync_interval}s interval")
             while self.collection_auto_sync_enabled:
                 try:
-                    if self.current_view_mode == 'collection':
-                        self.check_selected_collections_for_changes()
+                    self.parent.log_message(f"⏰ Collection sync worker: about to check collections...")
+                    # Check all actively syncing collections, not just selected ones
+                    self.check_actively_syncing_collections()
+                    self.parent.log_message(f"😴 Collection sync worker: sleeping for {self.collection_sync_interval}s...")
                     time.sleep(self.collection_sync_interval)
                 except Exception as e:
+                    self.parent.log_message(f"❌ Collection sync worker error: {e}")
                     print(f"Collection sync error: {e}")
-                    time.sleep(60)  # Back off on error
+                    time.sleep(60)
+            
+            self.parent.log_message(f"🛑 Collection sync worker thread stopped")
         
         self.collection_sync_thread = threading.Thread(target=sync_worker, daemon=True)
         self.collection_sync_thread.start()
+        self.parent.log_message(f"🎯 Collection sync thread started successfully")
 
         self.refresh_collection_checkboxes()
 
@@ -1209,7 +1340,7 @@ class EnhancedLibrarySection:
         threading.Thread(target=download_all, daemon=True).start()
 
     def initialize_collection_caches(self):
-        """Initialize ROM ID caches for all selected collections"""
+        """Initialize ROM ID caches for actively syncing collections"""
         if not (self.parent.romm_client and self.parent.romm_client.authenticated):
             return
         
@@ -1218,7 +1349,8 @@ class EnhancedLibrarySection:
                 all_collections = self.parent.romm_client.get_collections()
                 for collection in all_collections:
                     collection_name = collection.get('name', '')
-                    if collection_name in self.selected_collections_for_sync:
+                    # Only cache actively syncing collections
+                    if collection_name in self.actively_syncing_collections:
                         collection_id = collection.get('id')
                         collection_roms = self.parent.romm_client.get_collection_roms(collection_id)
                         
@@ -1228,13 +1360,12 @@ class EnhancedLibrarySection:
                         setattr(self, cache_key, current_rom_ids)
                         
                         GLib.idle_add(lambda name=collection_name, count=len(current_rom_ids): 
-                                    self.parent.log_message(f"📋 Initialized cache for '{name}': {count} games"))
+                                    self.parent.log_message(f"🔋 Initialized cache for '{name}': {count} games"))
             
             except Exception as e:
                 GLib.idle_add(lambda err=str(e): 
                             self.parent.log_message(f"❌ Cache initialization error: {err}"))
         
-        # Initialize in background
         threading.Thread(target=init_caches, daemon=True).start()
 
     def stop_collection_auto_sync(self):
@@ -1243,10 +1374,19 @@ class EnhancedLibrarySection:
         self.collection_sync_thread = None
         self.refresh_collection_checkboxes()
 
-    def check_selected_collections_for_changes(self):
-        """Check if selected collections have changed and handle additions/removals"""
+    def check_actively_syncing_collections(self):
+        """Check actively syncing collections for changes"""
         if not (self.parent.romm_client and self.parent.romm_client.authenticated):
             return
+        
+        # ADD THIS LOGGING
+        if hasattr(self, '_sync_check_count'):
+            self._sync_check_count += 1
+        else:
+            self._sync_check_count = 1
+        
+        # ADD THIS - ALWAYS LOG
+        self.parent.log_message(f"🔄 Collection autosync running: checking {len(self.actively_syncing_collections)} collections...")
         
         try:
             all_collections = self.parent.romm_client.get_collections()
@@ -1254,7 +1394,8 @@ class EnhancedLibrarySection:
             
             for collection in all_collections:
                 collection_name = collection.get('name', '')
-                if collection_name not in self.selected_collections_for_sync:
+                # Check actively syncing collections, not UI selected ones
+                if collection_name not in self.actively_syncing_collections:
                     continue
                     
                 collection_id = collection.get('id')
@@ -1275,36 +1416,39 @@ class EnhancedLibrarySection:
                     removed_rom_ids = previous_rom_ids - current_rom_ids
                     
                     if added_rom_ids:
-                        GLib.idle_add(lambda: self.parent.log_message(
-                            f"📥 Collection '{collection_name}': {len(added_rom_ids)} games added"))
+                        GLib.idle_add(lambda name=collection_name, count=len(added_rom_ids): 
+                            self.parent.log_message(f"🔥 Collection '{name}': {count} games added"))
                         self.handle_added_games(collection_roms, added_rom_ids, collection_name)
                     
                     if removed_rom_ids:
-                        GLib.idle_add(lambda: self.parent.log_message(
-                            f"📤 Collection '{collection_name}': {len(removed_rom_ids)} games removed"))
+                        GLib.idle_add(lambda name=collection_name, count=len(removed_rom_ids): 
+                            self.parent.log_message(f"🗑️ Collection '{name}': {count} games removed"))
                         self.handle_removed_games(removed_rom_ids, collection_name)
                     
-                    # Update cache
-                    setattr(self, cache_key, current_rom_ids)
+                # MAKE SURE THIS LINE IS OUTSIDE THE IF BLOCKS AND ALWAYS EXECUTES:
+                setattr(self, cache_key, current_rom_ids)  # This must happen after handling changes
+            
+            # At the end of the method, after the for loop
+            if not changes_detected and len(self.actively_syncing_collections) > 0:
+                self.parent.log_message(f"✅ Collection check complete: no changes detected in {len(self.actively_syncing_collections)} collections")            
             
             if changes_detected:
-                # Refresh the collections view
-                GLib.idle_add(self.load_collections_view)
-                
+                # Refresh the collections view if we're in collections mode
+                if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+                    GLib.idle_add(self.load_collections_view)
+                    
         except Exception as e:
             print(f"Collection change check error: {e}")
 
     def handle_added_games(self, collection_roms, added_rom_ids, collection_name):
         """Automatically download newly added games"""
-        # Auto-download is always enabled
-        if False:  # Never skip auto-download
-            GLib.idle_add(lambda: self.parent.log_message(f"📥 New games detected in '{collection_name}' but auto-download disabled"))
-            return
-        
         def download_new_games():
             try:
                 download_dir = Path(self.parent.rom_dir_row.get_text())
                 downloaded_count = 0
+                
+                # Create a stable reference to collection name
+                current_collection = str(collection_name)
                 
                 for rom in collection_roms:
                     if rom.get('id') not in added_rom_ids:
@@ -1315,88 +1459,141 @@ class EnhancedLibrarySection:
                     
                     # Skip if already downloaded
                     if processed_game.get('is_downloaded'):
-                        GLib.idle_add(lambda name=processed_game.get('name'): 
-                                    self.parent.log_message(f"  ✅ {name} already downloaded"))
+                        self.parent.log_message(f"  ✅ {processed_game.get('name')} already downloaded")
                         continue
                     
-                    # Download the game
-                    GLib.idle_add(lambda name=processed_game.get('name'): 
-                                self.parent.log_message(f"  ⬇️ Auto-downloading {name}..."))
+                    # Log with stable collection reference
+                    game_name = processed_game.get('name')
+                    self.parent.log_message(f"  ⬇️ Auto-downloading {game_name} from '{current_collection}'...")
                     
-                    self.parent.download_game(processed_game, is_bulk_operation=True)
-                    downloaded_count += 1
+                    # Use direct download instead of UI system
+                    if self.download_game_directly(processed_game):
+                        downloaded_count += 1
+                        self.parent.log_message(f"  ✅ {game_name} downloaded from '{current_collection}'")
+                        
+                        processed_game['collection'] = current_collection
+                        
+                        # Fix: Capture correct ROM data immediately
+                        current_rom_id = rom.get('id')
+                        current_rom_name = rom.get('name', 'Unknown')
+                        
+                        def debug_and_update():
+                            self.parent.log_message(f"DEBUG: Processing ROM {current_rom_id} - {current_rom_name}")
+                            
+                            # Update processed_game to reflect downloaded status
+                            platform_slug = processed_game.get('platform_slug', 'Unknown')
+                            file_name = processed_game.get('file_name', '')
+                            download_dir = Path(self.parent.rom_dir_row.get_text())
+                            
+                            if self.parent.retroarch.is_retrodeck_installation():
+                                mapped_slug = self.parent.map_platform_slug_for_retrodeck(platform_slug)
+                            else:
+                                mapped_slug = platform_slug
+                                
+                            local_path = download_dir / mapped_slug / file_name
+                            
+                            if local_path.exists() and local_path.stat().st_size > 1024:
+                                processed_game['is_downloaded'] = True
+                                processed_game['local_path'] = str(local_path)
+                                processed_game['local_size'] = local_path.stat().st_size
+                                self.parent.log_message(f"DEBUG: Marked as downloaded - {local_path}")
+                            
+                            # Update available_games
+                            for i, game in enumerate(self.parent.available_games):
+                                if game.get('rom_id') == current_rom_id:
+                                    self.parent.available_games[i] = processed_game
+                                    break
+                            else:
+                                self.parent.available_games.append(processed_game)
+                            
+                            # Force collections view refresh
+                            if self.current_view_mode == 'collection':
+                                self.collections_cache_time = 0
+                                self.load_collections_view()
+                            
+                            return False
+                        
+                        GLib.idle_add(debug_and_update)
+                    else:
+                        self.parent.log_message(f"  ❌ Failed to download {game_name} from '{current_collection}'")
                 
                 if downloaded_count > 0:
-                    GLib.idle_add(lambda count=downloaded_count, col=collection_name: 
-                                self.parent.log_message(f"🎯 Started download of {count} new games from '{col}'"))
-                
+                    self.parent.log_message(f"🎯 Auto-downloaded {downloaded_count} new games from '{current_collection}'")
+                    
+                    # Just update the current view instead of full sync
+                    def refresh_collections_view():
+                        if (hasattr(self.parent, 'library_section') and 
+                            hasattr(self.parent.library_section, 'current_view_mode') and
+                            self.parent.library_section.current_view_mode == 'collection'):
+                            self.parent.library_section.load_collections_view()
+                        return False
+                    
+                    GLib.timeout_add(500, refresh_collections_view)
+                    
             except Exception as e:
-                GLib.idle_add(lambda err=str(e): 
-                            self.parent.log_message(f"❌ Auto-download error: {err}"))
+                self.parent.log_message(f"❌ Auto-download error: {e}")
         
         # Run downloads in background
         threading.Thread(target=download_new_games, daemon=True).start()
 
     def handle_removed_games(self, removed_rom_ids, collection_name):
-        """Handle games removed from collection - delete if not in other synced collections"""
-        # Auto-delete is always disabled for safety
-        if True:  # Always skip auto-delete
-            GLib.idle_add(lambda: self.parent.log_message(f"📤 Games removed from '{collection_name}' but auto-delete disabled"))
-            return
+        """Handle removed games - always delete if not in other synced collections"""
+        download_dir = Path(self.parent.rom_dir_row.get_text())
+        deleted_count = 0
         
-        def check_and_delete():
-            try:
-                # Find games that were removed
-                games_to_check = []
+        # Find and delete removed games
+        for game in self.parent.available_games:
+            if game.get('rom_id') in removed_rom_ids and game.get('is_downloaded'):
+                # Check if game exists in other synced collections
+                found_in_other = False
+                for other_collection in self.actively_syncing_collections:
+                    if other_collection != collection_name:
+                        # Check if ROM ID exists in other collection's cache
+                        other_cache = getattr(self, f'_collection_roms_{other_collection}', set())
+                        if game.get('rom_id') in other_cache:
+                            found_in_other = True
+                            break
+                
+                if not found_in_other:
+                    local_path = Path(game.get('local_path', ''))
+                    if local_path.exists():
+                        try:
+                            local_path.unlink()
+                            self.parent.log_message(f"  🗑️ Deleted {game.get('name')}")
+                            deleted_count += 1
+                        except Exception as e:
+                            self.parent.log_message(f"  ❌ Failed to delete {game.get('name')}: {e}")
+        
+        if deleted_count > 0:
+            self.parent.log_message(f"Auto-deleted {deleted_count} games removed from '{collection_name}'")
+            
+            def update_ui_after_deletion():
+                # Update master games list - mark as not downloaded
                 for game in self.parent.available_games:
-                    if game.get('rom_id') in removed_rom_ids and game.get('is_downloaded'):
-                        games_to_check.append(game)
+                    if game.get('rom_id') in removed_rom_ids:
+                        game['is_downloaded'] = False
+                        game['local_path'] = None
+                        game['local_size'] = 0
                 
-                if not games_to_check:
-                    return
-                
-                # Check if removed games exist in other synced collections
-                other_synced_collections = self.selected_collections_for_sync - {collection_name}
-                if not other_synced_collections:
-                    # No other synced collections, safe to delete all
-                    games_to_delete = games_to_check
+                # Force tree view refresh regardless of view mode
+                if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+                    # Remove games entirely from collections cache
+                    if hasattr(self, 'collections_games'):
+                        self.collections_games = [
+                            game for game in self.collections_games 
+                            if game.get('rom_id') not in removed_rom_ids
+                        ]
+                    
+                    # Clear cache and reload collections view
+                    self.collections_cache_time = 0
+                    self.load_collections_view()  # This ensures proper refresh
                 else:
-                    games_to_delete = []
-                    
-                    # Check each game against other synced collections
-                    for game in games_to_check:
-                        rom_id = game.get('rom_id')
-                        found_in_other = False
-                        
-                        # Check if this game exists in other synced collections
-                        for other_game in getattr(self, 'collections_games', []):
-                            if (other_game.get('rom_id') == rom_id and 
-                                other_game.get('collection') in other_synced_collections):
-                                found_in_other = True
-                                break
-                        
-                        if not found_in_other:
-                            games_to_delete.append(game)
-                            GLib.idle_add(lambda name=game.get('name'): 
-                                        self.parent.log_message(f"  🗑️ {name} not in other synced collections - will delete"))
-                        else:
-                            GLib.idle_add(lambda name=game.get('name'): 
-                                        self.parent.log_message(f"  🔒 {name} found in other synced collections - keeping"))
+                    # Platform view - full refresh
+                    self.update_games_library(self.parent.available_games)
                 
-                # Delete games that are safe to remove
-                if games_to_delete:
-                    for game in games_to_delete:
-                        self.parent.delete_game_file(game, is_bulk_operation=True)
-                    
-                    GLib.idle_add(lambda count=len(games_to_delete), col=collection_name: 
-                                self.parent.log_message(f"🗑️ Auto-deleted {count} games removed from '{col}'"))
-                
-            except Exception as e:
-                GLib.idle_add(lambda err=str(e): 
-                            self.parent.log_message(f"❌ Auto-delete error: {err}"))
-        
-        # Run deletion check in background
-        threading.Thread(target=check_and_delete, daemon=True).start()
+                return False
+            
+            GLib.idle_add(update_ui_after_deletion)
 
     def on_collection_checkbox_changed(self, checkbox, collection_name):
         """Handle collection selection (visual state only)"""
@@ -1473,31 +1670,27 @@ class EnhancedLibrarySection:
                             selected_collections.add(item.platform_name)
             
             if selected_collections:
-                # Update the selected collections set
-                self.selected_collections_for_sync = selected_collections
-                
+                self.actively_syncing_collections = selected_collections
                 self.start_collection_auto_sync()
                 toggle_button.set_label("Auto-Sync: ON")
-                self.parent.log_message(f"🔡 Collection auto-sync enabled for {len(selected_collections)} collections")
+                self.parent.log_message(f"🟡 Collection auto-sync enabled for {len(selected_collections)} collections")
                 
-                # Save the updated state
+                # Clear UI selections after enabling
+                self.selected_collections_for_sync.clear()
                 self.save_selected_collections()
-                
-                # Refresh UI to show updated selection
                 self.refresh_collection_checkboxes()
                 
-                self.parent.log_message(f"⬇️ Downloading all missing games from selected collections...")
-            else:
-                toggle_button.set_active(False)
-                self.parent.log_message("⚠️ Please select collections (checkbox or row) for sync first")
         else:
             self.stop_collection_auto_sync()
-            self.selected_collections_for_sync.clear()  # Clear all selections
-            self.save_selected_collections()  # Save empty selection
-            self.refresh_collection_checkboxes()  # Update UI
+            self.actively_syncing_collections.clear()
+            
+            # Clear UI selections after disabling  
+            self.selected_collections_for_sync.clear()
+            self.save_selected_collections()
+            self.refresh_collection_checkboxes()
             
             toggle_button.set_label("Auto-Sync: OFF")
-            self.parent.log_message("🔴 Collection auto-sync disabled and selections cleared")
+            self.parent.log_message("🔴 Collection auto-sync disabled")
             
             # Save the disabled state
             self.save_selected_collections()
@@ -1593,32 +1786,28 @@ class EnhancedLibrarySection:
     def restore_auto_sync_state(self):
         """Restore auto-sync state after app restart"""
         try:
-            # Check if we're connected to RomM and have selected collections
             if (self.parent.romm_client and 
                 self.parent.romm_client.authenticated and 
                 self.selected_collections_for_sync and
                 not self.collection_auto_sync_enabled):
-                
-                self.parent.log_message(f"🔄 Restoring collection auto-sync for {len(self.selected_collections_for_sync)} collections")
-                
-                # Update UI button state if it exists
+
+                # 🚫 Clear previous selections
+                self.selected_collections_for_sync.clear()
+
+                self.parent.log_message("⚠️ Skipping collection selection restore (auto-sync only)")
+
+                # Just enable the global auto-sync flag
+                self.collection_auto_sync_enabled = True
                 if hasattr(self, 'collection_auto_sync_btn'):
                     self.collection_auto_sync_btn.set_active(True)
                     self.collection_auto_sync_btn.set_label("Auto-Sync: ON")
-                
-                # Start auto-sync
-                self.start_collection_auto_sync()
 
-                # Ensure UI state is properly restored
-                self.actively_syncing_collections.update(self.selected_collections_for_sync)
-                self.refresh_collection_checkboxes()
-                
-                self.parent.log_message("✅ Collection auto-sync restored successfully")
-                
+                self.parent.log_message("✅ Auto-sync restored without restoring selections")
+
         except Exception as e:
             self.parent.log_message(f"⚠️ Failed to restore auto-sync: {e}")
-        
-        return False  # Don't repeat
+
+        return False
 
     def apply_filters(self, games):
         """Apply both platform and search filters to games list"""
@@ -1679,8 +1868,11 @@ class EnhancedLibrarySection:
             
             self.parent.log_message(f"Started auto-sync for {len(current_selections)} collections")
         
-        # Save persistent state (DON'T clear selected_collections_for_sync)
+        # Save persistent state and clear UI selections
         self.save_selected_collections()
+
+        # Clear UI selections after any toggle operation
+        self.selected_collections_for_sync.clear()
         self.refresh_collection_checkboxes()
         self.update_sync_button_state()
 
@@ -2097,8 +2289,6 @@ class EnhancedLibrarySection:
             return
         
         current_mode = getattr(self, 'current_view_mode', 'platform')
-        
-        log_memory_usage(f"ui_update_start_{len(games)}_games") 
         
         # Apply current filters (platform + search)
         games = self.apply_filters(games)
@@ -2632,7 +2822,6 @@ class EnhancedLibrarySection:
                             processed_game['is_downloaded'] = existing_game.get('is_downloaded', False)
                             processed_game['local_path'] = existing_game.get('local_path')
                             processed_game['local_size'] = existing_game.get('local_size', 0)
-                            print(f"🔍 DEBUG: Merged download status for {processed_game['name']}: downloaded={processed_game['is_downloaded']}")
                         
                         # Add collection info
                         processed_game['collection'] = collection_name
@@ -2717,22 +2906,16 @@ class EnhancedLibrarySection:
                 rom_id = item.game_data.get('rom_id')
                 progress_info = self.parent.download_progress.get(rom_id) if rom_id else None
                 
-                print(f"🔍 DEBUG: update_status called for ROM {rom_id}, progress: {progress_info}")
-                
                 if progress_info and progress_info.get('downloading'):
                     progress = progress_info.get('progress', 0.0)
                     label.set_text(f"{progress*100:.0f}%")
-                    print(f"🔍 DEBUG: Status set to {progress*100:.0f}%")
                 elif progress_info and progress_info.get('completed'):
                     label.set_text("✅")
-                    print(f"🔍 DEBUG: Status set to completed")
                 elif progress_info and progress_info.get('failed'):
                     label.set_text("❌")
-                    print(f"🔍 DEBUG: Status set to failed")
                 else:
                     status = "✅" if item.is_downloaded else "⬇️"
                     label.set_text(status)
-                    print(f"🔍 DEBUG: Status set to default: {status} (downloaded: {item.is_downloaded})")
             
             item.connect('notify::name', update_status)
             update_status()  # Initial update
@@ -2749,8 +2932,6 @@ class EnhancedLibrarySection:
             def update_size(*args):
                 rom_id = item.game_data.get('rom_id')
                 progress_info = self.parent.download_progress.get(rom_id) if rom_id else None
-                
-                print(f"🔍 DEBUG: update_size called for ROM {rom_id}, progress: {progress_info}")
                 
                 if progress_info and progress_info.get('downloading'):
                     downloaded = progress_info.get('downloaded', 0)
@@ -2777,11 +2958,9 @@ class EnhancedLibrarySection:
                         final_text = f"{size_text} ..."
                         
                     label.set_text(final_text)
-                    print(f"🔍 DEBUG: Size set to: {final_text}")
                 else:
                     size_text = item.size_text
                     label.set_text(size_text)
-                    print(f"🔍 DEBUG: Size set to default: {size_text}")
             
             item.connect('notify::name', update_size)
             update_size()  # Initial update
@@ -3509,13 +3688,10 @@ class EnhancedLibrarySection:
                 if rom_id and collection_name:
                     collection_key = f"collection:{rom_id}:{collection_name}"
                     should_be_active = collection_key in self.selected_game_keys
-                    print(f"🔍 BIND: {game_name} | Key: {collection_key} | In selected: {should_be_active}")
-                    print(f"🔍 BIND: Available keys: {list(self.selected_game_keys)}")
                 else:
                     # Fallback for games without ROM ID
                     name_key = f"collection:{game_data.get('name', '')}:{game_data.get('platform', '')}:{collection_name}"
                     should_be_active = name_key in self.selected_game_keys
-                    print(f"🔍 BIND: {game_name} | Name Key: {name_key} | In selected: {should_be_active}")
             else:
                 # Platform view: use standard identifier
                 identifier_type, identifier_value = self.get_game_identifier(game_data)
@@ -3538,8 +3714,6 @@ class EnhancedLibrarySection:
                         return False
                 
                 GLib.timeout_add(1, force_checkbox_update)
-
-            print(f"🔍 BIND: Set {item.game_data.get('name', 'Unknown')} checkbox to {should_be_active}")
             
         elif isinstance(item, PlatformItem):
             checkbox.set_visible(True)
@@ -3551,7 +3725,6 @@ class EnhancedLibrarySection:
             if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
                 collection_name = item.platform_name
                 is_checked = collection_name in self.selected_collections_for_sync
-                print(f"🔍 BIND: Collection '{collection_name}' checkbox - is_checked: {is_checked}")  # MOVE HERE
                 
                 # Check if this collection is selected for auto-sync (checkbox OR row selection)
                 all_selected_collections = self.get_collections_for_autosync()
@@ -3590,10 +3763,7 @@ class EnhancedLibrarySection:
                 # Count selected games using the dual tracking system
                 total_games = len(item.games)
                 selected_games = 0
-                
-                print(f"🔍 PLATFORM BIND: {item.platform_name}")
-                print(f"  🔑 All selected keys: {list(self.selected_game_keys)}")
-
+            
                 for game_data in item.games:  # Fixed: use game_data instead of game
                     identifier_type, identifier_value = self.get_game_identifier(game_data)
                     if identifier_type == 'rom_id' and identifier_value in self.selected_rom_ids:
@@ -3601,21 +3771,16 @@ class EnhancedLibrarySection:
                     elif identifier_type == 'game_key' and identifier_value in self.selected_game_keys:
                         selected_games += 1
                 
-                print(f"  📊 Platform checkbox: {selected_games}/{total_games} games selected")
-                
                 # Set platform checkbox state
                 if selected_games == 0:
                     checkbox.set_active(False)
                     checkbox.set_inconsistent(False)
-                    print(f"    -> Setting platform checkbox: UNCHECKED")
                 elif selected_games == total_games and total_games > 0:
                     checkbox.set_active(True)
                     checkbox.set_inconsistent(False)
-                    print(f"    -> Setting platform checkbox: CHECKED")
                 else:
                     checkbox.set_active(False)
                     checkbox.set_inconsistent(True)
-                    print(f"    -> Setting platform checkbox: INCONSISTENT")
 
                 pass
 
@@ -4367,61 +4532,10 @@ class RomMClient:
             print(f"❌ Parallel fetch error: {e}")
             return [], 0
         
-    def _find_optimal_page_size(self, total_items, progress_callback):
-        # For libraries under 5000, skip all testing
-        if total_items <= 5000:
-            print(f"⚡ Small library ({total_items:,}), using single request")
-            return total_items
-        
-        # Check cache first
-        cached_page_size = getattr(self, '_cached_page_size', None)
-        if cached_page_size:
-            print(f"⚡ Using cached page size: {cached_page_size:,}")
-            return cached_page_size
-        
-        # Only test for large libraries, and test fewer sizes
-        test_sizes = [3000, 2000]  # Reduced from [5000, 3000, 2000, 1000]
-        
-        for size in test_sizes:
-            try:  # ADD THIS LINE
-                response = self.session.get(
-                    urljoin(self.base_url, '/api/roms'),
-                    params={'limit': size, 'offset': 0, 'fields': 'id,name'},
-                    timeout=15
-                )
-                    
-                if response.status_code == 200:
-                    data = response.json()
-                    items = data.get('items', [])
-                    
-                    expected_items = min(size, total_items)
-                    variance = abs(len(items) - expected_items)
-                    
-                    if variance <= 10 or len(items) >= expected_items:
-                        print(f"✅ Optimal page size found: {size:,} (cached for future use)")
-                        self._cached_page_size = size
-                        return size
-                        
-                elif response.status_code == 422:
-                    print(f"❌ Page size {size:,}: Server limit exceeded")
-                    continue
-                        
-            except Exception as e:
-                print(f"❌ Page size {size:,} test failed: {e}")
-                continue
-        
-        # Fallback (MOVE THIS OUTSIDE THE LOOP)
-        fallback_size = 1000
-        self._cached_page_size = fallback_size
-        print(f"⚠️ Using fallback page size: {fallback_size}")
-        return fallback_size
-
     def _fetch_pages_parallel(self, total_items, page_size, pages_needed, progress_callback):
         """Memory-optimized: Stream and process games in smaller chunks"""
         import concurrent.futures
         import threading
-        
-        log_memory_usage("fetch_start")
         
         max_workers = 4
         completed_pages = 0
@@ -4467,9 +4581,7 @@ class RomMClient:
             # Add clear batch progress message
             if progress_callback:
                 progress_callback('page', f'🔄 Batch {batch_start}-{batch_end-1} of {pages_needed} pages')
-            
-            log_memory_usage(f"batch_{batch_start}_start")
-            
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(batch_size, max_workers)) as executor:
                 future_to_page = {executor.submit(fetch_single_page, page): page for page in batch_pages}
                 
@@ -4504,7 +4616,6 @@ class RomMClient:
                 })
             
             print(f"✅ Batch {batch_start}-{batch_end-1} complete: {batch_games_count} games in this batch")
-            log_memory_usage(f"batch_{batch_start}_done")
             
             import gc
             gc.collect()
@@ -4513,7 +4624,6 @@ class RomMClient:
         if current_chunk:
             final_games.extend(current_chunk)
         
-        log_memory_usage("fetch_complete_optimized")
         print(f"🎉 Fetch complete: {len(final_games):,} games loaded with optimized memory usage")
         
         return final_games
@@ -6846,7 +6956,6 @@ class SyncWindow(Gtk.ApplicationWindow):
                 def periodic_cleanup():
                     import gc
                     gc.collect()
-                    log_memory_usage("periodic_cleanup")
                     return True  # Continue running
                 
                 # Clean up every 5 minutes
@@ -7353,11 +7462,8 @@ class SyncWindow(Gtk.ApplicationWindow):
         else:
             mapped_slug = platform_slug  # Use original slug for regular RetroArch
         platform_dir = download_dir / mapped_slug
-        print(f"DEBUG: Download path: {platform_dir}")
         local_path = platform_dir / file_name
         is_downloaded = local_path.exists() and local_path.stat().st_size > 1024
-
-        print(f"DEBUG: Platform slug for PlayStation: '{platform_slug}' -> '{mapped_slug}'")
         
         display_name = Path(file_name).stem if file_name else rom.get('name', 'Unknown')
         
@@ -8984,18 +9090,14 @@ class SyncWindow(Gtk.ApplicationWindow):
                 return
                 
             final_games, total_count = romm_result
-            log_memory_usage(f"raw_fetch_{len(final_games)}_games")
-            
+
             # Final processing and UI update
             games = []
             for rom in final_games:
                 processed_game = self.process_single_rom(rom, download_dir)
                 games.append(processed_game)
-
-            log_memory_usage(f"processed_{len(games)}_games")
             
             games = self.library_section.sort_games_consistently(games)
-            log_memory_usage(f"sorted_{len(games)}_games")
             
             def final_update():
                 self.available_games = games
@@ -12085,6 +12187,15 @@ class DaemonCollectionSync:
             if success:
                 self.log(f"  ✅ Downloaded {rom.get('name')}")
                 downloaded_count += 1
+                
+                # Update available_games with collection info
+                for game in self.available_games:
+                    if game.get('rom_id') == rom.get('id'):
+                        game['collection'] = collection_name 
+                        game['is_downloaded'] = True
+                        game['local_path'] = str(local_path)
+                        game['local_size'] = local_path.stat().st_size
+                        break
             else:
                 self.log(f"  ❌ Failed to download {rom.get('name')}: {message}")
         
@@ -12123,7 +12234,9 @@ class DaemonCollectionSync:
                             self.log(f"  ❌ Failed to delete {game.get('name')}: {e}")
         
         if deleted_count > 0:
-            self.log(f"Auto-deleted {deleted_count} games removed from '{collection_name}'")
+            self.parent.log_message(f"Auto-deleted {deleted_count} games removed from '{collection_name}'")
+
+            GLib.idle_add(update_ui_after_deletion)
 
 def main():
     """Main entry point"""
