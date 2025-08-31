@@ -1511,6 +1511,21 @@ class EnhancedLibrarySection:
                                 self.collections_cache_time = 0
                                 self.load_collections_view()
                             
+                            # Force refresh platform item for this collection
+                            for i in range(self.library_model.root_store.get_n_items()):
+                                platform_item = self.library_model.root_store.get_item(i)
+                                if platform_item.platform_name == current_collection:
+                                    # Update the game in platform's games list
+                                    for j, pg in enumerate(platform_item.games):
+                                        if pg.get('rom_id') == current_rom_id:
+                                            platform_item.games[j] = processed_game
+                                            break
+                                    # Trigger property updates
+                                    platform_item.notify('name')
+                                    platform_item.notify('status-text') 
+                                    platform_item.notify('size-text')
+                                    break
+                            
                             return False
                         
                         GLib.idle_add(debug_and_update)
@@ -1930,73 +1945,113 @@ class EnhancedLibrarySection:
             for progress in self.parent.download_progress.values()
         )
 
+    def should_cache_collections_at_startup(self):
+        """Determine if collections should be cached at startup based on usage patterns"""
+        # Only cache if user has used collections view recently
+        try:
+            last_collection_use = self.parent.settings.get('Collections', 'last_used', '0')
+            last_use_time = float(last_collection_use)
+            current_time = time.time()
+            
+            # Cache if used in last 7 days, or if auto-sync is enabled
+            recent_use = (current_time - last_use_time) < (7 * 24 * 60 * 60)
+            auto_sync_enabled = self.parent.settings.get('Collections', 'auto_sync_enabled', 'false') == 'true'
+            
+            return recent_use or auto_sync_enabled
+        except:
+            return False
+
     def cache_collections_data(self):
-        """Cache collections data without switching view"""
+        """Cache collections with full processed game caching"""
         if not (self.parent.romm_client and self.parent.romm_client.authenticated):
             return
         
-        def load_collections():
+        def load_collections_optimized():
             try:
+                import time, json
+                start_time = time.time()
+                
+                # Cache file paths
+                cache_dir = Path.home() / '.cache' / 'romm_launcher'
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                server_hash = self.parent.romm_client.base_url.replace('http://', '').replace('https://', '').replace(':', '_').replace('/', '_')
+                
+                roms_cache_file = cache_dir / f'collections_{server_hash}.json'
+                games_cache_file = cache_dir / f'games_{server_hash}.json'
+                
+                # Try to load processed games cache first (fastest path)
+                if games_cache_file.exists():
+                    try:
+                        cache_age = time.time() - games_cache_file.stat().st_mtime
+                        if cache_age < 3600:  # 1 hour
+                            with open(games_cache_file, 'r') as f:
+                                self.collections_games = json.load(f)
+                            print(f"⚡ Loaded {len(self.collections_games)} games from cache in {time.time()-start_time:.2f}s")
+                            return
+                    except:
+                        pass
+                
+                # Load ROM cache if no games cache
+                if roms_cache_file.exists():
+                    try:
+                        with open(roms_cache_file, 'r') as f:
+                            self._collections_rom_cache = json.load(f)
+                        print(f"📁 Loaded {len(self._collections_rom_cache)} collections from disk")
+                    except:
+                        self._collections_rom_cache = {}
+                else:
+                    self._collections_rom_cache = {}
+                
+                # Get current collections and fetch any new ones
                 all_collections = self.parent.romm_client.get_collections()
+                custom_collections = [c for c in all_collections if not c.get('is_auto_generated', False)]
                 
-                # Filter to only custom collections
-                custom_collections = []
-                for collection in all_collections:
-                    is_custom = (
-                        not collection.get('is_auto_generated', False) and
-                        collection.get('type') != 'auto' and
-                        'auto' not in collection.get('name', '').lower()
-                    )
-                    if is_custom:
-                        custom_collections.append(collection)
+                collections_to_fetch = []
+                for collection in custom_collections:
+                    cache_key = f"{collection.get('id')}:{collection.get('name')}"
+                    if cache_key not in self._collections_rom_cache:
+                        collections_to_fetch.append(collection)
                 
-                if not custom_collections:
-                    return
+                if collections_to_fetch:
+                    print(f"⚡ Fetching {len(collections_to_fetch)} new collections")
+                    for collection in collections_to_fetch:
+                        roms = self.parent.romm_client.get_collection_roms(collection.get('id'))
+                        cache_key = f"{collection.get('id')}:{collection.get('name')}"
+                        self._collections_rom_cache[cache_key] = roms
+                    
+                    # Save ROM cache
+                    with open(roms_cache_file, 'w') as f:
+                        json.dump(self._collections_rom_cache, f)
                 
-                # Create lookup map for download status
-                existing_games_map = {}
-                for game in self.parent.available_games:
-                    rom_id = game.get('rom_id')
-                    if rom_id:
-                        existing_games_map[rom_id] = game
-                
+                # Build games list
                 all_collection_games = []
                 for collection in custom_collections:
-                    collection_id = collection.get('id')
-                    collection_name = collection.get('name', 'Unknown Collection')
-                    
-                    collection_roms = self.parent.romm_client.get_collection_roms(collection_id)
-                    
-                    for rom in collection_roms:
-                        processed_game = self.parent.process_single_rom(rom, Path(self.parent.rom_dir_row.get_text()))
-                        
-                        # Merge with existing game data
-                        rom_id = rom.get('id')
-                        if rom_id and rom_id in existing_games_map:
-                            existing_game = existing_games_map[rom_id]
-                            processed_game['is_downloaded'] = existing_game.get('is_downloaded', False)
-                            processed_game['local_path'] = existing_game.get('local_path')
-                            processed_game['local_size'] = existing_game.get('local_size', 0)
-                        
-                        processed_game['collection'] = collection_name
-                        all_collection_games.append(processed_game)
+                    cache_key = f"{collection.get('id')}:{collection.get('name')}"
+                    for rom in self._collections_rom_cache.get(cache_key, []):
+                        game = {
+                            'name': Path(rom.get('fs_name', 'unknown')).stem,
+                            'rom_id': rom.get('id'),
+                            'platform': rom.get('platform_name', 'Unknown'),
+                            'file_name': rom.get('fs_name'),
+                            'is_downloaded': False,
+                            'collection': collection.get('name')
+                        }
+                        all_collection_games.append(game)
                 
-                # Cache the data
-                def cache_data():
-                    import time
-                    self.collections_games = all_collection_games.copy()
-                    self.collections_cache_time = time.time()
-                    # Also initialize cache_duration if not set
-                    if not hasattr(self, 'collections_cache_duration'):
-                        self.collections_cache_duration = 300
-                    print(f"✅ Collections data cached: {len(custom_collections)} collections, {len(all_collection_games)} games")
+                # Save processed games cache
+                try:
+                    with open(games_cache_file, 'w') as f:
+                        json.dump(all_collection_games, f)
+                except:
+                    pass
                 
-                GLib.idle_add(cache_data)
+                self.collections_games = all_collection_games
+                print(f"✅ Ready in {time.time()-start_time:.2f}s ({len(all_collection_games)} games)")
                 
             except Exception as e:
-                print(f"Collections cache error: {e}")
+                print(f"Error: {e}")
         
-        threading.Thread(target=load_collections, daemon=True).start()
+        threading.Thread(target=load_collections_optimized, daemon=True).start()
 
     def on_toggle_filter(self, button):
             """Toggle between showing all games and only downloaded games with no flicker."""
@@ -2754,24 +2809,31 @@ class EnhancedLibrarySection:
             self.parent.log_message("Please connect to RomM to view collections")
             return
         
-        # Check cache first - make this check more robust
+        # FIXED: More robust cache check
         import time
         current_time = time.time()
+        
+        # Initialize cache attributes if missing
+        if not hasattr(self, 'collections_games'):
+            self.collections_games = []
+        if not hasattr(self, 'collections_cache_time'):
+            self.collections_cache_time = 0
+        if not hasattr(self, 'collections_cache_duration'):
+            self.collections_cache_duration = 300
+        
         cache_valid = (
-            hasattr(self, 'collections_games') and 
-            self.collections_games and 
-            hasattr(self, 'collections_cache_time') and
+            self.collections_games and  # Has cached data
             current_time - self.collections_cache_time < self.collections_cache_duration
         )
         
         if cache_valid:
-            print(f"🔍 DEBUG: Using cached collections data ({len(self.collections_games)} games)")
+            print(f"Using cached collections data ({len(self.collections_games)} games)")
             self.library_model.update_library(self.collections_games, group_by='collection')
             return
         
-        # Show cached data immediately while loading fresh data
-        if hasattr(self, 'collections_games') and self.collections_games:
-            print(f"🔍 DEBUG: Showing stale cache while refreshing")
+        # Show cached data immediately if available, even if stale
+        if self.collections_games:
+            print(f"Showing stale cache while refreshing")
             self.library_model.update_library(self.collections_games, group_by='collection')
         
         print(f"🔍 DEBUG: Loading collections from API in background")
@@ -4729,6 +4791,41 @@ class RomMClient:
                                 }
                             progress_callback(progress_info)
             
+            # After successful download, check if extraction is needed
+            if download_path.suffix.lower() == '.zip' and actual_downloaded > 0:
+                should_extract = False
+                
+                # Check RomM metadata for original format clues
+                rom_details = rom_details.get('fs_name', filename)
+                original_had_extension = '.' in Path(rom_details).stem
+                
+                import zipfile
+                try:
+                    with zipfile.ZipFile(download_path, 'r') as zip_ref:
+                        file_list = zip_ref.namelist()
+                        
+                        # Indicators this should be extracted (directory-based game):
+                        # 1. Contains subdirectories with executable/data files
+                        has_subdirs = any('/' in f and not f.endswith('/') for f in file_list)
+                        # 2. Contains typical PC game files
+                        has_pc_game_files = any(f.lower().endswith(('.exe', '.bat', '.cfg', '.ini', '.dll')) for f in file_list)
+                        # 3. Multiple files WITHOUT typical ROM extensions
+                        rom_extensions = {'.nes', '.smc', '.sfc', '.bin', '.cue', '.iso', '.chd', '.n64', '.z64', '.v64'}
+                        non_rom_files = [f for f in file_list if not any(f.lower().endswith(ext) for ext in rom_extensions)]
+                        
+                        should_extract = (has_subdirs and has_pc_game_files) or \
+                                    (len(non_rom_files) > 1 and not original_had_extension)
+                                    
+                        if should_extract:
+                            extract_dir = download_path.parent / download_path.stem
+                            extract_dir.mkdir(exist_ok=True)
+                            zip_ref.extractall(extract_dir)
+                            download_path.unlink()
+                            print(f"Extracted directory-based game to {extract_dir}")
+                            
+                except zipfile.BadZipFile:
+                    pass
+                        
             print(f"Successfully downloaded {actual_downloaded} bytes to {download_path}")
             
             # Verify the download
@@ -8206,6 +8303,18 @@ class SyncWindow(Gtk.ApplicationWindow):
                 
                 if self.romm_client.authenticated:
                     self.log_message(f"✅ Authentication successful in {auth_time:.2f}s")
+
+                    # Move this right after authentication success, before other operations
+                    def preload_collections_smart():
+                        if hasattr(self, 'library_section'):
+                            # Only cache if actually needed
+                            if self.library_section.should_cache_collections_at_startup():
+                                self.library_section.cache_collections_data()
+                            else:
+                                print("⏭️ Skipping collections cache - not recently used")
+
+                    # Call immediately, not as thread
+                    GLib.timeout_add(100, lambda: (threading.Thread(target=preload_collections_smart, daemon=True).start(), False)[1])
                     
                     # STEP 3: Test basic API access
                     api_test_start = time.time()
@@ -8326,14 +8435,6 @@ class SyncWindow(Gtk.ApplicationWindow):
 
                     total_time = time.time() - start_time
                     self.log_message(f"🎉 Total connection time: {total_time:.2f}s")
-      
-                    # Preload collections data in background (cache only, don't switch view)
-                    def preload_collections():
-                        if hasattr(self, 'library_section'):
-                            # Only cache the data, don't actually switch to collections view
-                            self.library_section.cache_collections_data()
-
-                    threading.Thread(target=preload_collections, daemon=True).start() 
                         
                 else:
                     # Authentication failed logic...
