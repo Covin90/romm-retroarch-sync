@@ -1486,7 +1486,7 @@ class EnhancedLibrarySection:
                                 if local_path.exists() and local_path.stat().st_size > 1024:
                                     processed_game['is_downloaded'] = True
                                     processed_game['local_path'] = str(local_path)
-                                    processed_game['local_size'] = local_path.stat().st_size
+                                    processed_game['local_size'] = self.get_actual_file_size(local_path)
                                     self.parent.log_message(f"DEBUG: Marked as downloaded - {local_path}")
                                 
                                 # Update available_games
@@ -4715,7 +4715,6 @@ class RomMClient:
                 return False, f"Could not get ROM details: HTTP {rom_details_response.status_code}"
             
             rom_details = rom_details_response.json()
-            # print(f"ROM details keys: {list(rom_details.keys())}")
             
             # Try to find the filename in the ROM details
             filename = None
@@ -4739,9 +4738,25 @@ class RomMClient:
                 print(f"Available ROM fields: {rom_details}")
                 return False, "Could not find filename in ROM details"
             
-            # Now try the correct API endpoint with filename
+            # Check if this is a folder
+            is_folder = rom_details.get('multi', False) or \
+                    rom_details.get('fs_extension', '') == '' or \
+                    len(rom_details.get('files', [])) > 1
+
+            print(f"DEBUG: filename = '{filename}'")
+            print(f"DEBUG: rom_details.get('multi') = {rom_details.get('multi')}")
+            print(f"DEBUG: rom_details.get('fs_extension') = '{rom_details.get('fs_extension')}'")
+            print(f"DEBUG: files count = {len(rom_details.get('files', []))}")
+            print(f"DEBUG: is_folder = {is_folder}")
+
+            if is_folder:
+                folder_name = rom_details.get('fs_name', filename)
+                download_path = download_path.parent / folder_name
+                download_path.mkdir(parents=True, exist_ok=True)
+
+            # Use same API endpoint for both files and folders
             api_endpoint = f'/api/roms/{rom_id}/content/{filename}'
-            print(f"Trying correct API endpoint: {api_endpoint}")
+            print(f"DEBUG: Using API endpoint: {api_endpoint}")
             
             response = self.session.get(
                 urljoin(self.base_url, api_endpoint),
@@ -4767,6 +4782,13 @@ class RomMClient:
             total_size = int(response.headers.get('content-length', 0))
             print(f"File size from header: {total_size} bytes")
             
+            # For folders, use ROM metadata size for progress tracking
+            if is_folder:
+                metadata_size = rom_details.get('fs_size_bytes', 0)
+                if metadata_size > 0:
+                    total_size = metadata_size
+                    print(f"Using ROM metadata size for folder: {total_size} bytes")
+            
             # Create progress tracker
             if progress_callback:
                 progress = DownloadProgress(total_size, rom_name)
@@ -4778,66 +4800,73 @@ class RomMClient:
             actual_downloaded = 0
             start_time = time.time()
             
-            with open(download_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        actual_downloaded += len(chunk)
-                        
-                        # Update progress
-                        if progress_callback:
-                            if total_size > 0:
-                                progress_info = progress.update(len(chunk))
-                            else:
-                                # Create dynamic progress info
-                                elapsed = time.time() - start_time
-                                speed = actual_downloaded / elapsed if elapsed > 0 else 0
-                                
-                                progress_info = {
-                                    'progress': min(0.8, actual_downloaded / (10 * 1024 * 1024)),  # Progress toward 10MB
-                                    'downloaded': actual_downloaded,
-                                    'total': max(actual_downloaded, 1024 * 1024),
-                                    'speed': speed,
-                                    'eta': 0,
-                                    'filename': rom_name
-                                }
-                            progress_callback(progress_info)
-            
-            # After successful download, check if extraction is needed
-            if download_path.suffix.lower() == '.zip' and actual_downloaded > 0:
-                should_extract = False
-                
-                # Check RomM metadata for original format clues
-                rom_details = rom_details.get('fs_name', filename)
-                original_had_extension = '.' in Path(rom_details).stem
-                
+            if is_folder:
+                # For folders, download as zip then extract
+                import io
                 import zipfile
-                try:
-                    with zipfile.ZipFile(download_path, 'r') as zip_ref:
-                        file_list = zip_ref.namelist()
-                        
-                        # Indicators this should be extracted (directory-based game):
-                        # 1. Contains subdirectories with executable/data files
-                        has_subdirs = any('/' in f and not f.endswith('/') for f in file_list)
-                        # 2. Contains typical PC game files
-                        has_pc_game_files = any(f.lower().endswith(('.exe', '.bat', '.cfg', '.ini', '.dll')) for f in file_list)
-                        # 3. Multiple files WITHOUT typical ROM extensions
-                        rom_extensions = {'.nes', '.smc', '.sfc', '.bin', '.cue', '.iso', '.chd', '.n64', '.z64', '.v64'}
-                        non_rom_files = [f for f in file_list if not any(f.lower().endswith(ext) for ext in rom_extensions)]
-                        
-                        should_extract = (has_subdirs and has_pc_game_files) or \
-                                    (len(non_rom_files) > 1 and not original_had_extension)
-                                    
-                        if should_extract:
-                            extract_dir = download_path.parent / download_path.stem
-                            extract_dir.mkdir(exist_ok=True)
-                            zip_ref.extractall(extract_dir)
-                            download_path.unlink()
-                            print(f"Extracted directory-based game to {extract_dir}")
+                
+                # Read all content first
+                content = response.content
+                actual_downloaded = len(content)
+                
+                with zipfile.ZipFile(io.BytesIO(content)) as zip_ref:
+                    zip_ref.extractall(download_path)
+                    
+                print(f"Extracted folder to {download_path}")
+            else:
+                with open(download_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            actual_downloaded += len(chunk)
                             
-                except zipfile.BadZipFile:
-                    pass
-                        
+                            # Update progress
+                            if progress_callback:
+                                if total_size > 0:
+                                    progress_info = progress.update(len(chunk))
+                                else:
+                                    # Create dynamic progress info
+                                    elapsed = time.time() - start_time
+                                    speed = actual_downloaded / elapsed if elapsed > 0 else 0
+                                    
+                                    progress_info = {
+                                        'progress': min(0.8, actual_downloaded / (10 * 1024 * 1024)),
+                                        'downloaded': actual_downloaded,
+                                        'total': max(actual_downloaded, 1024 * 1024),
+                                        'speed': speed,
+                                        'eta': 0,
+                                        'filename': rom_name
+                                    }
+                                progress_callback(progress_info)
+                
+                # After successful download, check if extraction is needed (only for single files)
+                if download_path.suffix.lower() == '.zip' and actual_downloaded > 0:
+                    should_extract = False
+                    
+                    # For single files that happen to be zipped, apply heuristics
+                    import zipfile
+                    try:
+                        with zipfile.ZipFile(download_path, 'r') as zip_ref:
+                            file_list = zip_ref.namelist()
+                            
+                            # Only extract if it looks like a directory-based game
+                            has_subdirs = any('/' in f and not f.endswith('/') for f in file_list)
+                            has_pc_game_files = any(f.lower().endswith(('.exe', '.bat', '.cfg', '.ini', '.dll')) for f in file_list)
+                            
+                            should_extract = has_subdirs and has_pc_game_files
+                            
+                    except zipfile.BadZipFile:
+                        should_extract = False
+                    
+                    if should_extract:
+                        import zipfile
+                        extract_dir = download_path.parent / download_path.stem
+                        extract_dir.mkdir(exist_ok=True)
+                        with zipfile.ZipFile(download_path, 'r') as zip_ref:
+                            zip_ref.extractall(extract_dir)
+                        download_path.unlink()
+                        print(f"Extracted directory-based game to {extract_dir}")
+            
             print(f"Successfully downloaded {actual_downloaded} bytes to {download_path}")
             
             # Verify the download
@@ -4852,7 +4881,8 @@ class RomMClient:
                     'total': actual_downloaded,
                     'speed': 0,
                     'eta': 0,
-                    'filename': rom_name
+                    'filename': rom_name,
+                    'completed': True
                 }
                 progress_callback(final_progress)
             
@@ -7505,7 +7535,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                 game_copy = game.copy()
                 game_copy['is_downloaded'] = True
                 game_copy['local_path'] = str(local_path)
-                game_copy['local_size'] = local_path.stat().st_size
+                game_copy['local_size'] = self.get_actual_file_size(local_path)
                 downloaded_games.append(game_copy)
         
         return self.library_section.sort_games_consistently(downloaded_games)
@@ -7539,6 +7569,18 @@ class SyncWindow(Gtk.ApplicationWindow):
         else:
             self.log_message("⚠️ No valid cache available")
             self.handle_offline_mode()
+
+    def get_actual_file_size(self, path):
+        """Get actual size - sum all files for directories, file size for files"""
+        path = Path(path)
+        if path.is_dir():
+            size = sum(f.stat().st_size for f in path.rglob('*') if f.is_file())
+            print(f"DEBUG: Directory {path} has {size} bytes")
+            return size
+        elif path.is_file():
+            return path.stat().st_size
+        else:
+            return 0
 
     def process_single_rom(self, rom, download_dir):
         """Process a single ROM with short directory names but full display names"""
@@ -7580,7 +7622,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             'file_name': file_name,
             'is_downloaded': is_downloaded,
             'local_path': str(local_path) if is_downloaded else None,
-            'local_size': local_path.stat().st_size if is_downloaded else 0,
+            'local_size': self.get_actual_file_size(local_path) if is_downloaded else 0,
             'romm_data': essential_romm_data  # Much smaller object
         }
 
@@ -8351,7 +8393,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                                 game_copy = game.copy()
                                 game_copy['is_downloaded'] = is_downloaded
                                 game_copy['local_path'] = str(local_path) if is_downloaded else None
-                                game_copy['local_size'] = local_path.stat().st_size if is_downloaded else 0
+                                game_copy['local_size'] = self.get_actual_file_size(local_path) if is_downloaded else 0
                                 all_cached_games.append(game_copy)
                         
                         # Update UI immediately with cached games
@@ -9713,7 +9755,14 @@ class SyncWindow(Gtk.ApplicationWindow):
                 
                 if success:
                     # Mark download complete
-                    file_size = download_path.stat().st_size if download_path.exists() else 0
+                    current_progress = self.download_progress.get(rom_id, {})
+                    if current_progress.get('downloaded', 0) > 0:
+                        # Keep the original download size from the download process
+                        file_size = current_progress['downloaded']
+                    else:
+                        # Fallback for single files
+                        file_size = download_path.stat().st_size if download_path.exists() else 0
+
                     self.download_progress[rom_id] = {
                         'progress': 1.0,
                         'downloading': False,
@@ -9990,7 +10039,14 @@ class SyncWindow(Gtk.ApplicationWindow):
                 
                 if success:
                     # Mark download complete
-                    file_size = download_path.stat().st_size if download_path.exists() else 0
+                    current_progress = self.download_progress.get(rom_id, {})
+                    if current_progress.get('downloaded', 0) > 0:
+                        # Keep the original download size from the download process
+                        file_size = current_progress['downloaded']
+                    else:
+                        # Fallback for single files
+                        file_size = download_path.stat().st_size if download_path.exists() else 0
+
                     self.download_progress[rom_id] = {
                         'progress': 1.0,
                         'downloading': False,
@@ -12013,7 +12069,7 @@ def run_daemon_mode():
                             'file_name': file_name,
                             'is_downloaded': is_downloaded,
                             'local_path': str(local_path) if is_downloaded else None,
-                            'local_size': local_path.stat().st_size if is_downloaded else 0,
+                            'local_size': self.get_actual_file_size(local_path) if is_downloaded else 0,
                             'romm_data': {
                                 'fs_name': rom.get('fs_name'),
                                 'fs_name_no_ext': rom.get('fs_name_no_ext'),
@@ -12300,7 +12356,7 @@ class DaemonCollectionSync:
                         game['collection'] = collection_name 
                         game['is_downloaded'] = True
                         game['local_path'] = str(local_path)
-                        game['local_size'] = local_path.stat().st_size
+                        game['local_size'] = self.get_actual_file_size(local_path)
                         break
             else:
                 self.log(f"  ❌ Failed to download {rom.get('name')}: {message}")
