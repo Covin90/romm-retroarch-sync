@@ -474,8 +474,19 @@ class PlatformItem(GObject.Object):
         self.platform_name = platform_name
         self.games = games
         self.child_store = Gio.ListStore()
-        
-        for game in games:
+        self.rebuild_children()
+    
+    def update_games(self, new_games):
+        self.games = new_games
+        self.rebuild_children()
+        # Notify all properties changed
+        self.notify('name')
+        self.notify('status-text')
+        self.notify('size-text')
+    
+    def rebuild_children(self):
+        self.child_store.remove_all()
+        for game in self.games:
             self.child_store.append(GameItem(game))
 
 
@@ -565,15 +576,11 @@ class LibraryTreeModel:
         self.root_store = Gio.ListStore()
         self.tree_model = Gtk.TreeListModel.new(
             self.root_store,
-            False,  # passthrough: false to show expanders
-            False,  # autoexpand
+            False,
+            False,
             self.create_child_model
         )
-        self._last_platforms = {}
-        self._persistent_expansion_state = {}
-        self._is_updating = False
-        self._last_stable_state = {}
-        self._expansion_connections = {}  # Track signal connections
+        self._platforms = {}
         
     def create_child_model(self, item):
         if isinstance(item, PlatformItem):
@@ -581,401 +588,53 @@ class LibraryTreeModel:
         return None
     
     def update_library(self, games, group_by='platform'):
-        """Update library with stable expansion state preservation"""
-        if not games:
-            self.root_store.remove_all()
-            self._last_platforms = {}
-            self._clear_expansion_connections()
-            return
-        
-        # Group games by platform OR collection
-        new_groups = {}
-        for game in games:
-            if group_by == 'collection':
-                group_key = game.get('collection', 'Unknown')
-            else:
-                group_key = game.get('platform', 'Unknown')
-            
-            new_groups.setdefault(group_key, []).append(game)
-            
-            # Debug: Show what group each game is assigned to
-            game_name = game.get('name', 'NO_NAME')
-        
-        import gc
-        if len(games) > 1000:
-            gc.collect()
-        
-        self._is_updating = True
-        
-        try:
-            # Group games by platform OR collection
-            new_groups = {}
-            for game in games:
-                group_key = game.get('collection' if group_by == 'collection' else 'platform', 'Unknown')
-                new_groups.setdefault(group_key, []).append(game)
-            
-            # Check if we can do a true in-place update
-            can_update_in_place = self._can_update_in_place(new_groups)  # Fix: use new_groups
-            
-            if can_update_in_place:
-                self._update_in_place(new_groups)  # Fix: use new_groups
-            else:
-                self._rebuild_with_preservation(new_groups)  # Fix: use new_groups
-            
-            self._last_platforms = new_groups.copy()  # Store as _last_platforms for compatibility
-            
-        finally:
-            # Clear updating flag and schedule state stabilization
-            self._is_updating = False
-            # Connect to expansion events for manual detection
-            GLib.timeout_add(100, self._setup_expansion_tracking)
-            GLib.timeout_add(500, self._stabilize_expansion_state)
-    
-    def _setup_expansion_tracking(self):
-        """Set up tracking for manual expansion changes"""
-        try:
-            self._clear_expansion_connections()
-            
-            if not self.tree_model:
-                return False
-                
-            total_items = self.tree_model.get_n_items()
-            
-            for i in range(total_items):
-                tree_item = self.tree_model.get_item(i)
-                if tree_item and tree_item.get_depth() == 0:  # Platform level
-                    platform_item = tree_item.get_item()
-                    if isinstance(platform_item, PlatformItem):
-                        platform_name = platform_item.platform_name
-                        
-                        # Connect to notify::expanded signal
-                        connection_id = tree_item.connect('notify::expanded', 
-                                                        self._on_expansion_changed, 
-                                                        platform_name)
-                        self._expansion_connections[platform_name] = (tree_item, connection_id)
-                        
-            
-        except Exception as e:
-            print(f"❌ Error setting up expansion tracking: {e}")
-        
-        return False  # Don't repeat
-    
-    def _on_expansion_changed(self, tree_item, pspec, platform_name):
-        """Handle manual expansion changes"""
-        if self._is_updating:
-            return  # Ignore during updates
-            
-        try:
-            is_expanded = tree_item.get_expanded()
-            
-            # Update persistent state immediately
-            self._persistent_expansion_state[platform_name] = is_expanded
-            self._last_stable_state[platform_name] = is_expanded
-            
-            # Save current state
-            self._save_current_expansion_state()
-            
-        except Exception as e:
-            print(f"❌ Error handling expansion change: {e}")
-    
-    def _save_current_expansion_state(self):
-        """Save current expansion state from all visible items"""
-        if self._is_updating:
-            return
-            
-        try:
-            current_state = self._get_current_expansion_state()
-            expanded_count = sum(1 for expanded in current_state.values() if expanded)
-            
-            if expanded_count > 0 or not self._last_stable_state:
-                self._last_stable_state = current_state.copy()
-                self._persistent_expansion_state = current_state.copy()
-            
-        except Exception as e:
-            print(f"❌ Error saving expansion state: {e}")
-    
-    def _clear_expansion_connections(self):
-        """Clear all expansion signal connections"""
-        for platform_name, (tree_item, connection_id) in self._expansion_connections.items():
-            try:
-                tree_item.disconnect(connection_id)
-            except:
-                pass  # Connection might already be invalid
-        
-        self._expansion_connections.clear()
-    
-    def _get_current_expansion_state(self):
-        """Get current expansion state without side effects"""
+        # Save expansion state before update
         expansion_state = {}
-        if not self.tree_model:
-            return expansion_state
-            
-        try:
+        for i in range(self.tree_model.get_n_items()):
+            item = self.tree_model.get_item(i)
+            if item and item.get_depth() == 0:
+                platform = item.get_item()
+                if isinstance(platform, PlatformItem):
+                    expansion_state[platform.platform_name] = item.get_expanded()
+        
+        # Group games
+        groups = {}
+        for game in games:
+            key = game.get(group_by, 'Unknown')
+            groups.setdefault(key, []).append(game)
+        
+        # Update or create platform items
+        existing_platforms = {self.root_store.get_item(i).platform_name: i 
+                            for i in range(self.root_store.get_n_items())}
+        
+        for name, game_list in sorted(groups.items()):
+            if name in existing_platforms:
+                # Update existing
+                idx = existing_platforms[name]
+                platform = self.root_store.get_item(idx)
+                platform.update_games(game_list)
+            else:
+                # Add new
+                platform = PlatformItem(name, game_list)
+                self.root_store.append(platform)
+        
+        # Remove platforms no longer present
+        for i in reversed(range(self.root_store.get_n_items())):
+            platform = self.root_store.get_item(i)
+            if platform.platform_name not in groups:
+                self.root_store.remove(i)
+        
+        # Restore expansion after a delay
+        def restore():
             for i in range(self.tree_model.get_n_items()):
                 item = self.tree_model.get_item(i)
                 if item and item.get_depth() == 0:
-                    tree_item_obj = item.get_item()
-                    if isinstance(tree_item_obj, PlatformItem):
-                        platform_name = tree_item_obj.platform_name
-                        is_expanded = item.get_expanded()
-                        expansion_state[platform_name] = is_expanded
-        except Exception as e:
-            print(f"Error getting expansion state: {e}")
-            
-        return expansion_state
-    
-    def _stabilize_expansion_state(self):
-        """Check and report final expansion state"""
-        if self._is_updating:
-            return True  # Keep checking
-            
-        try:
-            current_state = self._get_current_expansion_state()
-            expanded_count = sum(1 for expanded in current_state.values() if expanded)
-            
-            # Show current state for debugging
-            for platform, expanded in current_state.items():
-                status = "EXPANDED" if expanded else "collapsed"
-            
-            # If we have expansions now, save them
-            if expanded_count > 0:
-                self._last_stable_state = current_state.copy()
-                self._persistent_expansion_state = current_state.copy()
-
-            
-        except Exception as e:
-            print(f"Error stabilizing expansion state: {e}")
-            
-        return False  # Don't repeat
-    
-    def _can_update_in_place(self, new_groups):
-        """Check if we can update without any tree structure changes"""
-        if not self._last_platforms:
+                    platform = item.get_item()
+                    if isinstance(platform, PlatformItem):
+                        if expansion_state.get(platform.platform_name, False):
+                            item.set_expanded(True)
             return False
-            
-        # Must have same groups in same order
-        old_group_names = list(self._last_platforms.keys())
-        new_group_names = list(new_groups.keys()) 
-        
-        return old_group_names == new_group_names
-    
-    def _update_in_place(self, new_platforms):
-        """Update platform contents with zero visual disruption AND updated counts"""
-
-        # Save current expansion state before any changes
-        current_expansion_state = self._get_current_expansion_state()
-        expanded_platforms = [name for name, expanded in current_expansion_state.items() if expanded]
-        
-        if expanded_platforms:
-            print(f"💾 Maintaining expansion for: {', '.join(expanded_platforms)}")
-        
-        # Track which platforms need count updates
-        platforms_with_changes = []
-        
-        # Update platform data first
-        for i, platform_name in enumerate(new_platforms.keys()):
-            if i < self.root_store.get_n_items():
-                platform_item = self.root_store.get_item(i)
-                if isinstance(platform_item, PlatformItem):
-                    old_game_count = len(platform_item.games)
-                    new_games = new_platforms[platform_name]
-                    new_game_count = len(new_games)
-                    
-                    # Update the platform's internal data
-                    platform_item.games = new_games
-                    
-                    # Update child store
-                    platform_item.child_store.remove_all()
-                    for game in new_games:
-                        platform_item.child_store.append(GameItem(game))
-                    
-                    # Track platforms that need count updates
-                    if old_game_count != new_game_count:
-                        platforms_with_changes.append((i, platform_name, old_game_count, new_game_count))
-                        print(f"📊 {platform_name}: {old_game_count} → {new_game_count} games")
-        
-        # Now update counts using a flicker-free method
-        if platforms_with_changes:
-            self._update_platform_counts_flicker_free(platforms_with_changes, expanded_platforms)
-        else:
-            pass
-        
-
-    def _update_platform_counts_flicker_free(self, platforms_with_changes, expanded_platforms):
-        """Update platform counts without visual flicker"""
-        print(f"🔄 Updating counts for {len(platforms_with_changes)} platforms")
-        
-        # Save exact expansion state for each item that will be updated
-        expansion_backup = {}
-        for i, platform_name, old_count, new_count in platforms_with_changes:
-            expansion_backup[i] = platform_name in expanded_platforms
-        
-        # Update each platform individually with immediate restoration
-        for i, platform_name, old_count, new_count in platforms_with_changes:
-            was_expanded = expansion_backup[i]
-            
-            # Get tree item before update
-            tree_item = None
-            if self.tree_model and i < self.tree_model.get_n_items():
-                tree_item = self.tree_model.get_item(i)
-            
-            # Use a minimal items_changed that only affects this one item
-            self.root_store.items_changed(i, 1, 1)
-            
-            # Immediately restore expansion if it was expanded
-            if was_expanded:
-                def restore_immediately(item_index=i, platform_nm=platform_name):
-                    try:
-                        if self.tree_model and item_index < self.tree_model.get_n_items():
-                            updated_tree_item = self.tree_model.get_item(item_index)
-                            if updated_tree_item and updated_tree_item.get_depth() == 0:
-                                if not updated_tree_item.get_expanded():
-                                    updated_tree_item.set_expanded(True)
-                                    # Don't log every restoration to avoid spam
-                                # else: already expanded, good
-                        return False
-                    except:
-                        return False
-                
-                # Multiple immediate restoration attempts
-                GLib.idle_add(restore_immediately)
-                GLib.timeout_add(1, restore_immediately)  # Very fast follow-up
-            
-            print(f"✅ Updated count: {platform_name} ({new_count} games)")
-        
-        # Final verification with minimal delay
-        def verify_final_state():
-            final_state = self._get_current_expansion_state()
-            preserved_count = sum(1 for name in expanded_platforms 
-                                if final_state.get(name, False))
-            
-            if preserved_count == len(expanded_platforms):
-                print(f"🎉 Perfect: {preserved_count}/{len(expanded_platforms)} expansions preserved with updated counts")
-            else:
-                print(f"⚠️ Need emergency restore: {preserved_count}/{len(expanded_platforms)} preserved")
-                
-                # Emergency restoration for any lost expansions
-                for platform_name in expanded_platforms:
-                    if not final_state.get(platform_name, False):
-                        for i in range(self.tree_model.get_n_items()):
-                            item = self.tree_model.get_item(i)
-                            if item and item.get_depth() == 0:
-                                tree_item_obj = item.get_item()
-                                if isinstance(tree_item_obj, PlatformItem):
-                                    if tree_item_obj.platform_name == platform_name:
-                                        item.set_expanded(True)
-                                        print(f"🚑 Emergency restore: {platform_name}")
-                                        break
-            
-            return False
-        
-        GLib.timeout_add(10, verify_final_state)  # Very fast verification
-
-    def _update_platform_name_display(self, platform_item, platform_name, game_count):
-        """Update platform display name without calling items_changed"""
-        try:
-            # Calculate downloaded count
-            downloaded_count = sum(1 for g in platform_item.games if g.get('is_downloaded'))
-            
-            # Update the platform name property directly
-            # This triggers the UI to update the display without rebuilding the tree
-            new_display_name = f"{platform_name} ({downloaded_count}/{game_count})"
-            
-            # Force property notification without items_changed
-            # We need to trigger a property change notification
-            platform_item.notify('name')
-            
-            print(f"🏷️ Updated display: {new_display_name}")
-            
-        except Exception as e:
-            print(f"❌ Error updating platform display: {e}")
-
-    def _rebuild_with_preservation(self, new_groups):
-        """Rebuild tree while maintaining expansion states from last stable state"""
-        # Clear connections before rebuilding
-        self._clear_expansion_connections()
-        
-        # PROTECTION: Don't try to restore expansion state from different view modes
-        current_groups = list(new_groups.keys())
-        if (hasattr(self, '_last_stable_state') and self._last_stable_state and
-            any('Test' in str(key) for key in self._last_stable_state.keys()) and
-            not any('Test' in str(group) for group in current_groups)):
-            self._last_stable_state = {}
-            self._persistent_expansion_state = {}
-        
-        # Clear and rebuild
-        self.root_store.remove_all()
-        
-        # Add all platforms
-        for group_name in sorted(new_groups.keys()):
-            platform_item = PlatformItem(group_name, new_groups[group_name])
-            self.root_store.append(platform_item)
-        
-        # Use the last stable state for restoration
-        restoration_state = self._last_stable_state.copy()
-        if not restoration_state and self._persistent_expansion_state:
-            restoration_state = self._persistent_expansion_state.copy()
-            
-        if restoration_state:
-            expanded_to_restore = sum(1 for exp in restoration_state.values() if exp)
-            print(f"🔄 Restoring from stable state: {expanded_to_restore} platforms to expand")
-            
-            # Show what we're trying to restore
-            for platform, should_expand in restoration_state.items():
-                if should_expand:
-                    print(f"   🔄 Will restore: {platform} = EXPANDED")
-            
-            self._restore_expansion_from_state(restoration_state)
-        else:
-            pass
-    
-    def _restore_expansion_from_state(self, expansion_state):
-        """Restore expansion state from a specific state dict"""
-        def do_restore(attempt_num):
-            try:
-                restored_count = 0
-                total_items = self.tree_model.get_n_items()
-                
-                for i in range(total_items):
-                    item = self.tree_model.get_item(i)
-                    if item and item.get_depth() == 0:
-                        tree_item_obj = item.get_item()
-                        if isinstance(tree_item_obj, PlatformItem):
-                            platform_name = tree_item_obj.platform_name
-                            should_be_expanded = expansion_state.get(platform_name, False)
-                            current_state = item.get_expanded()
-                            
-                            if should_be_expanded and not current_state:
-                                item.set_expanded(True)
-                                restored_count += 1
-                            elif should_be_expanded and current_state:
-                                restored_count += 1
-                
-            except Exception as e:
-                print(f"❌ Restore attempt {attempt_num} failed: {e}")
-            
-            return False  # Don't repeat
-        
-        # Multiple restoration attempts with different timings
-        GLib.idle_add(do_restore, 1)
-        GLib.timeout_add(50, do_restore, 2)
-        GLib.timeout_add(150, do_restore, 3)
-
-    # Legacy methods for compatibility
-    def save_expansion_state(self):
-        """Legacy method - now uses manual tracking"""
-        current_state = self._get_current_expansion_state()
-        return current_state
-
-    def restore_expansion_state(self, expansion_state):
-        """Legacy method - now uses stable restoration"""
-        if expansion_state:
-            # Only update if we have actual expansions
-            expanded_count = sum(1 for exp in expansion_state.values() if exp)
-            if expanded_count > 0:
-                self._last_stable_state = expansion_state.copy()
-                self._persistent_expansion_state = expansion_state.copy()
-                self._restore_expansion_from_state(expansion_state)
+        GLib.timeout_add(100, restore)
 
 class EnhancedLibrarySection:
     """Enhanced library section with tree view"""
@@ -2442,44 +2101,25 @@ class EnhancedLibrarySection:
             return False
 
     def get_selected_games(self):
-        """Get list of selected game data (not GameItem objects)"""
         selected_games = []
+        selection_model = self.column_view.get_model()
         
-        # Use the correct games source based on view mode
-        if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
-            # In collection mode, use collections_games
-            games_to_check = getattr(self, 'collections_games', [])
-        else:
-            # In platform mode, use filtered games
-            games_to_check = self.filtered_games if hasattr(self, 'filtered_games') else self.parent.available_games
+        # Get row selections
+        for i in range(selection_model.get_n_items()):
+            if selection_model.is_selected(i):
+                tree_item = selection_model.get_item(i)
+                if tree_item and tree_item.get_depth() == 1:
+                    item = tree_item.get_item()
+                    if isinstance(item, GameItem):
+                        selected_games.append(item.game_data)
         
-        print(f"🔍 get_selected_games DEBUG:")
-        print(f"  View mode: {getattr(self, 'current_view_mode', 'unknown')}")
-        print(f"  Games to check: {len(games_to_check)}")
-        print(f"  Selected ROM IDs: {len(self.selected_rom_ids)}")
-        print(f"  Selected game keys: {len(self.selected_game_keys)} - {list(self.selected_game_keys)}")
-        
-        for game in games_to_check:
-            identifier_type, identifier_value = self.get_game_identifier(game)
-            
-            # Add collection mode handling
-            if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
-                # Check collection keys
-                rom_id = game.get('rom_id')
-                collection_name = game.get('collection', '')
-                if rom_id and collection_name:
-                    collection_key = f"collection:{rom_id}:{collection_name}"
-                    if collection_key in self.selected_game_keys:
-                        selected_games.append(game)
-                        print(f"  ✅ Found selected game: {game.get('name')} (collection key: {collection_key})")
-            else:
-                # Standard platform mode logic
-                if identifier_type == 'rom_id' and identifier_value in self.selected_rom_ids:
+        # Add checkbox selections
+        for rom_id in self.selected_rom_ids:
+            for game in self.parent.available_games:
+                if game.get('rom_id') == rom_id and game not in selected_games:
                     selected_games.append(game)
-                elif identifier_type == 'game_key' and identifier_value in self.selected_game_keys:
-                    selected_games.append(game)
+                    break
         
-        print(f"  📊 Final selected games: {len(selected_games)}")
         return selected_games
 
     def get_game_identifier(self, game_data):
@@ -3611,127 +3251,17 @@ class EnhancedLibrarySection:
             GLib.timeout_add(500, self.clear_checkbox_selection)  # Small delay for UI feedback
 
     def update_single_game(self, updated_game_data, skip_platform_update=False):
-        """Find and updates a single game..."""
-        target_rom_id = updated_game_data.get('rom_id')
-        target_platform_name = updated_game_data.get('platform')
-
-        if not target_rom_id or not target_platform_name:
-            # Fallback for safety if we don't have enough info.
-            print("⚠️ Insufficient data for in-place update. Falling back to full refresh.")
-            self.update_games_library(self.parent.available_games)
-            return
-
-        # 1. Update the master list of game data. This ensures the source of truth is correct.
-        game_found_in_source = False
-        for game in self.parent.available_games:
-            if game.get('rom_id') == target_rom_id:
-                game.update(updated_game_data)
-                game_found_in_source = True
+        # Update master list
+        for i, game in enumerate(self.parent.available_games):
+            if game.get('rom_id') == updated_game_data.get('rom_id'):
+                self.parent.available_games[i] = updated_game_data
                 break
         
-        if not game_found_in_source:
-            # This can happen if the game is no longer in the main list. A full refresh is best.
+        # Just refresh the whole view - simpler and more reliable
+        if self.current_view_mode == 'collection':
+            self.load_collections_view()
+        else:
             self.update_games_library(self.parent.available_games)
-            return
-
-        # SAVE CURRENT SELECTION STATE BEFORE UPDATING
-        saved_selection_position = None
-        saved_selected_game = self.selected_game
-        
-        # Find which position is currently selected in the tree
-        if hasattr(self, 'column_view'):
-            selection_model = self.column_view.get_model()
-            if selection_model:
-                for i in range(selection_model.get_n_items()):
-                    if selection_model.is_selected(i):
-                        tree_item = selection_model.get_item(i)
-                        if tree_item:
-                            item = tree_item.get_item()
-                            if isinstance(item, GameItem) and item.game_data.get('rom_id') == target_rom_id:
-                                saved_selection_position = i
-                                break
-
-        # 2. Find the corresponding item in the UI model and update both game and platform data
-        for i in range(self.library_model.root_store.get_n_items()):
-            platform_item = self.library_model.root_store.get_item(i)
-            
-            # In collections mode, search all collections by ROM ID
-            # In platform mode, match by platform name  
-            should_check_this_platform = (
-                hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection'
-            ) or platform_item.platform_name == updated_game_data.get('platform')
-
-            if should_check_this_platform:
-                # Find the game item in the platform's child store.
-                for j in range(platform_item.child_store.get_n_items()):
-                    game_item = platform_item.child_store.get_item(j)
-                    
-                    if game_item.game_data.get('rom_id') == target_rom_id:
-                        # Found the game. Update the underlying 'game_data' dict.
-                        game_item.game_data.update(updated_game_data)
-                        
-                        # IMPORTANT: Also update the corresponding game in platform_item.games
-                        # This ensures the platform's aggregated calculations are correct
-                        for k, platform_game in enumerate(platform_item.games):
-                            if platform_game.get('rom_id') == target_rom_id:
-                                platform_item.games[k].update(updated_game_data)
-                                break
-                        
-                        # Tell the child store that the item at position 'j' has changed.
-                        platform_item.child_store.items_changed(j, 1, 1)
-                        
-                        # With proper property binding, platform updates should be automatic
-                        print(f"✅ Updated game data for '{game_item.name}' - property binding should handle UI update...")
-                        
-                        def restore_selection_and_update():
-                            try:
-                                # Update platform properties
-                                if hasattr(platform_item, 'force_property_update'):
-                                    platform_item.force_property_update()
-                                else:
-                                    # Fallback to manual notifications
-                                    platform_item.notify('name')
-                                    platform_item.notify('status-text')
-                                    platform_item.notify('size-text')
-                                
-                                print(f"🔄 Property notifications sent for {platform_item.platform_name}")
-                                
-                                # RESTORE VISUAL SELECTION if it was previously selected
-                                if (saved_selection_position is not None and 
-                                    saved_selected_game and 
-                                    saved_selected_game.get('rom_id') == target_rom_id):
-                                    
-                                    selection_model = self.column_view.get_model()
-                                    if selection_model and saved_selection_position < selection_model.get_n_items():
-                                        # Clear current selection first
-                                        selection_model.unselect_all()
-                                        # Restore the selection
-                                        selection_model.select_item(saved_selection_position, False)
-                                        print(f"🎯 Restored visual selection for position {saved_selection_position}")
-                                        
-                                        # Make sure the selected_game is still set correctly
-                                        self.selected_game = saved_selected_game
-                                        
-                                        # Update action buttons to reflect the selection
-                                        self.update_action_buttons()
-                                
-                            except Exception as e:
-                                print(f"❌ Error in restore selection: {e}")
-                            return False
-                        
-                        # Schedule the restoration with a small delay to ensure the tree is updated
-                        GLib.timeout_add(50, restore_selection_and_update)
-                        break
-
-        # Fallback if the item wasn't visible/found in the UI model.
-        print(f"⚠️ Could not find UI item to signal change. Falling back to full refresh.")
-        
-        # PROTECTION: Don't do full refresh if in collections view
-        if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
-            print("🔍 DEBUG: Skipping fallback refresh - in collections view")
-            return
-        
-        self.update_games_library(self.parent.available_games)
 
     def setup_checkbox_cell(self, factory, list_item):
         checkbox = Gtk.CheckButton()
@@ -5958,12 +5488,41 @@ class RetroArchInterface:
             'Game Boy Advance': ['mgba', 'vba_next', 'vbam'],
             'Sega Genesis': ['genesis_plus_gx', 'blastem', 'picodrive'],
             'Nintendo 64': ['mupen64plus_next', 'parallel_n64'],
+            'Nintendo DS': ['desmume', 'melonds'],
+            'Nintendo - Nintendo DS': ['desmume', 'melonds'],
+            'nds': ['desmume', 'melonds'], 
             'Sega Saturn': ['beetle_saturn', 'kronos'],
             'Arcade': ['mame', 'fbneo', 'fbalpha'],
             'PlayStation 2': ['pcsx2', 'play'],
             'Nintendo GameCube': ['dolphin'],
             'Sega Dreamcast': ['flycast', 'redream'],
             'Atari 2600': ['stella'],
+            'Sony - PlayStation': ['beetle_psx', 'beetle_psx_hw', 'pcsx_rearmed', 'swanstation'],
+            'Sony - PlayStation 2': ['pcsx2', 'play'],
+            'Sony - PlayStation Portable': ['ppsspp'],
+            'Nintendo - Nintendo 3DS': ['citra'],
+            'Nintendo - Game Boy': ['gambatte', 'sameboy', 'tgbdual'],
+            'Nintendo - Game Boy Color': ['gambatte', 'sameboy', 'tgbdual'],
+            'Nintendo - Game Boy Advance': ['mgba', 'vba_next', 'vbam'],
+            'Nintendo - Nintendo Entertainment System': ['nestopia', 'fceumm', 'mesen'],
+            'Nintendo - Super Nintendo Entertainment System': ['snes9x', 'bsnes', 'mesen-s'],
+            'Nintendo - Nintendo 64': ['mupen64plus_next', 'parallel_n64'],
+            'Nintendo - GameCube': ['dolphin'],
+            'Sega - Genesis': ['genesis_plus_gx', 'blastem', 'picodrive'],
+            'Sega - Mega Drive': ['genesis_plus_gx', 'blastem', 'picodrive'],
+            'Sega - Saturn': ['beetle_saturn', 'kronos'],
+            'Sega - Dreamcast': ['flycast', 'redream'],
+            'Sega - Mega-CD': ['genesis_plus_gx', 'picodrive'],
+            'Sega - CD': ['genesis_plus_gx', 'picodrive'],
+            'SNK - Neo Geo': ['fbneo', 'mame'],
+            'NEC - PC Engine': ['beetle_pce', 'beetle_pce_fast'],
+            'NEC - TurboGrafx-16': ['beetle_pce', 'beetle_pce_fast'],
+            'Atari - 2600': ['stella'],
+            'Atari - 7800': ['prosystem'],
+            'Atari - Lynx': ['handy', 'beetle_lynx'],
+            '3DO': ['opera', '4do'],
+            'Microsoft - MSX': ['bluemsx', 'fmsx'],
+            'Commodore - Amiga': ['puae', 'fsuae'],
         }
         
         # Mapping from RomM emulator names to RetroArch save directory names
@@ -7321,6 +6880,70 @@ class SyncWindow(Gtk.ApplicationWindow):
             'lutro': 'lutro',
             'ps': 'psx',
             'ps1': 'psx',
+            'cpc': 'acpc',
+            'apple-i': 'apple',
+            'apple2': 'appleii', 
+            'apple2gs': 'apple-iigs',
+            'apple3': 'appleiii',
+            'mattel-aquarius': 'aquarius',
+            'atari-2600': 'atari2600',
+            'atari-5200': 'atari5200', 
+            'atari-7800': 'atari7800',
+            'atari-8-bit': 'atari8bit',
+            'bally-astrocade': 'astrocade',
+            'bbc-micro': 'bbcmicro',
+            'cd-i': 'philips-cd-i',
+            'cdtv': 'commodore-cdtv',
+            'channel-f': 'fairchild-channel-f',
+            'commodore-16-plus4': 'c-plus-4',
+            'dragon-3264': 'dragon-32-slash-64',
+            'dreamcast': 'dc',
+            'edsac--1': 'edsac',
+            'electron': 'acorn-electron',
+            'elektor-tv-games-computer': 'elektor',
+            'fmtowns': 'fm-towns',
+            'game-com': 'game-dot-com',
+            'gameboy': 'gb',
+            'gameboy-color': 'gbc', 
+            'gameboy-advance': 'gba',
+            'game-gear': 'gamegear',
+            'gamecube': 'ngc',
+            'genesis-slash-megadrive': 'genesis',
+            'macintosh': 'mac',
+            'microcomputer--1': 'microcomputer',
+            'microvision--1': 'microvision',
+            'neo-geo': 'neogeoaes',
+            'odyssey--1': 'odyssey',
+            'nintendo-ds': 'nds',
+            'palmos': 'palm-os',
+            'pc88': 'pc-8800-series',
+            'pc98': 'pc-9800-series',
+            'pet': 'cpet',
+            'pdp-7--1': 'pdp-7',
+            'pdp-8--1': 'pdp-8',
+            'playstation': 'psx',
+            'ps': 'psx',
+            'ps4--1': 'ps4',
+            'playstation-4': 'ps4',
+            'playstation-5': 'ps5',
+            'ps-vita': 'psvita',
+            'sega-32x': 'sega32',
+            'sega-cd': 'segacd',
+            'sega-cd-32x': 'segacd32',
+            'sega-master-system': 'sms',
+            'sega-saturn': 'saturn',
+            'sharp-x1': 'x1',
+            'sinclair-zx81': 'zx81',
+            'sg-1000': 'sg1000',
+            'switch2': 'switch-2',
+            'thomson-mo': 'thomson-mo5',
+            'trs-80-coco': 'trs-80-color-computer',
+            'turbografx-16-slash-pc-engine-cd': 'turbografx-cd',
+            'turbo-grafx': 'tg16',
+            'turbografx16--1': 'tg16',
+            'watara-slash-quickshot-supervision': 'supervision',
+            'windows': 'win',
+            'zx-spectrum': 'zxs'            
         }
         return slug_mapping.get(platform_slug.lower(), platform_slug)
 
@@ -9061,6 +8684,14 @@ class SyncWindow(Gtk.ApplicationWindow):
         last_update = self._last_progress_update.get(rom_id, 0)
         
         if rom_id in self.download_progress:
+            # ADD THIS: Validate progress only increases
+            current_progress = progress_info.get('progress', 0)
+            last_progress = self.download_progress[rom_id].get('progress', 0)
+            
+            # Skip if progress goes backwards (unless it's a restart from 0)
+            if current_progress < last_progress and current_progress > 0.01:
+                return
+            
             self.download_progress[rom_id].update({
                 'progress': progress_info['progress'],
                 'speed': progress_info['speed'],
@@ -9489,23 +9120,23 @@ class SyncWindow(Gtk.ApplicationWindow):
                 GLib.idle_add(lambda n=game_name: 
                             self.log_message(f"Deleting {n}..."))
                 
+                # After deletion, replace complex update with:
                 if game_path.exists():
-                    game_path.unlink()  # Delete the file
-                    
-                    # Update game data
+                    game_path.unlink()
                     game['is_downloaded'] = False
                     game['local_path'] = None
                     game['local_size'] = 0
                     
-                    GLib.idle_add(lambda n=game_name: 
-                                self.log_message(f"✓ Deleted {n}"))
+                    def refresh_ui():
+                        for i, g in enumerate(self.available_games):
+                            if g.get('rom_id') == game.get('rom_id'):
+                                self.available_games[i] = game
+                                break
+                        
+                        if hasattr(self, 'library_section'):
+                            self.library_section.update_games_library(self.available_games)
                     
-                    # Update available_games list first
-                    for i, existing_game in enumerate(self.available_games):
-                        if existing_game.get('rom_id') == game.get('rom_id'):
-                            self.available_games[i] = game
-                            print(f"🔍 DEBUG: Updated master games list after deletion for {game_name}")
-                            break
+                    GLib.idle_add(refresh_ui)
                     
                     # Update based on current view mode
                     def update_after_deletion():
@@ -9799,6 +9430,18 @@ class SyncWindow(Gtk.ApplicationWindow):
                                 if existing_game.get('rom_id') == game.get('rom_id'):
                                     self.available_games[i] = game
                                     break
+
+                            # Update platform item directly
+                            if hasattr(self, 'library_section'):
+                                for j in range(self.library_section.library_model.root_store.get_n_items()):
+                                    platform_item = self.library_section.library_model.root_store.get_item(j)
+                                    if isinstance(platform_item, PlatformItem):
+                                        for k, platform_game in enumerate(platform_item.games):
+                                            if platform_game.get('rom_id') == game.get('rom_id'):
+                                                platform_item.games[k] = game
+                                                platform_item.notify('status-text')
+                                                platform_item.notify('size-text')
+                                                break
                             
                             # Update collections view data if in collections mode
                             if (hasattr(self.library_section, 'current_view_mode') and 
@@ -10081,6 +9724,18 @@ class SyncWindow(Gtk.ApplicationWindow):
                                 if existing_game.get('rom_id') == game.get('rom_id'):
                                     self.available_games[i] = game
                                     break
+
+                            # Update platform item directly
+                            if hasattr(self, 'library_section'):
+                                for j in range(self.library_section.library_model.root_store.get_n_items()):
+                                    platform_item = self.library_section.library_model.root_store.get_item(j)
+                                    if isinstance(platform_item, PlatformItem):
+                                        for k, platform_game in enumerate(platform_item.games):
+                                            if platform_game.get('rom_id') == game.get('rom_id'):
+                                                platform_item.games[k] = game
+                                                platform_item.notify('status-text')
+                                                platform_item.notify('size-text')
+                                                break
                             
                             # Update collections cache AND platform item data
                             if (hasattr(self.library_section, 'current_view_mode') and 
