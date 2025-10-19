@@ -469,15 +469,17 @@ class GameItem(GObject.Object):
         return "Not downloaded"
 
 class PlatformItem(GObject.Object):
-    def __init__(self, platform_name, games):
+    def __init__(self, platform_name, games, loading=False):
         super().__init__()
         self.platform_name = platform_name
         self.games = games
+        self.loading = loading  # Flag to show loading state
         self.child_store = Gio.ListStore()
         self.rebuild_children()
     
-    def update_games(self, new_games):
+    def update_games(self, new_games, loading=False):
         self.games = new_games
+        self.loading = loading  # Update loading state
         self.rebuild_children()
         # Notify all properties changed
         self.notify('name')
@@ -497,6 +499,8 @@ class PlatformItem(GObject.Object):
     
     @GObject.Property(type=str, default='0/0')
     def status_text(self):
+        if self.loading:
+            return "..."
         downloaded = sum(1 for g in self.games if g.get('is_downloaded'))
         result = f"{downloaded}/{len(self.games)}"
         return result
@@ -507,6 +511,8 @@ class PlatformItem(GObject.Object):
     
     @GObject.Property(type=str, default='0 KB')
     def size_text(self):
+        if self.loading:
+            return "Loading..."
         # Calculate downloaded size (local files)
         downloaded_size = sum(g.get('local_size', 0) for g in self.games if g.get('is_downloaded'))
         
@@ -586,8 +592,36 @@ class LibraryTreeModel:
         if isinstance(item, PlatformItem):
             return item.child_store
         return None
-    
-    def update_library(self, games, group_by='platform'):
+
+    def _get_current_expansion_state(self):
+        """Get the current expansion state of all platform items"""
+        expansion_state = {}
+        for i in range(self.tree_model.get_n_items()):
+            item = self.tree_model.get_item(i)
+            if item and item.get_depth() == 0:
+                platform = item.get_item()
+                if isinstance(platform, PlatformItem):
+                    expansion_state[platform.platform_name] = item.get_expanded()
+        return expansion_state
+
+    def _restore_expansion_from_state(self, expansion_state):
+        """Restore expansion state for all platform items"""
+        for i in range(self.tree_model.get_n_items()):
+            item = self.tree_model.get_item(i)
+            if item and item.get_depth() == 0:
+                platform = item.get_item()
+                if isinstance(platform, PlatformItem):
+                    should_expand = expansion_state.get(platform.platform_name, False)
+                    if should_expand:
+                        item.set_expanded(True)
+                    else:
+                        item.set_expanded(False)
+
+    def _restore_expansion_immediate(self, expansion_state):
+        """Restore expansion state immediately (used by search)"""
+        self._restore_expansion_from_state(expansion_state)
+
+    def update_library(self, games, group_by='platform', loading=False):
         # Save expansion state before update
         expansion_state = {}
         for i in range(self.tree_model.get_n_items()):
@@ -596,34 +630,33 @@ class LibraryTreeModel:
                 platform = item.get_item()
                 if isinstance(platform, PlatformItem):
                     expansion_state[platform.platform_name] = item.get_expanded()
-        
+
         # Group games
         groups = {}
         for game in games:
             key = game.get(group_by, 'Unknown')
             groups.setdefault(key, []).append(game)
-        
-        # Update or create platform items
-        existing_platforms = {self.root_store.get_item(i).platform_name: i 
-                            for i in range(self.root_store.get_n_items())}
-        
+
+        # Build a map of existing platform items to reuse them
+        existing_platforms = {}
+        for i in range(self.root_store.get_n_items()):
+            platform_item = self.root_store.get_item(i)
+            existing_platforms[platform_item.platform_name] = platform_item
+
+        # Clear the store and rebuild in sorted order
+        self.root_store.remove_all()
+
+        # Add platforms in alphabetical order
         for name, game_list in sorted(groups.items()):
             if name in existing_platforms:
-                # Update existing
-                idx = existing_platforms[name]
-                platform = self.root_store.get_item(idx)
-                platform.update_games(game_list)
+                # Reuse existing platform item (preserves state)
+                platform = existing_platforms[name]
+                platform.update_games(game_list, loading=loading)
             else:
-                # Add new
-                platform = PlatformItem(name, game_list)
-                self.root_store.append(platform)
-        
-        # Remove platforms no longer present
-        for i in reversed(range(self.root_store.get_n_items())):
-            platform = self.root_store.get_item(i)
-            if platform.platform_name not in groups:
-                self.root_store.remove(i)
-        
+                # Create new platform item
+                platform = PlatformItem(name, game_list, loading=loading)
+            self.root_store.append(platform)
+
         # Restore expansion after a delay
         def restore():
             for i in range(self.tree_model.get_n_items()):
@@ -656,6 +689,7 @@ class EnhancedLibrarySection:
         self.collections_games = []
         self.collections_cache_time = 0
         self.collections_cache_duration = 300
+        self.view_mode_generation = 0  # Track view mode switches to prevent race conditions
         # Collection auto-sync attributes
         self.selected_collections_for_sync = set()  # UI selection state
         self.actively_syncing_collections = set()   # Auto-sync running state
@@ -772,45 +806,101 @@ class EnhancedLibrarySection:
         threading.Thread(target=download_all, daemon=True).start()
 
     def download_game_directly(self, game):
-        """Download game directly without UI interaction"""
+        """Download game directly WITH progress tracking"""
         try:
             rom_id = game['rom_id']
             rom_name = game['name']
             platform_slug = game.get('platform_slug', game.get('platform', 'Unknown'))
             file_name = game['file_name']
-            
+
             # Get download directory
             download_dir = Path(self.parent.rom_dir_row.get_text())
-            
+
             # Use mapped slug for RetroDECK compatibility
             if self.parent.retroarch.is_retrodeck_installation():
                 mapped_slug = self.parent.map_platform_slug_for_retrodeck(platform_slug)
             else:
                 mapped_slug = platform_slug
-            
+
             platform_dir = download_dir / mapped_slug
             platform_dir.mkdir(parents=True, exist_ok=True)
             download_path = platform_dir / file_name
-            
+
             # Skip if already downloaded
             if download_path.exists() and download_path.stat().st_size > 1024:
                 return True
-            
-            # Download using RomM client directly with progress callback
+
+            # Initialize progress tracking
+            self.parent.download_progress[rom_id] = {
+                'progress': 0.0,
+                'downloading': True,
+                'filename': rom_name,
+                'speed': 0,
+                'downloaded': 0,
+                'total': 0
+            }
+
+            # Update UI to show download starting
+            GLib.idle_add(lambda: self.update_game_progress(rom_id, self.parent.download_progress[rom_id]))
+
+            # Download using RomM client with progress callback
             def progress_callback(progress_info):
-                # Simple progress logging without UI updates
-                if progress_info.get('progress', 0) >= 1.0:
-                    print(f"✅ Download complete: {rom_name}")
-            
+                # Update progress tracking
+                self.parent.download_progress[rom_id].update({
+                    'progress': progress_info.get('progress', 0),
+                    'speed': progress_info.get('speed', 0),
+                    'downloaded': progress_info.get('downloaded', 0),
+                    'total': progress_info.get('total', 0),
+                    'downloading': True
+                })
+                # Update UI
+                GLib.idle_add(lambda: self.update_game_progress(rom_id, self.parent.download_progress[rom_id]))
+
             # Download using RomM client
             success, message = self.parent.romm_client.download_rom(
                 rom_id, rom_name, download_path, progress_callback
             )
-            
+
+            # Mark as completed or failed
+            if success:
+                self.parent.download_progress[rom_id] = {
+                    'progress': 1.0,
+                    'downloading': False,
+                    'completed': True,
+                    'filename': rom_name
+                }
+            else:
+                self.parent.download_progress[rom_id] = {
+                    'progress': 0.0,
+                    'downloading': False,
+                    'failed': True,
+                    'filename': rom_name
+                }
+
+            # Final UI update
+            GLib.idle_add(lambda: self.update_game_progress(rom_id, self.parent.download_progress[rom_id]))
+
+            # Clean up progress after a delay
+            def cleanup():
+                import time
+                time.sleep(2)
+                if rom_id in self.parent.download_progress:
+                    del self.parent.download_progress[rom_id]
+            threading.Thread(target=cleanup, daemon=True).start()
+
             return success
-                
+
         except Exception as e:
             print(f"❌ Direct download error: {e}")
+            # Mark as failed
+            if rom_id in self.parent.download_progress:
+                self.parent.download_progress[rom_id] = {
+                    'progress': 0.0,
+                    'downloading': False,
+                    'failed': True,
+                    'filename': rom_name
+                }
+                GLib.idle_add(lambda: self.update_game_progress(rom_id, self.parent.download_progress[rom_id]))
             return False
 
     def restore_collection_auto_sync_on_connect(self):
@@ -934,54 +1024,46 @@ class EnhancedLibrarySection:
         """Download all non-downloaded games in selected collections (respecting concurrency limit)"""
         if not (self.parent.romm_client and self.parent.romm_client.authenticated):
             return
-        
+
         def download_all():
             try:
                 all_collections = self.parent.romm_client.get_collections()
                 total_to_download = 0
                 all_games_to_download = []
-                
+
                 for collection in all_collections:
                     collection_name = collection.get('name', '')
-                    if (collection_name not in self.selected_collections_for_sync and 
+                    if (collection_name not in self.selected_collections_for_sync and
                         collection_name not in getattr(self, 'actively_syncing_collections', set())):
                         continue
-                    
+
                     collection_id = collection.get('id')
                     collection_roms = self.parent.romm_client.get_collection_roms(collection_id)
-                    
-                    GLib.idle_add(lambda name=collection_name, count=len(collection_roms): 
+
+                    GLib.idle_add(lambda name=collection_name, count=len(collection_roms):
                                 self.parent.log_message(f"📋 Collection '{name}': {count} total games"))
-                    
+
                     download_dir = Path(self.parent.rom_dir_row.get_text())
-                    
+
                     for rom in collection_roms:
                         processed_game = self.parent.process_single_rom(rom, download_dir)
-                        
+
                         if not processed_game.get('is_downloaded'):
                             all_games_to_download.append(processed_game)
                             total_to_download += 1
-                
+
                 if total_to_download > 0:
-                    GLib.idle_add(lambda count=total_to_download: 
-                                self.parent.log_message(f"🎯 Collection sync: queueing {count} games for download"))
-                    
-                    # Queue all downloads with small delays to respect concurrency
-                    for i, game in enumerate(all_games_to_download):
-                        # Add small delay every 10 games to avoid queue overflow
-                        if i > 0 and i % 10 == 0:
-                            time.sleep(0.1)
-                        
-                        GLib.idle_add(lambda g=game: 
-                                    self.parent.download_game(g, is_bulk_operation=True))
+                    # Use bulk download method with semaphore-based concurrency control
+                    GLib.idle_add(lambda games=all_games_to_download:
+                                self.parent.download_multiple_games(games))
                 else:
-                    GLib.idle_add(lambda: 
+                    GLib.idle_add(lambda:
                                 self.parent.log_message(f"✅ Collection sync: all selected collections already complete"))
-                    
+
             except Exception as e:
-                GLib.idle_add(lambda err=str(e): 
+                GLib.idle_add(lambda err=str(e):
                             self.parent.log_message(f"❌ Collection download error: {err}"))
-        
+
         threading.Thread(target=download_all, daemon=True).start()
 
     def initialize_collection_caches(self):
@@ -1075,12 +1157,10 @@ class EnhancedLibrarySection:
             
             # At the end of the method, after the for loop
             if not changes_detected and len(self.actively_syncing_collections) > 0:
-                self.parent.log_message(f"✅ Collection check complete: no changes detected in {len(self.actively_syncing_collections)} collections")            
-            
-            if changes_detected:
-                # Refresh the collections view if we're in collections mode
-                if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
-                    GLib.idle_add(self.load_collections_view)
+                self.parent.log_message(f"✅ Collection check complete: no changes detected in {len(self.actively_syncing_collections)} collections")
+
+            # Note: We no longer reload the entire collections view after changes
+            # because handle_added_games and handle_removed_games now do in-place updates
                     
         except Exception as e:
             print(f"Collection change check error: {e}")
@@ -1109,11 +1189,56 @@ class EnhancedLibrarySection:
 
                     # Log with stable collection reference
                     game_name = processed_game.get('name')
+                    current_rom_id = rom.get('id')
+                    processed_game['collection'] = current_collection
+
+                    # ADD GAME TO TREE BEFORE DOWNLOADING so user can see it appear
+                    def add_game_to_tree():
+                        # Update available_games
+                        for i, game in enumerate(self.parent.available_games):
+                            if game.get('rom_id') == current_rom_id:
+                                self.parent.available_games[i] = processed_game
+                                break
+                        else:
+                            self.parent.available_games.append(processed_game)
+
+                        # Update collections_games cache
+                        if hasattr(self, 'collections_games'):
+                            found = False
+                            for i, collection_game in enumerate(self.collections_games):
+                                if collection_game.get('rom_id') == current_rom_id:
+                                    self.collections_games[i] = processed_game
+                                    found = True
+                                    break
+                            if not found:
+                                self.collections_games.append(processed_game)
+
+                        # Add to tree view
+                        if self.current_view_mode == 'collection':
+                            for i in range(self.library_model.root_store.get_n_items()):
+                                platform_item = self.library_model.root_store.get_item(i)
+                                if platform_item.platform_name == current_collection:
+                                    game_exists = any(g.get('rom_id') == current_rom_id for g in platform_item.games)
+                                    if not game_exists:
+                                        platform_item.games.append(processed_game)
+                                        # Sort games alphabetically
+                                        if self.sort_downloaded_first:
+                                            platform_item.games.sort(key=lambda g: (not g.get('is_downloaded', False), g.get('name', '').lower()))
+                                        else:
+                                            platform_item.games.sort(key=lambda g: g.get('name', '').lower())
+                                        platform_item.rebuild_children()
+                                        platform_item.notify('status-text')
+                                        platform_item.notify('size-text')
+                                    break
+                        return False
+
+                    GLib.idle_add(add_game_to_tree)
+
                     self.parent.log_message(f"  ⬇️ Auto-downloading {game_name} from '{current_collection}'...")
 
                     # Respect concurrent download limit for auto-sync
                     max_concurrent = int(self.parent.settings.get('Download', 'max_concurrent', '3'))
-                    active_downloads = sum(1 for p in self.parent.download_progress.values() 
+                    active_downloads = sum(1 for p in self.parent.download_progress.values()
                                         if p.get('downloading', False))
 
                     if active_downloads < max_concurrent:
@@ -1121,80 +1246,87 @@ class EnhancedLibrarySection:
                         if self.download_game_directly(processed_game):
                             downloaded_count += 1
                             self.parent.log_message(f"  ✅ {game_name} downloaded from '{current_collection}'")
-                            processed_game['collection'] = current_collection
-                            
-                            # Fix: Capture correct ROM data immediately
-                            current_rom_id = rom.get('id')
-                            current_rom_name = rom.get('name', 'Unknown')
-                        
-                            def debug_and_update():
-                                self.parent.log_message(f"DEBUG: Processing ROM {current_rom_id} - {current_rom_name}")
-                                
-                                # Update processed_game to reflect downloaded status
-                                platform_slug = processed_game.get('platform_slug', 'Unknown')
-                                file_name = processed_game.get('file_name', '')
-                                download_dir = Path(self.parent.rom_dir_row.get_text())
-                                
-                                if self.parent.retroarch.is_retrodeck_installation():
-                                    mapped_slug = self.parent.map_platform_slug_for_retrodeck(platform_slug)
-                                else:
-                                    mapped_slug = platform_slug
-                                    
-                                local_path = download_dir / mapped_slug / file_name
-                                
-                                if local_path.exists() and local_path.stat().st_size > 1024:
-                                    processed_game['is_downloaded'] = True
-                                    processed_game['local_path'] = str(local_path)
-                                    processed_game['local_size'] = self.get_actual_file_size(local_path)
-                                    self.parent.log_message(f"DEBUG: Marked as downloaded - {local_path}")
-                                
-                                # Update available_games
-                                for i, game in enumerate(self.parent.available_games):
-                                    if game.get('rom_id') == current_rom_id:
-                                        self.parent.available_games[i] = processed_game
+
+                            # CRITICAL: Update the game's download status IMMEDIATELY after download
+                            platform_slug = processed_game.get('platform_slug', 'Unknown')
+                            file_name = processed_game.get('file_name', '')
+                            download_dir = Path(self.parent.rom_dir_row.get_text())
+
+                            if self.parent.retroarch.is_retrodeck_installation():
+                                mapped_slug = self.parent.map_platform_slug_for_retrodeck(platform_slug)
+                            else:
+                                mapped_slug = platform_slug
+
+                            local_path = download_dir / mapped_slug / file_name
+
+                            if local_path.exists() and local_path.stat().st_size > 1024:
+                                processed_game['is_downloaded'] = True
+                                processed_game['local_path'] = str(local_path)
+                                processed_game['local_size'] = self.parent.get_actual_file_size(local_path)
+
+                            # Update available_games
+                            for i, game in enumerate(self.parent.available_games):
+                                if game.get('rom_id') == current_rom_id:
+                                    self.parent.available_games[i] = processed_game
+                                    break
+
+                            # Update collections_games cache
+                            if hasattr(self, 'collections_games'):
+                                for i, collection_game in enumerate(self.collections_games):
+                                    if collection_game.get('rom_id') == current_rom_id:
+                                        self.collections_games[i] = processed_game
                                         break
-                                else:
-                                    self.parent.available_games.append(processed_game)
-                                
-                                # Force collections view refresh
-                                if self.current_view_mode == 'collection':
-                                    self.collections_cache_time = 0
-                                    self.load_collections_view()
-                                
-                                # Force refresh platform item for this collection
-                                for i in range(self.library_model.root_store.get_n_items()):
-                                    platform_item = self.library_model.root_store.get_item(i)
-                                    if platform_item.platform_name == current_collection:
-                                        # Update the game in platform's games list
-                                        for j, pg in enumerate(platform_item.games):
-                                            if pg.get('rom_id') == current_rom_id:
-                                                platform_item.games[j] = processed_game
-                                                break
-                                        # Trigger property updates
-                                        platform_item.notify('name')
-                                        platform_item.notify('status-text') 
-                                        platform_item.notify('size-text')
-                                        break
-                            
-                            return False
-                        
-                        GLib.idle_add(debug_and_update)
+
+                            # Update UI to show download completed (game already exists in tree)
+                            def update_download_status():
+                                self.update_single_game(processed_game)
+                                return False
+
+                            GLib.idle_add(update_download_status)
                     else:
                         self.parent.log_message(f"  ❌ Failed to download {game_name} from '{current_collection}'")
                 
-                if downloaded_count > 0:
-                    self.parent.log_message(f"🎯 Auto-downloaded {downloaded_count} new games from '{current_collection}'")
-                    
-                    # Just update the current view instead of full sync
-                    def refresh_collections_view():
-                        if (hasattr(self.parent, 'library_section') and 
-                            hasattr(self.parent.library_section, 'current_view_mode') and
-                            self.parent.library_section.current_view_mode == 'collection'):
-                            self.parent.library_section.load_collections_view()
-                        return False
-                    
-                    GLib.timeout_add(500, refresh_collections_view)
-                    
+                # Send notifications about collection changes
+                total_added = len(added_rom_ids)
+                if total_added > 0:
+                    if downloaded_count > 0:
+                        self.parent.log_message(f"🎯 Auto-downloaded {downloaded_count} new games from '{current_collection}'")
+
+                        # Send RetroArch notification
+                        if self.parent.retroarch:
+                            if downloaded_count == total_added:
+                                self.parent.retroarch.send_notification(f"'{current_collection}': Downloaded {downloaded_count} new game{'s' if downloaded_count != 1 else ''}")
+                            else:
+                                self.parent.retroarch.send_notification(f"'{current_collection}': {total_added} added ({downloaded_count} downloaded)")
+
+                        # Send desktop notification
+                        def send_desktop_notif():
+                            if downloaded_count == total_added:
+                                self.parent.send_desktop_notification(
+                                    "Collection Synced",
+                                    f"'{current_collection}': Downloaded {downloaded_count} new game{'s' if downloaded_count != 1 else ''}"
+                                )
+                            else:
+                                self.parent.send_desktop_notification(
+                                    "Collection Synced",
+                                    f"'{current_collection}': {total_added} game{'s' if total_added != 1 else ''} added, {downloaded_count} downloaded"
+                                )
+                            return False
+                        GLib.idle_add(send_desktop_notif)
+                    else:
+                        # All games were already downloaded
+                        if self.parent.retroarch:
+                            self.parent.retroarch.send_notification(f"'{current_collection}': {total_added} game{'s' if total_added != 1 else ''} added (already downloaded)")
+
+                        # Send desktop notification
+                        def send_desktop_notif_existing():
+                            self.parent.send_desktop_notification(
+                                "Collection Updated",
+                                f"'{current_collection}': {total_added} game{'s' if total_added != 1 else ''} added (already downloaded)"
+                            )
+                            return False
+                        GLib.idle_add(send_desktop_notif_existing)
+
             except Exception as e:
                 self.parent.log_message(f"❌ Auto-download error: {e}")
         
@@ -1231,7 +1363,20 @@ class EnhancedLibrarySection:
         
         if deleted_count > 0:
             self.parent.log_message(f"Auto-deleted {deleted_count} games removed from '{collection_name}'")
-            
+
+            # Send RetroArch notification
+            if self.parent.retroarch:
+                self.parent.retroarch.send_notification(f"Collection '{collection_name}': Removed {deleted_count} game{'s' if deleted_count != 1 else ''}")
+
+            # Send desktop notification
+            def send_removal_notification():
+                self.parent.send_desktop_notification(
+                    "Collection Synced",
+                    f"'{collection_name}': Removed {deleted_count} game{'s' if deleted_count != 1 else ''}"
+                )
+                return False
+            GLib.idle_add(send_removal_notification)
+
             def update_ui_after_deletion():
                 # Update master games list - mark as not downloaded
                 for game in self.parent.available_games:
@@ -1245,13 +1390,13 @@ class EnhancedLibrarySection:
                     # Remove games entirely from collections cache
                     if hasattr(self, 'collections_games'):
                         self.collections_games = [
-                            game for game in self.collections_games 
+                            game for game in self.collections_games
                             if game.get('rom_id') not in removed_rom_ids
                         ]
-                    
-                    # Clear cache and reload collections view
-                    self.collections_cache_time = 0
-                    self.load_collections_view()  # This ensures proper refresh
+
+                    # Update the view directly WITHOUT invalidating cache
+                    # This prevents showing "Loading..." placeholder
+                    self.library_model.update_library(self.collections_games, group_by='collection')
                 else:
                     # Platform view - full refresh
                     self.update_games_library(self.parent.available_games)
@@ -1564,48 +1709,84 @@ class EnhancedLibrarySection:
 
     def on_toggle_sort(self, button):
         """Toggle between alphabetical and download-status sorting"""
-        self.sort_downloaded_first = not self.sort_downloaded_first
-        
-        if self.sort_downloaded_first:
-            button.set_icon_name("view-sort-descending-symbolic")
-            button.set_tooltip_text("Sort: Alphabetical")
-        else:
-            button.set_icon_name("view-sort-ascending-symbolic")
-            button.set_tooltip_text("Sort: Downloaded")
-        
-        # Sort in-place by reordering existing GameItem objects
-        for i in range(self.library_model.root_store.get_n_items()):
-            platform_item = self.library_model.root_store.get_item(i)
-            if isinstance(platform_item, PlatformItem):
-                # Get filtered games first (respect current filter state)
-                if self.show_downloaded_only:
-                    games_to_sort = [g for g in platform_item.games if g.get('is_downloaded', False)]
-                else:
-                    games_to_sort = platform_item.games
+        # 1. Save the current UI state before making changes
+        scroll_position = 0
+        if hasattr(self, 'column_view'):
+            scrolled_window = self.column_view.get_parent()
+            if scrolled_window:
+                vadj = scrolled_window.get_vadjustment()
+                if vadj:
+                    scroll_position = vadj.get_value()
 
-                # Sort the filtered games
-                if self.sort_downloaded_first:
-                    games_to_sort.sort(key=lambda g: (not g.get('is_downloaded', False), g.get('name', '').lower()))
-                else:
-                    games_to_sort.sort(key=lambda g: g.get('name', '').lower())
+        # Save the expansion state of the tree
+        expansion_state = self.library_model._get_current_expansion_state()
 
-                # Create sorted GameItem list from filtered games
-                sorted_game_items = [GameItem(game) for game in games_to_sort]
-                
-                # Use splice to replace all items at once (prevents scroll reset)
-                n_items = platform_item.child_store.get_n_items()
-                if n_items > 0:
-                    platform_item.child_store.splice(0, n_items, sorted_game_items)
-                else:
-                    for game_item in sorted_game_items:
-                        platform_item.child_store.append(game_item)
-        
-        # Update filtered_games
-        self.filtered_games = []
-        for i in range(self.library_model.root_store.get_n_items()):
-            platform_item = self.library_model.root_store.get_item(i)
-            if isinstance(platform_item, PlatformItem):
-                self.filtered_games.extend(platform_item.games)
+        # 2. Freeze the UI to prevent intermediate redraws
+        self.library_model.root_store.freeze_notify()
+        if hasattr(self, 'column_view'):
+            self.column_view.freeze_notify()
+
+        try:
+            # 3. Toggle sort mode
+            self.sort_downloaded_first = not self.sort_downloaded_first
+
+            if self.sort_downloaded_first:
+                button.set_icon_name("view-sort-descending-symbolic")
+                button.set_tooltip_text("Sort: Alphabetical")
+            else:
+                button.set_icon_name("view-sort-ascending-symbolic")
+                button.set_tooltip_text("Sort: Downloaded")
+
+            # 4. Apply sorting to all platform items
+            for i in range(self.library_model.root_store.get_n_items()):
+                platform_item = self.library_model.root_store.get_item(i)
+                if isinstance(platform_item, PlatformItem):
+                    # Get filtered games (respect current filter state)
+                    if self.show_downloaded_only:
+                        filtered_games = [g for g in platform_item.games if g.get('is_downloaded', False)]
+                    else:
+                        filtered_games = platform_item.games.copy()  # Make a copy to avoid modifying original
+
+                    # Sort the filtered games
+                    if self.sort_downloaded_first:
+                        filtered_games.sort(key=lambda g: (not g.get('is_downloaded', False), g.get('name', '').lower()))
+                    else:
+                        filtered_games.sort(key=lambda g: g.get('name', '').lower())
+
+                    # Replace all items in the child store
+                    platform_item.child_store.remove_all()
+                    for game in filtered_games:
+                        platform_item.child_store.append(GameItem(game))
+
+            # Update filtered_games
+            self.filtered_games = []
+            for i in range(self.library_model.root_store.get_n_items()):
+                platform_item = self.library_model.root_store.get_item(i)
+                if isinstance(platform_item, PlatformItem):
+                    if self.show_downloaded_only:
+                        self.filtered_games.extend([g for g in platform_item.games if g.get('is_downloaded', False)])
+                    else:
+                        self.filtered_games.extend(platform_item.games)
+
+        finally:
+            # 5. Thaw notifications - triggers a single batched UI update
+            self.library_model.root_store.thaw_notify()
+            if hasattr(self, 'column_view'):
+                self.column_view.thaw_notify()
+
+        # 6. Restore the UI state after the update
+        def restore_state():
+            self.library_model._restore_expansion_from_state(expansion_state)
+
+            if hasattr(self, 'column_view'):
+                scrolled_window = self.column_view.get_parent()
+                if scrolled_window:
+                    vadj = scrolled_window.get_vadjustment()
+                    if vadj:
+                        vadj.set_value(scroll_position)
+            return False
+
+        GLib.timeout_add(50, restore_state)
 
     def has_active_downloads(self):
         """Check if any downloads are currently in progress"""
@@ -1764,22 +1945,18 @@ class EnhancedLibrarySection:
                         if self.show_downloaded_only:
                             filtered_platform_games = [g for g in platform_item.games if g.get('is_downloaded', False)]
                         else:
-                            filtered_platform_games = platform_item.games
-                        
+                            filtered_platform_games = platform_item.games.copy()  # Make a copy to avoid modifying original
+
                         # Apply current sort
                         if self.sort_downloaded_first:
                             filtered_platform_games.sort(key=lambda g: (not g.get('is_downloaded', False), g.get('name', '').lower()))
                         else:
                             filtered_platform_games.sort(key=lambda g: g.get('name', '').lower())
-                        
-                        # Update child store in-place
-                        filtered_game_items = [GameItem(game) for game in filtered_platform_games]
-                        n_items = platform_item.child_store.get_n_items()
-                        if n_items > 0:
-                            platform_item.child_store.splice(0, n_items, filtered_game_items)
-                        else:
-                            for game_item in filtered_game_items:
-                                platform_item.child_store.append(game_item)
+
+                        # Update child store by removing all and re-adding
+                        platform_item.child_store.remove_all()
+                        for game in filtered_platform_games:
+                            platform_item.child_store.append(GameItem(game))
 
                 # Update filtered_games for other components
                 self.filtered_games = []
@@ -2436,10 +2613,22 @@ class EnhancedLibrarySection:
 
     def on_view_mode_toggled(self, toggle_button):
         """Switch between platform and collection view"""
+        # Increment generation counter to invalidate any pending background loads
+        self.view_mode_generation += 1
+
         if toggle_button.get_active():
             # Collections view
             toggle_button.set_label("Platforms")
             self.current_view_mode = 'collection'
+
+            # IMMEDIATELY clear the tree to remove platform view data
+            self.library_model.root_store.remove_all()
+
+            # Force GTK to render the empty tree NOW
+            context = GLib.MainContext.default()
+            while context.pending():
+                context.iteration(False)
+
             # Show collection sync controls
             if hasattr(self, 'collection_sync_box'):
                 self.collection_sync_box.set_visible(True)
@@ -2451,7 +2640,7 @@ class EnhancedLibrarySection:
             # Hide collection sync controls
             if hasattr(self, 'collection_sync_box'):
                 self.collection_sync_box.set_visible(False)
-            
+
             original_games = self.parent.available_games.copy()
             self.library_model.update_library(original_games, group_by='platform')
 
@@ -2460,11 +2649,11 @@ class EnhancedLibrarySection:
         if not (self.parent.romm_client and self.parent.romm_client.authenticated):
             self.parent.log_message("Please connect to RomM to view collections")
             return
-        
+
         # FIXED: More robust cache check
         import time
         current_time = time.time()
-        
+
         # Initialize cache attributes if missing
         if not hasattr(self, 'collections_games'):
             self.collections_games = []
@@ -2472,28 +2661,42 @@ class EnhancedLibrarySection:
             self.collections_cache_time = 0
         if not hasattr(self, 'collections_cache_duration'):
             self.collections_cache_duration = 300
-        
+
         cache_valid = (
             self.collections_games and  # Has cached data
             current_time - self.collections_cache_time < self.collections_cache_duration
         )
-        
+
+        # If cache is valid, show it immediately without placeholder (no flicker)
         if cache_valid:
-            print(f"Using cached collections data ({len(self.collections_games)} games)")
             self.library_model.update_library(self.collections_games, group_by='collection')
             return
-        
-        # Show cached data immediately if available, even if stale
-        if self.collections_games:
-            print(f"Showing stale cache while refreshing")
-            self.library_model.update_library(self.collections_games, group_by='collection')
-        
-        print(f"🔍 DEBUG: Loading collections from API in background")
-        
+
+        # Show loading placeholder for cases where we need to load data
+        self.parent.log_message("Loading collections...")
+        placeholder_games = [{
+            'name': 'Loading...',
+            'rom_id': 'placeholder_loading',
+            'collection': 'Loading collections...',
+            'is_downloaded': False,
+            'platform': '',
+            'file_name': ''
+        }]
+        self.library_model.update_library(placeholder_games, group_by='collection', loading=True)
+
+        # CRITICAL: Force GTK to process pending events and render the placeholder
+        context = GLib.MainContext.default()
+        while context.pending():
+            context.iteration(False)
+
+        # Capture the current generation to check if this load is still valid when it completes
+        expected_generation = self.view_mode_generation
+
         def load_collections():
             try:
+                # Get collection list first
                 all_collections = self.parent.romm_client.get_collections()
-                
+
                 # Filter to only custom collections
                 custom_collections = []
                 for collection in all_collections:
@@ -2504,12 +2707,33 @@ class EnhancedLibrarySection:
                     )
                     if is_custom:
                         custom_collections.append(collection)
-                
+
                 if not custom_collections:
                     GLib.idle_add(lambda: self.parent.log_message("No custom collections found"))
                     GLib.idle_add(lambda: self.library_model.update_library([], group_by='collection'))
                     return
-                
+
+                # Update placeholders with actual collection names (still loading games)
+                def show_collection_placeholders():
+                    # Create placeholder for each collection with real name
+                    placeholder_games = []
+                    for collection in custom_collections:
+                        placeholder_game = {
+                            'name': 'Loading...',
+                            'rom_id': f'placeholder_{collection.get("id")}',
+                            'collection': collection.get('name', 'Unknown Collection'),
+                            'is_downloaded': False,
+                            'platform': '',
+                            'file_name': ''
+                        }
+                        placeholder_games.append(placeholder_game)
+
+                    # Update tree with named placeholders (shows "Loading..." in status/size)
+                    self.library_model.update_library(placeholder_games, group_by='collection', loading=True)
+                    return False
+
+                GLib.idle_add(show_collection_placeholders)
+
                 # Create lookup map of existing games by ROM ID for download status
                 existing_games_map = {}
                 for game in self.parent.available_games:
@@ -2545,16 +2769,34 @@ class EnhancedLibrarySection:
                 all_collection_games_copy = []
                 for game in all_collection_games:
                     all_collection_games_copy.append(game.copy())
-                
+
                 def update_collections_data():
+                    # Check if this load is still valid (view mode hasn't changed)
+                    if self.view_mode_generation != expected_generation:
+                        print(f"⚠️ Discarding stale collections load (generation mismatch: {expected_generation} vs {self.view_mode_generation})")
+                        return False
+
+                    # Only update if we're still in collections view
+                    if self.current_view_mode != 'collection':
+                        print(f"⚠️ Discarding collections load (no longer in collections view)")
+                        return False
+
+                    import time
                     self.collections_games = all_collection_games_copy
+                    self.collections_cache_time = time.time()  # Update cache timestamp
                     self.library_model.update_library(self.collections_games, group_by='collection')
                     self.parent.log_message(f"Loaded {len(custom_collections)} custom collections with {len(all_collection_games)} games")
-                
+                    return False
+
                 GLib.idle_add(update_collections_data)
-                
+
             except Exception as e:
-                GLib.idle_add(lambda: self.parent.log_message(f"Failed to load collections: {e}"))
+                def log_error():
+                    # Only log error if still in the same view generation
+                    if self.view_mode_generation == expected_generation:
+                        self.parent.log_message(f"Failed to load collections: {e}")
+                    return False
+                GLib.idle_add(log_error)
         
         threading.Thread(target=load_collections, daemon=True).start()
 
@@ -3251,17 +3493,75 @@ class EnhancedLibrarySection:
             GLib.timeout_add(500, self.clear_checkbox_selection)  # Small delay for UI feedback
 
     def update_single_game(self, updated_game_data, skip_platform_update=False):
+        """Update a single game in the tree without rebuilding - preserves expansion state"""
         # Update master list
         for i, game in enumerate(self.parent.available_games):
             if game.get('rom_id') == updated_game_data.get('rom_id'):
                 self.parent.available_games[i] = updated_game_data
                 break
-        
-        # Just refresh the whole view - simpler and more reliable
-        if self.current_view_mode == 'collection':
-            self.load_collections_view()
-        else:
-            self.update_games_library(self.parent.available_games)
+
+        # Try to update in-place first, avoiding full rebuild
+        rom_id = updated_game_data.get('rom_id')
+        updated = False
+
+        # In collection view, also update the collections_games cache
+        if self.current_view_mode == 'collection' and hasattr(self, 'collections_games'):
+            for i, collection_game in enumerate(self.collections_games):
+                if collection_game.get('rom_id') == rom_id:
+                    # Preserve the collection field when updating
+                    updated_collection_game = updated_game_data.copy()
+                    updated_collection_game['collection'] = collection_game.get('collection')
+                    self.collections_games[i] = updated_collection_game
+
+        model = self.library_model.tree_model
+        for i in range(model.get_n_items()):
+            tree_item = model.get_item(i)
+            if tree_item and tree_item.get_depth() == 0:  # Platform/Collection level
+                platform_item = tree_item.get_item()
+                if isinstance(platform_item, PlatformItem):
+                    # Update the game data in platform's games list
+                    for j, game in enumerate(platform_item.games):
+                        if game.get('rom_id') == rom_id:
+                            # Preserve collection field if in collection view
+                            if self.current_view_mode == 'collection':
+                                updated_game_with_collection = updated_game_data.copy()
+                                updated_game_with_collection['collection'] = game.get('collection')
+                                platform_item.games[j] = updated_game_with_collection
+                            else:
+                                platform_item.games[j] = updated_game_data
+
+                            # Update the corresponding GameItem in child_store
+                            for k in range(platform_item.child_store.get_n_items()):
+                                game_item = platform_item.child_store.get_item(k)
+                                if isinstance(game_item, GameItem) and game_item.game_data.get('rom_id') == rom_id:
+                                    # Update the game_data reference
+                                    if self.current_view_mode == 'collection':
+                                        updated_game_with_collection = updated_game_data.copy()
+                                        updated_game_with_collection['collection'] = game_item.game_data.get('collection')
+                                        game_item.game_data = updated_game_with_collection
+                                    else:
+                                        game_item.game_data = updated_game_data
+                                    # Trigger property notifications to refresh UI
+                                    game_item.notify('name')
+                                    game_item.notify('is-downloaded')
+                                    game_item.notify('size-text')
+                                    break
+
+                            # Update platform properties (status and size text)
+                            platform_item.notify('status-text')
+                            platform_item.notify('size-text')
+                            updated = True
+                            break
+
+                if updated:
+                    break
+
+        # If in-place update failed, fall back to full refresh
+        if not updated:
+            if self.current_view_mode == 'collection':
+                self.load_collections_view()
+            else:
+                self.update_games_library(self.parent.available_games)
 
     def setup_checkbox_cell(self, factory, list_item):
         checkbox = Gtk.CheckButton()
@@ -3926,7 +4226,7 @@ class RomMClient:
         self.session.headers.update({
             'Accept-Encoding': 'gzip, deflate',
             'Accept': 'application/json',
-            'User-Agent': 'RomM-RetroArch-Sync/1.2',
+            'User-Agent': 'RomM-RetroArch-Sync/1.2.1',
             'Connection': 'keep-alive',
             'Keep-Alive': 'timeout=30, max=100'
         })
@@ -7263,7 +7563,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             transient_for=self,
             application_name="RomM - RetroArch Sync",
             application_icon="com.romm.retroarch.sync",
-            version="1.2",
+            version="1.2.1",
             developer_name='Hector Eduardo "Covin" Silveri',
             copyright="© 2025 Hector Eduardo Silveri",
             license_type=Gtk.License.GPL_3_0
@@ -8246,7 +8546,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             # Create package.json
             package_json = {
                 "name": "romm-sync-status",
-                "version": "1.2",
+                "version": "1.2.1",
                 "description": "RomM Sync Status Display",
                 "main": "main.py",
                 "scripts": {},
@@ -8647,7 +8947,92 @@ class SyncWindow(Gtk.ApplicationWindow):
                 pass
         
         GLib.idle_add(update_ui)
-    
+
+    def send_desktop_notification(self, title, body):
+        """Send a desktop notification (GNOME/KDE/etc)"""
+        import subprocess
+        import os
+
+        try:
+            # Method 1: Direct D-Bus call (most reliable for GNOME)
+            try:
+                # Use gdbus to send notification directly to the notification daemon
+                # This bypasses GTK/Gio and talks directly to org.freedesktop.Notifications
+                result = subprocess.run([
+                    'gdbus', 'call', '--session',
+                    '--dest=org.freedesktop.Notifications',
+                    '--object-path=/org/freedesktop/Notifications',
+                    '--method=org.freedesktop.Notifications.Notify',
+                    'RomM Sync',  # app_name
+                    '0',  # replaces_id
+                    'folder-download',  # app_icon
+                    title,  # summary
+                    body,  # body
+                    '[]',  # actions
+                    '{}',  # hints
+                    '5000'  # timeout (5 seconds)
+                ], timeout=5, capture_output=True, text=True)
+
+                if result.returncode == 0:
+                    print(f"✅ Desktop notification sent (gdbus): {title}")
+                    return True
+                else:
+                    print(f"⚠️ gdbus notification failed: {result.stderr}")
+
+            except FileNotFoundError:
+                print("⚠️ gdbus not found, trying notify-send...")
+            except Exception as e:
+                print(f"⚠️ gdbus error: {e}")
+
+            # Method 2: notify-send (standard tool)
+            try:
+                result = subprocess.run(
+                    ['notify-send',
+                     '--app-name=RomM Sync',
+                     '--icon=folder-download',
+                     '--urgency=normal',
+                     title,
+                     body],
+                    timeout=5,
+                    capture_output=True,
+                    text=True
+                )
+
+                if result.returncode == 0:
+                    print(f"✅ Desktop notification sent (notify-send): {title}")
+                    return True
+                else:
+                    print(f"⚠️ notify-send failed: {result.stderr}")
+
+            except FileNotFoundError:
+                print("❌ notify-send not found, trying Gio.Notification...")
+            except Exception as e:
+                print(f"⚠️ notify-send error: {e}")
+
+            # Method 3: Fallback to Gio.Notification
+            app = self.get_application()
+            if app and hasattr(app, 'send_notification'):
+                try:
+                    notification = Gio.Notification.new(title)
+                    notification.set_body(body)
+                    icon = Gio.ThemedIcon.new("folder-download-symbolic")
+                    notification.set_icon(icon)
+                    notification_id = f"collection-sync-{hash(title) % 10000}"
+                    app.send_notification(notification_id, notification)
+                    print(f"✅ Sent Gio notification: {title}")
+                    return True
+                except Exception as e:
+                    print(f"❌ Gio.Notification failed: {e}")
+
+            print(f"❌ All notification methods failed for: {title}")
+            return False
+
+        except Exception as e:
+            print(f"❌ Desktop notification error: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
     def on_choose_directory(self, button):
         """Choose download directory"""
         dialog = Gtk.FileDialog()
@@ -9132,10 +9517,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                             if g.get('rom_id') == game.get('rom_id'):
                                 self.available_games[i] = game
                                 break
-                        
-                        if hasattr(self, 'library_section'):
-                            self.library_section.update_games_library(self.available_games)
-                    
+
                     GLib.idle_add(refresh_ui)
                     
                     # Update based on current view mode
@@ -9143,55 +9525,19 @@ class SyncWindow(Gtk.ApplicationWindow):
                         if hasattr(self, 'library_section'):
                             current_mode = getattr(self.library_section, 'current_view_mode', 'platform')
                             
-                            if current_mode == 'collection':
-                                # Update collections cache
-                                if hasattr(self.library_section, 'collections_games'):
-                                    updated_collections = set()
-                                    for i, collection_game in enumerate(self.library_section.collections_games):
-                                        if collection_game.get('rom_id') == game.get('rom_id'):
-                                            updated_game = game.copy()
-                                            updated_game['collection'] = collection_game.get('collection')
-                                            self.library_section.collections_games[i] = updated_game
-                                            updated_collections.add(collection_game.get('collection'))
-                                    
-                                    # Force collection property updates
-                                    def force_collection_updates():
-                                        model = self.library_section.library_model.tree_model
-                                        for i in range(model.get_n_items() if model else 0):
-                                            tree_item = model.get_item(i)
-                                            if tree_item and tree_item.get_depth() == 0:
-                                                platform_item = tree_item.get_item()
-                                                if isinstance(platform_item, PlatformItem):
-                                                    if platform_item.platform_name in updated_collections:
-                                                        platform_item.notify('status-text')
-                                                        platform_item.notify('size-text')
-                                        return False
-                                    
-                                    GLib.timeout_add(150, force_collection_updates)
-                                
-                                # Force complete reload of collections view
-                                def reload_collections():
-                                    # Clear cache to force reload
-                                    self.library_section.collections_cache_time = 0
-                                    self.library_section.load_collections_view()
-                                    return False
+                            # For offline mode (not connected to RomM), we need a full refresh to remove items
+                            if not (self.romm_client and self.romm_client.authenticated):
+                                # If not connected to RomM, remove the game entirely from the list
+                                if hasattr(self, 'available_games') and game in self.available_games:
+                                    self.available_games.remove(game)
 
-                                GLib.timeout_add(100, reload_collections)
-                                print(f"🔍 DEBUG: Scheduled complete collections reload after deletion")
+                                # Refresh the entire library to remove the item
+                                if hasattr(self, 'library_section'):
+                                    self.library_section.update_games_library(self.available_games)
                             else:
-                                # Normal platform view handling
-                                if not (self.romm_client and self.romm_client.authenticated):
-                                    # If not connected to RomM, remove the game entirely from the list
-                                    if hasattr(self, 'available_games') and game in self.available_games:
-                                        self.available_games.remove(game)
-                                    
-                                    # Refresh the entire library to remove the item
-                                    if hasattr(self, 'library_section'):
-                                        self.library_section.update_games_library(self.available_games)
-                                else:
-                                    # Connected to RomM - just update the single item
-                                    if hasattr(self, 'library_section'):
-                                        self.library_section.update_single_game(game, skip_platform_update=is_bulk_operation)
+                                # Connected to RomM - just update the single item (works for both platform and collection view)
+                                if hasattr(self, 'library_section'):
+                                    self.library_section.update_single_game(game, skip_platform_update=is_bulk_operation)
                         
                         return False
                     
@@ -9738,17 +10084,19 @@ class SyncWindow(Gtk.ApplicationWindow):
                                                 break
                             
                             # Update collections cache AND platform item data
-                            if (hasattr(self.library_section, 'current_view_mode') and 
+                            if (hasattr(self.library_section, 'current_view_mode') and
                                 self.library_section.current_view_mode == 'collection'):
-                                
+
                                 # Update collections_games cache
+                                updated_any = False
                                 if hasattr(self.library_section, 'collections_games'):
                                     for i, collection_game in enumerate(self.library_section.collections_games):
                                         if collection_game.get('rom_id') == game.get('rom_id'):
                                             updated_game = game.copy()
                                             updated_game['collection'] = collection_game.get('collection')
                                             self.library_section.collections_games[i] = updated_game
-                                
+                                            updated_any = True
+
                                 # Update the actual PlatformItem.games data in the tree model
                                 def update_platform_items():
                                     model = self.library_section.library_model.tree_model
@@ -9763,14 +10111,14 @@ class SyncWindow(Gtk.ApplicationWindow):
                                                         if platform_game.get('rom_id') == game.get('rom_id'):
                                                             platform_item.games[j] = game.copy()
                                                             platform_item.games[j]['collection'] = platform_item.platform_name
-                                                    
+
                                                     # Force property recalculation
                                                     platform_item.notify('status-text')
                                                     platform_item.notify('size-text')
                                     return False
-                                
+
                                 GLib.timeout_add(200, update_platform_items)
-                                
+
                                 # If we updated any collection games, reload the entire collections view
                                 if updated_any:
                                     def reload_collections():

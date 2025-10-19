@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.2.1] - 2025-10-19
+
+### Added
+
+- System \ Retroarch collection sync notification
+
+### Fixed
+
+- Multilple ui bugs in tree view
+
 ## [1.2] - 2025-10-19
 
 ### Added
