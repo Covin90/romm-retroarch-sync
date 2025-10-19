@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.2] - 2025-10-19
+
+### Added
+
+- RomM Collection Sync
+- BIOS Automatic Download
+
+### Fixed
+
+- Multilple files game
+- Compatibility with latest RomM (4.1.0+)
+- Retrodeck compatibility
+- Various fixes to tree view (first batch)
+
+## [1.1.0] - 2025-08-06
+
+### Added
+
+- Steam Deck & RetroDeck compatibility
+- Max concurrent downloads
+- Daemon service
+- Tweaked
+- Game detection & core matching algorithms
+- UI & Notifications system
+
 ## [1.0.6] - 2025-07-27
 
 ### Added

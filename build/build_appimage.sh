@@ -10,7 +10,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 echo "📁 Project root: $PROJECT_ROOT"
 
 # Add version variable at the top
-VERSION="1.1.0-test"
+VERSION="1.2"
 APPIMAGE_NAME="RomM-RetroArch-Sync-v${VERSION}.AppImage"
 
 # Define paths
@@ -193,7 +193,7 @@ cat > "$APPDIR/usr/share/metainfo/com.romm.retroarch.sync.appdata.xml" << EOF
   </categories>
   
   <releases>
-    <release version="${VERSION}" date="2025-07-26">
+    <release version="${VERSION}" date="2025-10-19">
       <description>
         <p>Fix pagination and save sync, add loading feedback.</p>
       </description>

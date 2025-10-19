@@ -3926,7 +3926,7 @@ class RomMClient:
         self.session.headers.update({
             'Accept-Encoding': 'gzip, deflate',
             'Accept': 'application/json',
-            'User-Agent': 'RomM-RetroArch-Sync/1.1.0-test',
+            'User-Agent': 'RomM-RetroArch-Sync/1.2',
             'Connection': 'keep-alive',
             'Keep-Alive': 'timeout=30, max=100'
         })
@@ -7263,7 +7263,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             transient_for=self,
             application_name="RomM - RetroArch Sync",
             application_icon="com.romm.retroarch.sync",
-            version="1.1.0-test",
+            version="1.2",
             developer_name='Hector Eduardo "Covin" Silveri',
             copyright="© 2025 Hector Eduardo Silveri",
             license_type=Gtk.License.GPL_3_0
@@ -8246,7 +8246,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             # Create package.json
             package_json = {
                 "name": "romm-sync-status",
-                "version": "1.1.0-test",
+                "version": "1.2",
                 "description": "RomM Sync Status Display",
                 "main": "main.py",
                 "scripts": {},
