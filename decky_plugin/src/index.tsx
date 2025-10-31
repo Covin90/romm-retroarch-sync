@@ -20,16 +20,47 @@ function Content() {
   const [loading, setLoading] = useState(false);
   const [togglingCollection, setTogglingCollection] = useState<string | null>(null);
   const intervalRef = useRef<any>(null);
-  const skipRefreshRef = useRef(false);
+  const optimisticOverrides = useRef<Map<string, {auto_sync: boolean, sync_state: string}>>(new Map());
 
   const refreshStatus = async () => {
-    if (skipRefreshRef.current) {
-      console.log('[REFRESH] Skipped due to skipRefreshRef');
-      return;
-    }
     try {
       const result = await getServiceStatus();
-      setStatus(result);
+      console.log(`[REFRESH] Got status, overrides:`, Array.from(optimisticOverrides.current.keys()));
+
+      // Check if backend data matches any overrides - if so, clear them
+      if (optimisticOverrides.current.size > 0) {
+        result.collections.forEach((col: any) => {
+          const override = optimisticOverrides.current.get(col.name);
+          // Clear override only when BOTH auto_sync and sync_state match
+          if (override && override.auto_sync === col.auto_sync &&
+              (override.sync_state === col.sync_state || col.sync_state === 'synced')) {
+            console.log(`[REFRESH] Backend matches override for ${col.name}, clearing override`);
+            optimisticOverrides.current.delete(col.name);
+          }
+        });
+      }
+
+      // Apply remaining optimistic overrides (only override auto_sync, keep progress data)
+      if (optimisticOverrides.current.size > 0) {
+        console.log(`[REFRESH] Applying overrides to collections`);
+        const modifiedResult = {
+          ...result,
+          collections: result.collections.map((col: any) => {
+            const override = optimisticOverrides.current.get(col.name);
+            if (override) {
+              console.log(`[REFRESH] Overriding auto_sync and sync_state for ${col.name}, keeping progress`);
+              // Override both auto_sync and sync_state to prevent red intermediate state
+              // Keep downloaded/total updating normally for real-time progress
+              return { ...col, auto_sync: override.auto_sync, sync_state: override.sync_state };
+            }
+            return col;
+          })
+        };
+        setStatus(modifiedResult);
+      } else {
+        console.log(`[REFRESH] No overrides, using raw result`);
+        setStatus(result);
+      }
     } catch (error) {
       setStatus({ status: 'error', message: '❌ Plugin error' });
     }
@@ -69,16 +100,26 @@ function Content() {
 
   const handleToggleCollection = async (collectionName: string, enabled: boolean) => {
     console.log(`[TOGGLE] Starting toggle for ${collectionName}, enabled=${enabled}`);
-    setTogglingCollection(collectionName);
-    skipRefreshRef.current = true; // Block all refreshes
 
-    // Optimistically update the UI immediately
+    // FIRST: Set override BEFORE anything else to protect against concurrent polling
+    optimisticOverrides.current.set(collectionName, {
+      auto_sync: enabled,
+      sync_state: enabled ? 'syncing' : 'not_synced'
+    });
+    console.log(`[TOGGLE] Set override for ${collectionName}, map size:`, optimisticOverrides.current.size);
+
+    setTogglingCollection(collectionName);
+
+    // Update UI immediately - change auto_sync and set initial sync_state
     setStatus((prevStatus: any) => {
-      const updatedCollections = prevStatus.collections.map((col: any) =>
-        col.name === collectionName
-          ? { ...col, auto_sync: enabled, sync_state: enabled ? 'syncing' : 'not_synced' }
-          : col
-      );
+      const updatedCollections = prevStatus.collections.map((col: any) => {
+        if (col.name === collectionName) {
+          // When enabling, show as syncing; when disabling, show as not_synced
+          const newSyncState = enabled ? 'syncing' : 'not_synced';
+          return { ...col, auto_sync: enabled, sync_state: newSyncState };
+        }
+        return col;
+      });
       return {
         ...prevStatus,
         collections: updatedCollections,
@@ -90,14 +131,11 @@ function Content() {
       console.log(`[TOGGLE] Calling backend toggleCollectionSync...`);
       const result = await toggleCollectionSync(collectionName, enabled);
       console.log(`[TOGGLE] Backend returned:`, result);
-      // Skip refreshes for 10s to test if timing is the issue
-      setTimeout(() => {
-        skipRefreshRef.current = false;
-        refreshStatus();
-      }, 10000);
+      // Override will auto-clear when backend data matches (via refreshStatus)
     } catch (error) {
       console.error('[TOGGLE] Failed to toggle collection sync:', error);
-      skipRefreshRef.current = false;
+      // Clear override on error and refresh
+      optimisticOverrides.current.delete(collectionName);
       refreshStatus();
     } finally {
       setTogglingCollection(null);
@@ -107,13 +145,18 @@ function Content() {
   const handleDeleteCollection = async (collectionName: string) => {
     console.log(`[DELETE] Starting deletion for ${collectionName}`);
     setTogglingCollection(collectionName);
-    skipRefreshRef.current = true; // Block all refreshes
 
-    // Optimistically update UI - show as disabled
+    // Store optimistic override
+    optimisticOverrides.current.set(collectionName, {
+      auto_sync: false,
+      sync_state: 'not_synced'
+    });
+
+    // Update UI immediately - only change auto_sync
     setStatus((prevStatus: any) => {
       const updatedCollections = prevStatus.collections.map((col: any) =>
         col.name === collectionName
-          ? { ...col, auto_sync: false, sync_state: 'not_synced' }
+          ? { ...col, auto_sync: false }
           : col
       );
       return {
@@ -126,18 +169,10 @@ function Content() {
     try {
       const result = await deleteCollectionRoms(collectionName);
       console.log(`[DELETE] Backend returned:`, result);
-      if (result) {
-        // Wait for daemon to finish deleting
-        setTimeout(() => {
-          skipRefreshRef.current = false;
-          refreshStatus();
-        }, 2000);
-      } else {
-        skipRefreshRef.current = false;
-      }
+      // Override will auto-clear when backend data matches (via refreshStatus)
     } catch (error) {
       console.error('[DELETE] Failed to delete collection ROMs:', error);
-      skipRefreshRef.current = false;
+      optimisticOverrides.current.delete(collectionName);
       refreshStatus();
     } finally {
       setTogglingCollection(null);
