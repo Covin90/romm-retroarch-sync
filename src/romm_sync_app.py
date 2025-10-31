@@ -24,6 +24,12 @@ from watchdog.events import FileSystemEventHandler
 import queue
 from collections import defaultdict
 
+# Fix SSL certificate path for AppImage environment
+# Use system certificates instead of bundled certifi
+import ssl
+os.environ['REQUESTS_CA_BUNDLE'] = '/etc/ssl/certs/ca-certificates.crt'
+os.environ['SSL_CERT_FILE'] = '/etc/ssl/certs/ca-certificates.crt'
+
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 
@@ -1262,7 +1268,7 @@ class EnhancedLibrarySection:
                             if local_path.exists() and local_path.stat().st_size > 1024:
                                 processed_game['is_downloaded'] = True
                                 processed_game['local_path'] = str(local_path)
-                                processed_game['local_size'] = self.parent.get_actual_file_size(local_path)
+                                processed_game['local_size'] = local_path.stat().st_size
 
                             # Update available_games
                             for i, game in enumerate(self.parent.available_games):
@@ -8464,14 +8470,81 @@ class SyncWindow(Gtk.ApplicationWindow):
 
     def update_status_file(self):
             """Update status file for Decky plugin"""
+            # Get all collections from RomM with their auto-sync status
+            collections_list = []
+            actively_syncing = set()
+            if hasattr(self, 'game_sync_daemon') and self.game_sync_daemon:
+                actively_syncing = getattr(self.game_sync_daemon, 'actively_syncing_collections', set())
+
+            # Fetch all collections if connected
+            if self.romm_client and self.romm_client.authenticated:
+                try:
+                    all_collections = self.romm_client.get_collections()
+                    download_dir = Path(self.settings.get('Download', 'rom_directory'))
+
+                    for collection in all_collections:
+                        collection_name = collection.get('name', 'Unknown')
+                        collection_id = collection.get('id')
+                        is_auto_sync = collection_name in actively_syncing
+
+                        # Determine sync state: synced, syncing, or not_synced
+                        sync_state = 'not_synced'
+                        downloaded_roms = 0
+                        total_roms = 0
+
+                        if is_auto_sync:
+                            try:
+                                # Get collection ROMs
+                                collection_roms = self.romm_client.get_collection_roms(collection_id)
+                                total_roms = len(collection_roms)
+                                downloaded_roms = 0
+
+                                # Count downloaded ROMs
+                                for rom in collection_roms:
+                                    platform_slug = rom.get('platform_slug', 'Unknown')
+                                    file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
+                                    platform_dir = download_dir / platform_slug
+                                    local_path = platform_dir / file_name
+                                    if local_path.exists() and local_path.stat().st_size > 1024:
+                                        downloaded_roms += 1
+
+                                # Determine state
+                                if total_roms == 0:
+                                    sync_state = 'synced'
+                                elif downloaded_roms == total_roms:
+                                    sync_state = 'synced'
+                                else:
+                                    sync_state = 'syncing'
+
+                            except Exception as e:
+                                print(f"Failed to check sync state for {collection_name}: {e}")
+                                sync_state = 'syncing'
+
+                        collection_data = {
+                            'name': collection_name,
+                            'id': collection_id,
+                            'auto_sync': is_auto_sync,
+                            'sync_state': sync_state
+                        }
+                        # Always include ROM count if auto_sync is enabled
+                        if is_auto_sync and total_roms > 0:
+                            collection_data['downloaded'] = downloaded_roms
+                            collection_data['total'] = total_roms
+                        collections_list.append(collection_data)
+                except Exception as e:
+                    print(f"Failed to fetch collections for status: {e}")
+
             status = {
                 'running': True,
                 'connected': bool(self.romm_client and self.romm_client.authenticated),
                 'auto_sync': getattr(self, 'autosync_enable_switch', None) and self.autosync_enable_switch.get_active(),
                 'game_count': len(getattr(self, 'available_games', [])),
+                'collections': collections_list,
+                'collection_count': len(collections_list),
+                'actively_syncing_count': len(actively_syncing),
                 'last_update': time.time()
             }
-            
+
             try:
                 self.status_file = getattr(self, 'status_file', Path.home() / '.config' / 'romm-retroarch-sync' / 'status.json')
                 self.status_file.parent.mkdir(parents=True, exist_ok=True)
@@ -11980,12 +12053,15 @@ def run_daemon_mode():
             return
         
         # Load collection sync settings
-        selected_collections_str = settings.get('Collections', 'selected_for_sync', '')
+        # Check actively_syncing first (this is what's actually running), fall back to selected_for_sync
+        selected_collections_str = settings.get('Collections', 'actively_syncing', '')
+        if not selected_collections_str:
+            selected_collections_str = settings.get('Collections', 'selected_for_sync', '')
         auto_sync_enabled = settings.get('Collections', 'auto_sync_enabled', 'false') == 'true'
         sync_interval = int(settings.get('Collections', 'sync_interval', '120'))
-        
+
         print(f"📋 Daemon: Collections config - enabled: {auto_sync_enabled}, collections: '{selected_collections_str}', interval: {sync_interval}")  # Add this
-        
+
         if selected_collections_str and auto_sync_enabled:
             selected_collections = set(selected_collections_str.split('|'))
             
@@ -12003,6 +12079,13 @@ def run_daemon_mode():
             
             collection_auto_sync.start()
     
+    # Flag for immediate reload triggered by USR1 (using list to allow modification in nested scopes)
+    force_reload = [False]
+
+    # Cache for status data to avoid expensive API calls every loop
+    status_cache = {'collections': {}, 'last_update': 0}
+    STATUS_CACHE_DURATION = 10  # Cache status for 10 seconds
+
     def signal_handler(signum, frame):
         nonlocal running
         print(f"\n🚪 Daemon received signal {signum}, shutting down...")
@@ -12012,10 +12095,15 @@ def run_daemon_mode():
         if collection_auto_sync:  # Add this
             collection_auto_sync.stop()
         sys.exit(0)
-    
+
+    def reload_handler(signum, frame):
+        print("🔄 Daemon: Received reload signal, checking for changes immediately...")
+        force_reload[0] = True
+
     # Handle signals gracefully
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGUSR1, reload_handler)  # Add USR1 handler for immediate reload
     
     def try_connect_to_romm():
         """Try to connect to RomM using saved credentials"""
@@ -12064,6 +12152,11 @@ def run_daemon_mode():
                         local_path = platform_dir / file_name
                         is_downloaded = local_path.exists() and local_path.stat().st_size > 1024
                         
+                        # Get local file size if downloaded
+                        local_size = 0
+                        if is_downloaded and local_path.exists():
+                            local_size = local_path.stat().st_size
+
                         available_games.append({
                             'name': Path(file_name).stem if file_name else rom.get('name', 'Unknown'),
                             'rom_id': rom.get('id'),
@@ -12072,7 +12165,7 @@ def run_daemon_mode():
                             'file_name': file_name,
                             'is_downloaded': is_downloaded,
                             'local_path': str(local_path) if is_downloaded else None,
-                            'local_size': self.get_actual_file_size(local_path) if is_downloaded else 0,
+                            'local_size': local_size,
                             'romm_data': {
                                 'fs_name': rom.get('fs_name'),
                                 'fs_name_no_ext': rom.get('fs_name_no_ext'),
@@ -12146,34 +12239,170 @@ def run_daemon_mode():
         
         while running:
             try:
+                # Check for reload trigger file (created by Decky plugin for instant updates)
+                settings_changed = False
+                reload_trigger = Path.home() / '.config' / 'romm-retroarch-sync' / '.reload_trigger'
+                if reload_trigger.exists():
+                    print("🔄 Daemon: Reload trigger detected, checking for changes immediately...")
+                    reload_trigger.unlink()  # Delete the trigger file
+                    status_cache['collections'].clear()  # Clear cache to force fresh status
+                    settings_changed = True
+                    force_reload[0] = True
+
+                # Reload settings from disk to detect external changes (e.g., from Decky plugin)
+                settings.load_settings()
+
+                # FIRST: Check if collection sync should be started/stopped/updated
+                # Only check when settings changed to avoid expensive reinitialization
+                if settings_changed and romm_client and romm_client.authenticated:
+                    # Read current settings
+                    selected_collections_str = settings.get('Collections', 'actively_syncing', '')
+                    if not selected_collections_str:
+                        selected_collections_str = settings.get('Collections', 'selected_for_sync', '')
+                    auto_sync_enabled = settings.get('Collections', 'auto_sync_enabled', 'false') == 'true'
+
+                    current_collections = set(selected_collections_str.split('|')) if selected_collections_str else set()
+                    current_collections.discard('')  # Remove empty strings
+
+                    if auto_sync_enabled:
+                        if not collection_auto_sync:
+                            # Start collection sync (even with empty set)
+                            init_collection_sync()
+                        else:
+                            # Check if collections changed - update dynamically instead of restarting
+                            if current_collections != collection_auto_sync.selected_collections:
+                                print(f"🔄 Daemon: Collection list changed, updating...")
+                                collection_auto_sync.update_collections(current_collections)
+                    else:
+                        # Auto-sync disabled - stop if running
+                        if collection_auto_sync:
+                            collection_auto_sync.stop()
+                            collection_auto_sync = None
+                            print("📴 Daemon: Collection sync stopped (auto-sync disabled)")
+                elif not romm_client or not romm_client.authenticated:
+                    # Stop collection sync if disconnected
+                    if collection_auto_sync:
+                        collection_auto_sync.stop()
+                        collection_auto_sync = None
+                        print("📴 Daemon: Collection sync stopped (disconnected)")
+
+                # THEN: Get all collections from RomM with their auto-sync status
+                # Now collection_auto_sync.selected_collections is up-to-date
+                collections_list = []
+                actively_syncing = set()
+                if collection_auto_sync and collection_auto_sync.running:
+                    actively_syncing = collection_auto_sync.selected_collections
+
+                # Fetch all collections if connected
+                if romm_client and romm_client.authenticated:
+                    try:
+                        all_collections = romm_client.get_collections()
+                        download_dir = Path(settings.get('Download', 'rom_directory'))
+
+                        for collection in all_collections:
+                            collection_name = collection.get('name', 'Unknown')
+                            collection_id = collection.get('id')
+                            is_auto_sync = collection_name in actively_syncing
+
+                            # Determine sync state: synced, syncing, or not_synced
+                            sync_state = 'not_synced'
+                            downloaded_roms = 0
+                            total_roms = 0
+
+                            if is_auto_sync:
+                                # Check cache first
+                                current_time = time.time()
+                                cache_key = f"{collection_name}:{collection_id}"
+                                cached_data = status_cache['collections'].get(cache_key)
+
+                                if cached_data and (current_time - status_cache['last_update']) < STATUS_CACHE_DURATION:
+                                    # Use cached data
+                                    sync_state = cached_data['sync_state']
+                                    downloaded_roms = cached_data.get('downloaded', 0)
+                                    total_roms = cached_data.get('total', 0)
+                                else:
+                                    # Cache expired, fetch fresh
+                                    try:
+                                        # Use cached collection data if available from collection_auto_sync
+                                        if collection_auto_sync and hasattr(collection_auto_sync, 'collection_caches'):
+                                            cached_rom_ids = collection_auto_sync.collection_caches.get(collection_name)
+                                            if cached_rom_ids:
+                                                # Trust the collection sync - it keeps cache updated
+                                                total_roms = len(cached_rom_ids)
+                                                downloaded_roms = total_roms  # Assume synced
+                                                sync_state = 'synced'
+                                            else:
+                                                # No cache, fetch fresh
+                                                collection_roms = romm_client.get_collection_roms(collection_id)
+                                                total_roms = len(collection_roms)
+                                                downloaded_roms = 0
+                                                MIN_ROM_SIZE = 100 * 1024
+                                                for rom in collection_roms:
+                                                    platform_slug = rom.get('platform_slug', 'Unknown')
+                                                    file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
+                                                    local_path = download_dir / platform_slug / file_name
+                                                    if local_path.exists() and local_path.stat().st_size > MIN_ROM_SIZE:
+                                                        downloaded_roms += 1
+                                        else:
+                                            # No collection sync running, fetch fresh
+                                            collection_roms = romm_client.get_collection_roms(collection_id)
+                                            total_roms = len(collection_roms)
+                                            downloaded_roms = 0
+                                            MIN_ROM_SIZE = 100 * 1024
+                                            for rom in collection_roms:
+                                                platform_slug = rom.get('platform_slug', 'Unknown')
+                                                file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
+                                                local_path = download_dir / platform_slug / file_name
+                                                if local_path.exists() and local_path.stat().st_size > MIN_ROM_SIZE:
+                                                    downloaded_roms += 1
+
+                                            # Determine state
+                                            if total_roms == 0:
+                                                sync_state = 'synced'
+                                            elif downloaded_roms == total_roms:
+                                                sync_state = 'synced'
+                                            else:
+                                                sync_state = 'syncing'
+
+                                        # Update cache
+                                        status_cache['collections'][cache_key] = {
+                                            'sync_state': sync_state,
+                                            'downloaded': downloaded_roms,
+                                            'total': total_roms
+                                        }
+                                        status_cache['last_update'] = current_time
+
+                                    except Exception as e:
+                                        sync_state = 'syncing'
+
+                            collection_data = {
+                                'name': collection_name,
+                                'id': collection_id,
+                                'auto_sync': is_auto_sync,
+                                'sync_state': sync_state
+                            }
+                            # Always include ROM count if auto_sync is enabled
+                            if is_auto_sync and total_roms > 0:
+                                collection_data['downloaded'] = downloaded_roms
+                                collection_data['total'] = total_roms
+                            collections_list.append(collection_data)
+                    except Exception as e:
+                        print(f"Failed to fetch collections for status: {e}")
+
                 # Update status file
                 status = {
                     'running': True,
                     'connected': bool(romm_client and romm_client.authenticated),
                     'auto_sync': bool(auto_sync and auto_sync.enabled),
                     'game_count': len(available_games),
+                    'collections': collections_list,
+                    'collection_count': len(collections_list),
+                    'actively_syncing_count': len(actively_syncing),
                     'last_update': time.time()
                 }
-                
-                with open(status_file, 'w') as f:
-                    json.dump(status, f)
 
-                # Check if collection sync should be started/stopped
-                if romm_client and romm_client.authenticated:
-                    if not collection_auto_sync:
-                        # Try to start collection sync if configured
-                        selected_collections_str = settings.get('Collections', 'selected_for_sync', '')
-                        auto_sync_enabled = settings.get('Collections', 'auto_sync_enabled', 'false') == 'true'
-                        
-                        if selected_collections_str and auto_sync_enabled:
-                            # Initialize collection sync
-                            init_collection_sync()
-                else:
-                    # Stop collection sync if disconnected
-                    if collection_auto_sync:
-                        collection_auto_sync.stop()
-                        collection_auto_sync = None
-                        print("📴 Daemon: Collection sync stopped (disconnected)")                
+                with open(status_file, 'w') as f:
+                    json.dump(status, f)                
                 
                 # Try to reconnect if disconnected (every 5 minutes)
                 current_time = time.time()
@@ -12187,11 +12416,14 @@ def run_daemon_mode():
                         print("❌ Daemon: Reconnection failed")
                     connection_retry_time = current_time
                 
-                # Sleep and check for stop signal
-                for _ in range(30):  # Check every second for 30 seconds
-                    if not running:
-                        break
-                    time.sleep(1)
+                # Sleep and check for stop signal or reload trigger
+                # Short interval for responsive collection toggle updates
+                if not running:
+                    break
+                if force_reload[0]:
+                    force_reload[0] = False
+                    continue  # Skip sleep and immediately start next loop iteration
+                time.sleep(1)
                     
             except KeyboardInterrupt:
                 print("\n🔄 Daemon: Interrupted by user")
@@ -12263,9 +12495,39 @@ class DaemonCollectionSync:
         self.running = False
         if self.thread:
             self.thread.join(timeout=5)
+
+    def update_collections(self, new_collections):
+        """Update the collection list without restarting - just add/remove caches"""
+        new_set = set(new_collections)
+        old_set = self.selected_collections
+
+        # Remove collections that are no longer selected
+        for removed in (old_set - new_set):
+            if removed in self.collection_caches:
+                del self.collection_caches[removed]
+                self.log(f"Removed collection from sync: {removed}")
+
+        # Add new collections
+        for added in (new_set - old_set):
+            try:
+                all_collections = self.romm_client.get_collections()
+                for collection in all_collections:
+                    if collection.get('name') == added:
+                        collection_id = collection.get('id')
+                        collection_roms = self.romm_client.get_collection_roms(collection_id)
+                        rom_ids = {rom.get('id') for rom in collection_roms if rom.get('id')}
+                        self.collection_caches[added] = rom_ids
+                        self.log(f"Added collection to sync: {added} ({len(rom_ids)} games)")
+                        # Download existing ROMs in background
+                        self.handle_added_games(collection_roms, rom_ids, added)
+                        break
+            except Exception as e:
+                self.log(f"Error adding collection {added}: {e}")
+
+        self.selected_collections = new_set
     
     def initialize_caches(self):
-        """Initialize ROM ID caches"""
+        """Initialize ROM ID caches and download all existing ROMs"""
         try:
             all_collections = self.romm_client.get_collections()
             for collection in all_collections:
@@ -12276,6 +12538,12 @@ class DaemonCollectionSync:
                     rom_ids = {rom.get('id') for rom in collection_roms if rom.get('id')}
                     self.collection_caches[collection_name] = rom_ids
                     self.log(f"Initialized cache for '{collection_name}': {len(rom_ids)} games")
+
+                    # Download all existing ROMs in the collection
+                    all_rom_ids = {rom.get('id') for rom in collection_roms if rom.get('id')}
+                    if all_rom_ids:
+                        self.log(f"Starting initial download for '{collection_name}'...")
+                        self.handle_added_games(collection_roms, all_rom_ids, collection_name)
         except Exception as e:
             self.log(f"Cache initialization error: {e}")
     
@@ -12333,8 +12601,9 @@ class DaemonCollectionSync:
             platform_dir = download_dir / platform_slug
             local_path = platform_dir / file_name
             
-            # Skip if already downloaded
-            if local_path.exists() and local_path.stat().st_size > 1024:
+            # Skip if already downloaded (must be > 100KB to be valid)
+            MIN_ROM_SIZE = 100 * 1024  # 100 KB minimum
+            if local_path.exists() and local_path.stat().st_size > MIN_ROM_SIZE:
                 self.log(f"  ✅ {rom.get('name')} already downloaded")
                 continue
             
@@ -12356,10 +12625,10 @@ class DaemonCollectionSync:
                 # Update available_games with collection info
                 for game in self.available_games:
                     if game.get('rom_id') == rom.get('id'):
-                        game['collection'] = collection_name 
+                        game['collection'] = collection_name
                         game['is_downloaded'] = True
                         game['local_path'] = str(local_path)
-                        game['local_size'] = self.get_actual_file_size(local_path)
+                        game['local_size'] = local_path.stat().st_size
                         break
             else:
                 self.log(f"  ❌ Failed to download {rom.get('name')}: {message}")
