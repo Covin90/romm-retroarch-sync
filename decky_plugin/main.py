@@ -67,10 +67,11 @@ class Plugin:
                         app_status = json.load(f)
                     logging.info(f"Status file read: {app_status}")
 
-                    # Check if status file was updated recently (within last 60 seconds)
+                    # Check if status file was updated recently (within last 120 seconds)
+                    # Increased timeout to handle large collection sync calculations
                     import time
                     file_mtime = status_file.stat().st_mtime
-                    status_file_recent = (time.time() - file_mtime) < 60
+                    status_file_recent = (time.time() - file_mtime) < 300
                     logging.debug(f"Status file age: {time.time() - file_mtime}s, recent: {status_file_recent}")
                 except Exception as e:
                     logging.error(f"Failed to read status file: {e}")

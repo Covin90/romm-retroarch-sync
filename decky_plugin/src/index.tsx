@@ -218,7 +218,10 @@ function Content() {
                           borderRadius: '50%',
                           backgroundColor: getDotColor()
                         }} />
-                        <span>{collection.name}</span>
+                        <span>
+                          {collection.name}
+                          {collection.auto_sync && collection.sync_state === 'syncing' ? ' - Syncing' : ''}
+                        </span>
                       </div>
                     }
                     description={

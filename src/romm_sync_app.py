@@ -12084,7 +12084,7 @@ def run_daemon_mode():
 
     # Cache for status data to avoid expensive API calls every loop
     status_cache = {'collections': {}, 'last_update': 0}
-    STATUS_CACHE_DURATION = 10  # Cache status for 10 seconds
+    STATUS_CACHE_DURATION = 60  # Cache status for 60 seconds (increased to reduce load during large syncs)
 
     def signal_handler(signum, frame):
         nonlocal running
