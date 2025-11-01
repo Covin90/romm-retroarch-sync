@@ -96,6 +96,10 @@ class Plugin:
                         message += f", {collection_count} collections"
                     message += ")"
 
+                    # Log collection data for debugging
+                    for col in collections:
+                        logging.info(f"[STATUS] Collection {col.get('name')}: auto_sync={col.get('auto_sync')}, downloaded={col.get('downloaded')}, total={col.get('total')}, sync_state={col.get('sync_state')}")
+
                     return {
                         'status': 'connected',
                         'message': message,

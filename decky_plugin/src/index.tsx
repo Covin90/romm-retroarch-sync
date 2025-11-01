@@ -224,13 +224,16 @@ function Content() {
                         </span>
                       </div>
                     }
-                    description={
-                      collection.auto_sync
-                        ? collection.downloaded !== undefined && collection.total !== undefined
-                          ? `${collection.downloaded} / ${collection.total} ROMs`
-                          : "Auto-sync enabled"
-                        : "Auto-sync disabled"
-                    }
+                    description={(() => {
+                      console.log(`[RENDER] ${collection.name}: auto_sync=${collection.auto_sync}, downloaded=${collection.downloaded}, total=${collection.total}, sync_state=${collection.sync_state}`);
+                      if (collection.auto_sync) {
+                        if (collection.downloaded !== undefined && collection.total !== undefined) {
+                          return `${collection.downloaded} / ${collection.total} ROMs`;
+                        }
+                        return "Auto-sync enabled";
+                      }
+                      return "Auto-sync disabled";
+                    })()}
                     checked={collection.auto_sync}
                     onChange={(value: boolean) => handleToggleCollection(collection.name, value)}
                     disabled={togglingCollection === collection.name}
@@ -244,7 +247,7 @@ function Content() {
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                       <FaTrash size={12} />
-                      <span>Delete ROMs & Re-sync</span>
+                      <span>Delete ROMs</span>
                     </div>
                   </ButtonItem>
                 </PanelSectionRow>
