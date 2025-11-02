@@ -52,7 +52,7 @@ function Content() {
         });
       }
 
-      // Apply remaining optimistic overrides (only override auto_sync, keep progress data)
+      // Apply remaining optimistic overrides
       if (optimisticOverrides.current.size > 0) {
         console.log(`[REFRESH] 🎨 Applying ${optimisticOverrides.current.size} override(s) to result`);
         const modifiedResult = {
@@ -61,7 +61,14 @@ function Content() {
             const override = optimisticOverrides.current.get(col.name);
             if (override) {
               const before = `{sync_state:${col.sync_state}, downloaded:${col.downloaded}, total:${col.total}}`;
-              const modified = { ...col, auto_sync: override.auto_sync, sync_state: override.sync_state };
+              // Apply override fields - if override has downloaded/total, use them
+              const modified = {
+                ...col,
+                auto_sync: override.auto_sync,
+                sync_state: override.sync_state,
+                ...(override.downloaded !== undefined ? { downloaded: override.downloaded } : {}),
+                ...(override.total !== undefined ? { total: override.total } : {})
+              };
               const after = `{sync_state:${modified.sync_state}, downloaded:${modified.downloaded}, total:${modified.total}}`;
               console.log(`[REFRESH] 🔧 ${col.name}: BEFORE=${before}, AFTER=${after}`);
               return modified;
@@ -116,12 +123,18 @@ function Content() {
   const handleToggleCollection = async (collectionName: string, enabled: boolean) => {
     console.log(`[TOGGLE] Starting toggle for ${collectionName}, enabled=${enabled}`);
 
+    // Get current collection state to determine total
+    const currentCollection = status?.collections.find((c: any) => c.name === collectionName);
+    const totalRoms = currentCollection?.total || 0;
+
     // FIRST: Set override BEFORE anything else to protect against concurrent polling
+    // Include downloaded: 0 when enabling to show "0/X" immediately
     optimisticOverrides.current.set(collectionName, {
       auto_sync: enabled,
-      sync_state: enabled ? 'syncing' : 'not_synced'
+      sync_state: enabled ? 'syncing' : 'not_synced',
+      ...(enabled ? { downloaded: 0, total: totalRoms } : {})
     });
-    console.log(`[TOGGLE] Set override for ${collectionName}, map size:`, optimisticOverrides.current.size);
+    console.log(`[TOGGLE] Set override for ${collectionName} with downloaded=0, total=${totalRoms}, map size:`, optimisticOverrides.current.size);
 
     setTogglingCollection(collectionName);
 
@@ -132,8 +145,7 @@ function Content() {
           // When enabling, show as syncing starting from 0/total
           // When disabling, show as not_synced
           if (enabled) {
-            const total = col.total || 0;
-            return { ...col, auto_sync: true, sync_state: 'syncing', downloaded: 0, total: total };
+            return { ...col, auto_sync: true, sync_state: 'syncing', downloaded: 0, total: totalRoms };
           } else {
             return { ...col, auto_sync: false, sync_state: 'not_synced' };
           }
