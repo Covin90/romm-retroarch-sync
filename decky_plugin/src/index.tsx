@@ -25,40 +25,55 @@ function Content() {
   const refreshStatus = async () => {
     try {
       const result = await getServiceStatus();
-      console.log(`[REFRESH] Got status, overrides:`, Array.from(optimisticOverrides.current.keys()));
+      console.log(`[REFRESH] ========== NEW REFRESH ==========`);
+      console.log(`[REFRESH] Raw backend data:`, JSON.stringify(result.collections, null, 2));
+      console.log(`[REFRESH] Current overrides:`, Array.from(optimisticOverrides.current.entries()));
 
       // Check if backend data matches any overrides - if so, clear them
       if (optimisticOverrides.current.size > 0) {
         result.collections.forEach((col: any) => {
           const override = optimisticOverrides.current.get(col.name);
-          // Clear override only when BOTH auto_sync and sync_state match
-          if (override && override.auto_sync === col.auto_sync &&
-              (override.sync_state === col.sync_state || col.sync_state === 'synced')) {
-            console.log(`[REFRESH] Backend matches override for ${col.name}, clearing override`);
-            optimisticOverrides.current.delete(col.name);
+          if (override) {
+            console.log(`[REFRESH] Checking ${col.name}: override={auto_sync:${override.auto_sync}, sync_state:${override.sync_state}}, backend={auto_sync:${col.auto_sync}, sync_state:${col.sync_state}, downloaded:${col.downloaded}, total:${col.total}}`);
+          }
+          if (override && override.auto_sync === col.auto_sync) {
+            // Only clear override when backend has REAL progress data
+            // Don't clear if backend is 'syncing' without download counts - keep our optimistic 0/X
+            const backendHasProgress = (col.downloaded !== undefined && col.total !== undefined);
+            const shouldClear = backendHasProgress && override.sync_state === col.sync_state;
+            console.log(`[REFRESH] ${col.name}: shouldClear=${shouldClear} (backendHasProgress=${backendHasProgress}, override.sync_state=${override.sync_state}, col.sync_state=${col.sync_state})`);
+            if (shouldClear) {
+              console.log(`[REFRESH] ✅ CLEARING override for ${col.name}`);
+              optimisticOverrides.current.delete(col.name);
+            } else {
+              console.log(`[REFRESH] ⏸️  KEEPING override for ${col.name} (backend has no progress yet)`);
+            }
           }
         });
       }
 
       // Apply remaining optimistic overrides (only override auto_sync, keep progress data)
       if (optimisticOverrides.current.size > 0) {
-        console.log(`[REFRESH] Applying overrides to collections`);
+        console.log(`[REFRESH] 🎨 Applying ${optimisticOverrides.current.size} override(s) to result`);
         const modifiedResult = {
           ...result,
           collections: result.collections.map((col: any) => {
             const override = optimisticOverrides.current.get(col.name);
             if (override) {
-              console.log(`[REFRESH] Overriding auto_sync and sync_state for ${col.name}, keeping progress`);
-              // Override both auto_sync and sync_state to prevent red intermediate state
-              // Keep downloaded/total updating normally for real-time progress
-              return { ...col, auto_sync: override.auto_sync, sync_state: override.sync_state };
+              const before = `{sync_state:${col.sync_state}, downloaded:${col.downloaded}, total:${col.total}}`;
+              const modified = { ...col, auto_sync: override.auto_sync, sync_state: override.sync_state };
+              const after = `{sync_state:${modified.sync_state}, downloaded:${modified.downloaded}, total:${modified.total}}`;
+              console.log(`[REFRESH] 🔧 ${col.name}: BEFORE=${before}, AFTER=${after}`);
+              return modified;
             }
             return col;
           })
         };
+        console.log(`[REFRESH] Final data being set to UI:`, JSON.stringify(modifiedResult.collections, null, 2));
         setStatus(modifiedResult);
       } else {
-        console.log(`[REFRESH] No overrides, using raw result`);
+        console.log(`[REFRESH] No overrides, using raw backend result`);
+        console.log(`[REFRESH] Final data being set to UI:`, JSON.stringify(result.collections, null, 2));
         setStatus(result);
       }
     } catch (error) {
@@ -114,9 +129,14 @@ function Content() {
     setStatus((prevStatus: any) => {
       const updatedCollections = prevStatus.collections.map((col: any) => {
         if (col.name === collectionName) {
-          // When enabling, show as syncing; when disabling, show as not_synced
-          const newSyncState = enabled ? 'syncing' : 'not_synced';
-          return { ...col, auto_sync: enabled, sync_state: newSyncState };
+          // When enabling, show as syncing starting from 0/total
+          // When disabling, show as not_synced
+          if (enabled) {
+            const total = col.total || 0;
+            return { ...col, auto_sync: true, sync_state: 'syncing', downloaded: 0, total: total };
+          } else {
+            return { ...col, auto_sync: false, sync_state: 'not_synced' };
+          }
         }
         return col;
       });
@@ -131,7 +151,10 @@ function Content() {
       console.log(`[TOGGLE] Calling backend toggleCollectionSync...`);
       const result = await toggleCollectionSync(collectionName, enabled);
       console.log(`[TOGGLE] Backend returned:`, result);
-      // Override will auto-clear when backend data matches (via refreshStatus)
+      // Force immediate refresh to get the fresh status from backend
+      // The backend immediately updates status.json, so we should read it ASAP
+      console.log(`[TOGGLE] Forcing immediate refresh after backend call`);
+      await refreshStatus();
     } catch (error) {
       console.error('[TOGGLE] Failed to toggle collection sync:', error);
       // Clear override on error and refresh
