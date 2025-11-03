@@ -3,8 +3,10 @@ import {
   PanelSection,
   PanelSectionRow,
   ToggleField,
+  showModal,
+  ConfirmModal,
 } from "@decky/ui";
-import { callable, definePlugin } from "@decky/api";
+import { callable, definePlugin, toaster } from "@decky/api";
 import { useState, useEffect, useRef } from "react";
 import { FaSync, FaTrash } from "react-icons/fa";
 
@@ -21,6 +23,8 @@ function Content() {
   const [togglingCollection, setTogglingCollection] = useState<string | null>(null);
   const intervalRef = useRef<any>(null);
   const optimisticOverrides = useRef<Map<string, {auto_sync: boolean, sync_state: string}>>(new Map());
+  // Track previous sync states to detect completion
+  const previousSyncStates = useRef<Map<string, string>>(new Map());
 
   const refreshStatus = async () => {
     try {
@@ -30,6 +34,7 @@ function Content() {
       console.log(`[REFRESH] Current overrides:`, Array.from(optimisticOverrides.current.entries()));
 
       // Check if backend data matches any overrides - if so, clear them
+      // Also detect sync completion and show notifications
       if (optimisticOverrides.current.size > 0) {
         result.collections.forEach((col: any) => {
           const override = optimisticOverrides.current.get(col.name);
@@ -55,6 +60,25 @@ function Content() {
           }
         });
       }
+
+      // Detect sync completion and show notifications
+      result.collections.forEach((col: any) => {
+        const previousState = previousSyncStates.current.get(col.name);
+        const currentState = col.sync_state;
+
+        // Detect transition from 'syncing' to 'synced'
+        if (previousState === 'syncing' && currentState === 'synced' && col.auto_sync) {
+          console.log(`[NOTIFICATION] Collection '${col.name}' completed syncing: ${col.downloaded}/${col.total} ROMs`);
+          toaster.toast({
+            title: '✅ Sync Complete',
+            body: `${col.name}: ${col.downloaded}/${col.total} ROMs synced`,
+            duration: 5000,
+          });
+        }
+
+        // Update previous state
+        previousSyncStates.current.set(col.name, currentState);
+      });
 
       // Apply remaining optimistic overrides
       if (optimisticOverrides.current.size > 0) {
@@ -101,7 +125,7 @@ function Content() {
 
   const startPolling = () => {
     stopPolling();
-    intervalRef.current = setInterval(refreshStatus, 5000);
+    intervalRef.current = setInterval(refreshStatus, 2000); // Poll every 2 seconds for more responsive UI
   };
 
   useEffect(() => {

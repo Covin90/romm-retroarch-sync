@@ -12092,7 +12092,7 @@ def run_daemon_mode():
 
     # Cache for status data to avoid expensive API calls every loop
     status_cache = {'collections': {}, 'last_update': 0}
-    STATUS_CACHE_DURATION = 60  # Cache status for 60 seconds (increased to reduce load during large syncs)
+    STATUS_CACHE_DURATION = 10  # Cache status for 10 seconds (balance between responsiveness and API load)
 
     # Cache for collections list API call (this is a slow API call that blocks the daemon loop)
     collections_cache = {'data': [], 'last_fetch': 0}
@@ -12723,11 +12723,20 @@ class DaemonCollectionSync:
         # First pass: count ROMs that actually need downloading AND count existing ROMs
         roms_to_download = []
         existing_roms_count = 0
-        total_collection_size = len(added_rom_ids)
+        # Total collection size is ALL ROMs in the collection, not just newly added ones
+        total_collection_size = len(collection_roms)
 
         for rom in collection_roms:
             if rom.get('id') not in added_rom_ids:
+                # This ROM is not newly added, but check if it exists locally to count it
+                platform_slug = rom.get('platform_slug', 'Unknown')
+                file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
+                local_path = download_dir / platform_slug / file_name
+                if local_path.exists() and local_path.stat().st_size > MIN_ROM_SIZE:
+                    existing_roms_count += 1
                 continue
+
+            # This ROM is newly added - check if we need to download it
             platform_slug = rom.get('platform_slug', 'Unknown')
             file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
             local_path = download_dir / platform_slug / file_name
