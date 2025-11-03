@@ -211,6 +211,9 @@ class Plugin:
             # Update settings
             config.set('Collections', 'actively_syncing', '|'.join(sorted(sync_set)))
 
+            # Also update selected_for_sync - daemon uses this field!
+            config.set('Collections', 'selected_for_sync', '|'.join(sorted(sync_set)))
+
             # Enable auto_sync_enabled if at least one collection is syncing
             if sync_set:
                 config.set('Collections', 'auto_sync_enabled', 'true')

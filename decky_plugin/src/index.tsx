@@ -37,10 +37,14 @@ function Content() {
             console.log(`[REFRESH] Checking ${col.name}: override={auto_sync:${override.auto_sync}, sync_state:${override.sync_state}}, backend={auto_sync:${col.auto_sync}, sync_state:${col.sync_state}, downloaded:${col.downloaded}, total:${col.total}}`);
           }
           if (override && override.auto_sync === col.auto_sync) {
-            // Only clear override when backend has REAL progress data
-            // Don't clear if backend is 'syncing' without download counts - keep our optimistic 0/X
-            const backendHasProgress = (col.downloaded !== undefined && col.total !== undefined);
-            const shouldClear = backendHasProgress && override.sync_state === col.sync_state;
+            // Clear override when backend has REAL progress data (not just 0/0)
+            const backendHasProgress = (col.downloaded !== undefined && col.total !== undefined && col.total > 0);
+            const shouldClear = backendHasProgress && (
+              // Clear if backend state matches override state
+              override.sync_state === col.sync_state ||
+              // OR clear if backend is 'synced' (sync completed, override no longer needed)
+              col.sync_state === 'synced'
+            );
             console.log(`[REFRESH] ${col.name}: shouldClear=${shouldClear} (backendHasProgress=${backendHasProgress}, override.sync_state=${override.sync_state}, col.sync_state=${col.sync_state})`);
             if (shouldClear) {
               console.log(`[REFRESH] ✅ CLEARING override for ${col.name}`);
@@ -125,16 +129,18 @@ function Content() {
 
     // Get current collection state to determine total
     const currentCollection = status?.collections.find((c: any) => c.name === collectionName);
-    const totalRoms = currentCollection?.total || 0;
+    const totalRoms = currentCollection?.total;
+    const hasValidTotal = totalRoms !== undefined && totalRoms > 0;
 
     // FIRST: Set override BEFORE anything else to protect against concurrent polling
-    // Include downloaded: 0 when enabling to show "0/X" immediately
+    // Only include downloaded: 0, total: X if we have a valid total (> 0)
+    // Otherwise, let backend fetch the real total from server
     optimisticOverrides.current.set(collectionName, {
       auto_sync: enabled,
       sync_state: enabled ? 'syncing' : 'not_synced',
-      ...(enabled ? { downloaded: 0, total: totalRoms } : {})
+      ...(enabled && hasValidTotal ? { downloaded: 0, total: totalRoms } : {})
     });
-    console.log(`[TOGGLE] Set override for ${collectionName} with downloaded=0, total=${totalRoms}, map size:`, optimisticOverrides.current.size);
+    console.log(`[TOGGLE] Set override for ${collectionName} with downloaded=0, total=${hasValidTotal ? totalRoms : 'none'}, map size:`, optimisticOverrides.current.size);
 
     setTogglingCollection(collectionName);
 
@@ -142,10 +148,15 @@ function Content() {
     setStatus((prevStatus: any) => {
       const updatedCollections = prevStatus.collections.map((col: any) => {
         if (col.name === collectionName) {
-          // When enabling, show as syncing starting from 0/total
+          // When enabling, show as syncing (with 0/total if we have valid total)
           // When disabling, show as not_synced
           if (enabled) {
-            return { ...col, auto_sync: true, sync_state: 'syncing', downloaded: 0, total: totalRoms };
+            if (hasValidTotal) {
+              return { ...col, auto_sync: true, sync_state: 'syncing', downloaded: 0, total: totalRoms };
+            } else {
+              // No valid total yet - just set syncing, let backend populate counts
+              return { ...col, auto_sync: true, sync_state: 'syncing' };
+            }
           } else {
             return { ...col, auto_sync: false, sync_state: 'not_synced' };
           }
@@ -262,7 +273,8 @@ function Content() {
                     description={(() => {
                       console.log(`[RENDER] ${collection.name}: auto_sync=${collection.auto_sync}, downloaded=${collection.downloaded}, total=${collection.total}, sync_state=${collection.sync_state}`);
                       if (collection.auto_sync) {
-                        if (collection.downloaded !== undefined && collection.total !== undefined) {
+                        // Only show counts if total > 0 (valid data from server)
+                        if (collection.downloaded !== undefined && collection.total !== undefined && collection.total > 0) {
                           return `${collection.downloaded} / ${collection.total} ROMs`;
                         }
                         return "Auto-sync enabled";

@@ -12720,15 +12720,20 @@ class DaemonCollectionSync:
         downloaded_count = 0
         MIN_ROM_SIZE = 100 * 1024
 
-        # First pass: count ROMs that actually need downloading
+        # First pass: count ROMs that actually need downloading AND count existing ROMs
         roms_to_download = []
+        existing_roms_count = 0
+        total_collection_size = len(added_rom_ids)
+
         for rom in collection_roms:
             if rom.get('id') not in added_rom_ids:
                 continue
             platform_slug = rom.get('platform_slug', 'Unknown')
             file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
             local_path = download_dir / platform_slug / file_name
-            if not (local_path.exists() and local_path.stat().st_size > MIN_ROM_SIZE):
+            if local_path.exists() and local_path.stat().st_size > MIN_ROM_SIZE:
+                existing_roms_count += 1
+            else:
                 roms_to_download.append(rom)
 
         total_to_download = len(roms_to_download)
@@ -12736,12 +12741,13 @@ class DaemonCollectionSync:
             self.log(f"All ROMs in '{collection_name}' already downloaded")
             return
 
-        # Initialize progress tracking
+        # Initialize progress tracking with TOTAL collection size, not just download count
+        # Start with existing_roms_count since those are already local
         self.download_progress[collection_name] = {
-            'downloaded': 0,
-            'total': total_to_download
+            'downloaded': existing_roms_count,
+            'total': total_collection_size
         }
-        logging.info(f"[PROGRESS] Initialized download_progress for {collection_name}: 0/{total_to_download}")
+        logging.info(f"[PROGRESS] Initialized download_progress for {collection_name}: {existing_roms_count}/{total_collection_size} ({total_to_download} to download)")
 
         for rom in roms_to_download:
             # Simple game processing for daemon
@@ -12765,12 +12771,13 @@ class DaemonCollectionSync:
                 self.log(f"  ✅ Downloaded {rom.get('name')}")
                 downloaded_count += 1
 
-                # Update progress
-                self.download_progress[collection_name]['downloaded'] = downloaded_count
-                logging.info(f"[PROGRESS] Updated download_progress for {collection_name}: {downloaded_count}/{total_to_download}")
+                # Update progress - add to existing_roms_count to show total local count
+                current_local_count = existing_roms_count + downloaded_count
+                self.download_progress[collection_name]['downloaded'] = current_local_count
+                logging.info(f"[PROGRESS] Updated download_progress for {collection_name}: {current_local_count}/{total_collection_size}")
 
                 # Write status immediately for real-time UI updates
-                self._write_download_status(collection_name, downloaded_count, total_to_download)
+                self._write_download_status(collection_name, current_local_count, total_collection_size)
 
 
                 # Update available_games with collection info
