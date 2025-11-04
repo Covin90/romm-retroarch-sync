@@ -17,14 +17,115 @@ const stopService = callable<[], boolean>("stop_service");
 const toggleCollectionSync = callable<[string, boolean], boolean>("toggle_collection_sync");
 const deleteCollectionRoms = callable<[string], boolean>("delete_collection_roms");
 
+// Background monitoring - runs independently of UI
+let backgroundInterval: any = null;
+const previousSyncStates = new Map<string, {sync_state: string, downloaded?: number, total?: number}>();
+
+const checkForNotifications = async () => {
+  try {
+    const result = await getServiceStatus();
+
+    // Collect all collections that need notifications
+    const notificationsToShow: Array<{name: string, downloaded: number, total: number, type: string}> = [];
+
+    // Detect sync completion
+    result.collections?.forEach((col: any) => {
+      const previousData = previousSyncStates.get(col.name);
+      const currentState = col.sync_state;
+
+      // Log state for debugging
+      if (col.auto_sync || previousData) {
+        console.log(`[BACKGROUND CHECK] ${col.name}: prev=${previousData?.sync_state || 'none'}, curr=${currentState}, auto_sync=${col.auto_sync}`);
+      }
+
+      // Detect transition to 'synced' from either 'syncing' OR 'not_synced'
+      // 'syncing' -> 'synced': Normal case
+      // 'not_synced' -> 'synced': Fast sync where we missed the 'syncing' state
+      if (previousData && currentState === 'synced' &&
+          (previousData.sync_state === 'syncing' || previousData.sync_state === 'not_synced')) {
+        console.log(`[BACKGROUND NOTIFICATION] Collection '${col.name}' completed syncing: ${col.downloaded}/${col.total} ROMs (prev state: ${previousData.sync_state})`);
+        notificationsToShow.push({
+          name: col.name,
+          downloaded: col.downloaded,
+          total: col.total,
+          type: 'sync'
+        });
+      }
+      // Also detect when ROM count changes while in 'synced' state (deletions)
+      else if (
+        previousData?.sync_state === 'synced' &&
+        currentState === 'synced' &&
+        col.auto_sync &&
+        previousData.downloaded !== undefined &&
+        col.downloaded !== undefined &&
+        previousData.downloaded !== col.downloaded
+      ) {
+        console.log(`[BACKGROUND NOTIFICATION] Collection '${col.name}' updated: ${col.downloaded}/${col.total} ROMs (was ${previousData.downloaded}/${previousData.total})`);
+        notificationsToShow.push({
+          name: col.name,
+          downloaded: col.downloaded,
+          total: col.total,
+          type: 'update'
+        });
+      }
+
+      // Update previous state and counts
+      previousSyncStates.set(col.name, {
+        sync_state: currentState,
+        downloaded: col.downloaded,
+        total: col.total
+      });
+    });
+
+    // Show notifications with slight delay between each to prevent overlapping/deduplication
+    for (let i = 0; i < notificationsToShow.length; i++) {
+      const notification = notificationsToShow[i];
+      // Add delay only if not the first notification
+      if (i > 0) {
+        await new Promise(resolve => setTimeout(resolve, 300));
+      }
+      console.log(`[BACKGROUND] Showing notification for ${notification.name}`);
+      toaster.toast({
+        title: `✅ ${notification.name} - Sync Complete`,
+        body: `${notification.downloaded}/${notification.total} ROMs synced`,
+        duration: 5000,
+      });
+    }
+
+    if (notificationsToShow.length > 0) {
+      console.log(`[BACKGROUND] Showed ${notificationsToShow.length} notification(s)`);
+    }
+  } catch (error) {
+    console.error('[BACKGROUND NOTIFICATION] Error checking status:', error);
+  }
+};
+
+const startBackgroundMonitoring = () => {
+  if (backgroundInterval) {
+    clearInterval(backgroundInterval);
+  }
+  console.log('[BACKGROUND] Starting background notification monitoring');
+  backgroundInterval = setInterval(checkForNotifications, 2000);
+};
+
+const stopBackgroundMonitoring = () => {
+  if (backgroundInterval) {
+    console.log('[BACKGROUND] Stopping background notification monitoring');
+    clearInterval(backgroundInterval);
+    backgroundInterval = null;
+  }
+};
+
+// Start monitoring immediately when module loads
+console.log('[PLUGIN INIT] Module loaded, starting background monitoring');
+startBackgroundMonitoring();
+
 function Content() {
   const [status, setStatus] = useState<any>({ status: 'loading', message: 'Loading...' });
   const [loading, setLoading] = useState(false);
   const [togglingCollection, setTogglingCollection] = useState<string | null>(null);
   const intervalRef = useRef<any>(null);
-  const optimisticOverrides = useRef<Map<string, {auto_sync: boolean, sync_state: string}>>(new Map());
-  // Track previous sync states to detect completion
-  const previousSyncStates = useRef<Map<string, string>>(new Map());
+  const optimisticOverrides = useRef<Map<string, {auto_sync: boolean, sync_state: string, downloaded?: number, total?: number}>>(new Map());
 
   const refreshStatus = async () => {
     try {
@@ -34,7 +135,6 @@ function Content() {
       console.log(`[REFRESH] Current overrides:`, Array.from(optimisticOverrides.current.entries()));
 
       // Check if backend data matches any overrides - if so, clear them
-      // Also detect sync completion and show notifications
       if (optimisticOverrides.current.size > 0) {
         result.collections.forEach((col: any) => {
           const override = optimisticOverrides.current.get(col.name);
@@ -60,25 +160,6 @@ function Content() {
           }
         });
       }
-
-      // Detect sync completion and show notifications
-      result.collections.forEach((col: any) => {
-        const previousState = previousSyncStates.current.get(col.name);
-        const currentState = col.sync_state;
-
-        // Detect transition from 'syncing' to 'synced'
-        if (previousState === 'syncing' && currentState === 'synced' && col.auto_sync) {
-          console.log(`[NOTIFICATION] Collection '${col.name}' completed syncing: ${col.downloaded}/${col.total} ROMs`);
-          toaster.toast({
-            title: '✅ Sync Complete',
-            body: `${col.name}: ${col.downloaded}/${col.total} ROMs synced`,
-            duration: 5000,
-          });
-        }
-
-        // Update previous state
-        previousSyncStates.current.set(col.name, currentState);
-      });
 
       // Apply remaining optimistic overrides
       if (optimisticOverrides.current.size > 0) {
@@ -409,5 +490,10 @@ export default definePlugin(() => {
     titleView: <TitleView />,
     content: <Content />,
     icon: <FaSync />,
+    onDismount: () => {
+      // Stop background monitoring when plugin unloads
+      console.log('[PLUGIN] onDismount - Stopping background monitoring');
+      stopBackgroundMonitoring();
+    },
   };
 });

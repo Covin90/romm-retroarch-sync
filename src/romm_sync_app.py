@@ -12487,6 +12487,23 @@ def run_daemon_mode():
                     except Exception as e:
                         print(f"Failed to fetch collections for status: {e}")
 
+                # Preserve last_removal data from existing status
+                existing_removals = {}
+                if status_file.exists():
+                    try:
+                        with open(status_file, 'r') as f:
+                            existing_status = json.load(f)
+                            for col in existing_status.get('collections', []):
+                                if 'last_removal' in col:
+                                    existing_removals[col['name']] = col['last_removal']
+                    except:
+                        pass
+
+                # Add last_removal data back to collections_list
+                for collection_data in collections_list:
+                    if collection_data['name'] in existing_removals:
+                        collection_data['last_removal'] = existing_removals[collection_data['name']]
+
                 # Update status file
                 status = {
                     'running': True,
@@ -12623,6 +12640,37 @@ class DaemonCollectionSync:
                 json.dump(status, f)
         except Exception as e:
             self.log(f"Failed to write download status: {e}")
+
+    def _write_removal_status(self, collection_name, removed_count, deleted_count):
+        """Write status.json with removal event for frontend notification"""
+        try:
+            from pathlib import Path
+            import json
+            status_file = Path.home() / '.config' / 'romm-retroarch-sync' / 'status.json'
+
+            # Read existing status
+            if status_file.exists():
+                with open(status_file, 'r') as f:
+                    status = json.load(f)
+            else:
+                return
+
+            # Update the specific collection with removal info
+            for collection in status.get('collections', []):
+                if collection.get('name') == collection_name:
+                    collection['last_removal'] = {
+                        'removed_count': removed_count,
+                        'deleted_count': deleted_count,
+                        'timestamp': time.time()
+                    }
+                    logging.info(f"[REMOVAL] Wrote removal status for {collection_name}: {removed_count} removed, {deleted_count} deleted")
+                    break
+
+            # Write back
+            with open(status_file, 'w') as f:
+                json.dump(status, f)
+        except Exception as e:
+            self.log(f"Failed to write removal status: {e}")
 
     def update_collections(self, new_collections):
         """Update the collection list without restarting - just add/remove caches"""
@@ -12810,15 +12858,27 @@ class DaemonCollectionSync:
     
     def handle_removed_games(self, removed_rom_ids, collection_name):
         """Handle removed games - simplified for daemon"""
+        # Track removal event for UI notification (even if auto-delete is disabled)
+        if not hasattr(self, 'removal_events'):
+            self.removal_events = {}
+
+        self.removal_events[collection_name] = {
+            'removed_count': len(removed_rom_ids),
+            'timestamp': time.time()
+        }
+        logging.info(f"[REMOVAL] Tracked removal event for {collection_name}: {len(removed_rom_ids)} games removed")
+
         # Check if auto-delete is enabled
         auto_delete = self.settings.get('Collections', 'auto_delete', 'false') == 'true'
         if not auto_delete:
             self.log(f"Games removed from '{collection_name}' but auto-delete disabled")
+            # Write status to notify frontend even though we're not deleting
+            self._write_removal_status(collection_name, len(removed_rom_ids), 0)
             return
-        
+
         download_dir = Path(self.settings.get('Download', 'rom_directory'))
         deleted_count = 0
-        
+
         # Find and delete removed games
         for game in self.available_games:
             if game.get('rom_id') in removed_rom_ids and game.get('is_downloaded'):
@@ -12828,7 +12888,7 @@ class DaemonCollectionSync:
                     if other_collection != collection_name:
                         # Simple check - in real implementation you'd check the actual collection contents
                         pass
-                
+
                 if not found_in_other:
                     local_path = Path(game.get('local_path', ''))
                     if local_path.exists():
@@ -12838,11 +12898,12 @@ class DaemonCollectionSync:
                             deleted_count += 1
                         except Exception as e:
                             self.log(f"  ❌ Failed to delete {game.get('name')}: {e}")
-        
-        if deleted_count > 0:
-            self.parent.log_message(f"Auto-deleted {deleted_count} games removed from '{collection_name}'")
 
-            GLib.idle_add(update_ui_after_deletion)
+        if deleted_count > 0:
+            self.log(f"Auto-deleted {deleted_count} games removed from '{collection_name}'")
+
+        # Write status to notify frontend
+        self._write_removal_status(collection_name, len(removed_rom_ids), deleted_count)
 
 def main():
     """Main entry point"""
