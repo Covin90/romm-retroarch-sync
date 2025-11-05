@@ -4,7 +4,7 @@
 
 ### Added
 
-- TBD
+- Settings page in Decky plugin with toggle to enable/disable debug logging
 
 ### Fixed
 

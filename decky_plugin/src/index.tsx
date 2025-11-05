@@ -3,12 +3,12 @@ import {
   PanelSection,
   PanelSectionRow,
   ToggleField,
-  showModal,
-  ConfirmModal,
+  Navigation,
+  staticClasses,
 } from "@decky/ui";
-import { callable, definePlugin, toaster } from "@decky/api";
+import { callable, definePlugin, toaster, routerHook } from "@decky/api";
 import { useState, useEffect, useRef } from "react";
-import { FaSync, FaTrash } from "react-icons/fa";
+import { FaSync, FaTrash, FaCog } from "react-icons/fa";
 
 // Call backend methods
 const getServiceStatus = callable<[], any>("get_service_status");
@@ -16,6 +16,8 @@ const startService = callable<[], boolean>("start_service");
 const stopService = callable<[], boolean>("stop_service");
 const toggleCollectionSync = callable<[string, boolean], boolean>("toggle_collection_sync");
 const deleteCollectionRoms = callable<[string], boolean>("delete_collection_roms");
+const getLoggingEnabled = callable<[], boolean>("get_logging_enabled");
+const updateLoggingEnabled = callable<[boolean], boolean>("set_logging_enabled");
 
 // Background monitoring - runs independently of UI
 let backgroundInterval: any = null;
@@ -119,6 +121,55 @@ const stopBackgroundMonitoring = () => {
 // Start monitoring immediately when module loads
 console.log('[PLUGIN INIT] Module loaded, starting background monitoring');
 startBackgroundMonitoring();
+
+// Settings page component
+function SettingsPage() {
+  const [loggingEnabled, setLoggingEnabled] = useState<boolean>(true);
+  const [loading, setLoading] = useState<boolean>(true);
+
+  useEffect(() => {
+    // Load initial logging preference
+    const loadSettings = async () => {
+      try {
+        const enabled = await getLoggingEnabled();
+        setLoggingEnabled(enabled);
+      } catch (error) {
+        console.error('Failed to load logging preference:', error);
+      } finally {
+        setLoading(false);
+      }
+    };
+    loadSettings();
+  }, []);
+
+  const handleLoggingToggle = async (enabled: boolean) => {
+    setLoggingEnabled(enabled);
+    try {
+      await updateLoggingEnabled(enabled);
+    } catch (error) {
+      console.error('Failed to set logging preference:', error);
+      // Revert on error
+      setLoggingEnabled(!enabled);
+    }
+  };
+
+  return (
+    <div style={{ marginTop: "40px", color: "white" }}>
+      <div className={staticClasses.Title} style={{ marginBottom: "20px" }}>RomM Sync Settings</div>
+      <PanelSection title="Debug Settings">
+        <PanelSectionRow>
+          <ToggleField
+            label="Enable Debug Logging"
+            description="Write debug logs to ~/.config/romm-retroarch-sync/decky_debug.log"
+            checked={loggingEnabled}
+            onChange={handleLoggingToggle}
+            disabled={loading}
+          />
+        </PanelSectionRow>
+      </PanelSection>
+    </div>
+  );
+}
 
 function Content() {
   const [status, setStatus] = useState<any>({ status: 'loading', message: 'Loading...' });
@@ -408,40 +459,61 @@ function Content() {
           })}
         </>
       )}
-
       <PanelSectionRow>
-        <ButtonItem 
-          layout="below" 
+        <ButtonItem
+          layout="below"
           onClick={refreshStatus}
           disabled={loading}
         >
-          🔄 Refresh
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <span>🔄</span>
+            <span>Refresh</span>
+          </div>
         </ButtonItem>
       </PanelSectionRow>
-
       {status.status === 'stopped' && (
         <PanelSectionRow>
-          <ButtonItem 
-            layout="below" 
+          <ButtonItem
+            layout="below"
             onClick={handleStart}
             disabled={loading}
           >
-            ▶️ Start Service
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span>▶️</span>
+              <span>Start Service</span>
+            </div>
+          </ButtonItem>
+        </PanelSectionRow>
+      )}
+      {status.status !== 'stopped' && status.status !== 'error' && (
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            onClick={handleStop}
+            disabled={loading}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span>⏹️</span>
+              <span>Stop Service</span>
+            </div>
           </ButtonItem>
         </PanelSectionRow>
       )}
 
-      {status.status !== 'stopped' && status.status !== 'error' && (
-        <PanelSectionRow>
-          <ButtonItem 
-            layout="below" 
-            onClick={handleStop}
-            disabled={loading}
-          >
-            ⏹️ Stop Service
-          </ButtonItem>
-        </PanelSectionRow>
-      )}
+      <PanelSectionRow>
+        <ButtonItem
+          layout="below"
+          onClick={() => {
+            Navigation.Navigate("/romm-sync-settings");
+            Navigation.CloseSideMenus();
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <FaCog size={14} />
+            <span>Settings</span>
+          </div>
+        </ButtonItem>
+      </PanelSectionRow>
     </PanelSection>
   );
 }
@@ -485,6 +557,11 @@ function TitleView() {
 }
 
 export default definePlugin(() => {
+  // Register the settings route
+  routerHook.addRoute("/romm-sync-settings", () => <SettingsPage />, {
+    exact: true,
+  });
+
   return {
     name: "RomM Sync Monitor",
     titleView: <TitleView />,
@@ -494,6 +571,9 @@ export default definePlugin(() => {
       // Stop background monitoring when plugin unloads
       console.log('[PLUGIN] onDismount - Stopping background monitoring');
       stopBackgroundMonitoring();
+
+      // Remove the settings route
+      routerHook.removeRoute("/romm-sync-settings");
     },
   };
 });

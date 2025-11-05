@@ -7,12 +7,47 @@ from pathlib import Path
 # Set up logging
 log_file = Path.home() / '.config' / 'romm-retroarch-sync' / 'decky_debug.log'
 log_file.parent.mkdir(parents=True, exist_ok=True)
+settings_file = Path.home() / '.config' / 'romm-retroarch-sync' / 'decky_settings.json'
 
-logging.basicConfig(
-    filename=str(log_file),
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+# Helper function to load settings
+def load_decky_settings():
+    """Load decky plugin settings"""
+    try:
+        if settings_file.exists():
+            with open(settings_file, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"Failed to load decky settings: {e}")
+    return {'logging_enabled': True}  # Default to logging enabled
+
+# Helper function to save settings
+def save_decky_settings(settings):
+    """Save decky plugin settings"""
+    try:
+        settings_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(settings_file, 'w') as f:
+            json.dump(settings, f, indent=2)
+        return True
+    except Exception as e:
+        print(f"Failed to save decky settings: {e}")
+        return False
+
+# Load settings and configure logging
+decky_settings = load_decky_settings()
+logging_enabled = decky_settings.get('logging_enabled', True)
+
+if logging_enabled:
+    logging.basicConfig(
+        filename=str(log_file),
+        level=logging.DEBUG,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+else:
+    # Disable logging by setting level to CRITICAL (effectively silences DEBUG/INFO)
+    logging.basicConfig(
+        level=logging.CRITICAL + 1,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
 
 def get_systemd_env():
     """Get proper environment variables for systemd user commands on Steam Deck"""
@@ -379,4 +414,34 @@ class Plugin:
 
         except Exception as e:
             logging.error(f"delete_collection_roms error: {e}", exc_info=True)
+            return False
+
+    async def get_logging_enabled(self):
+        """Get current logging preference"""
+        try:
+            settings = load_decky_settings()
+            return settings.get('logging_enabled', True)
+        except Exception as e:
+            logging.error(f"get_logging_enabled error: {e}")
+            return True
+
+    async def set_logging_enabled(self, enabled: bool):
+        """Set logging preference"""
+        try:
+            settings = load_decky_settings()
+            settings['logging_enabled'] = enabled
+            result = save_decky_settings(settings)
+
+            if result:
+                # Update logging level immediately
+                if enabled:
+                    logging.getLogger().setLevel(logging.DEBUG)
+                    logging.info("✅ Logging enabled")
+                else:
+                    logging.info("🔴 Logging disabled")
+                    logging.getLogger().setLevel(logging.CRITICAL + 1)
+
+            return result
+        except Exception as e:
+            logging.error(f"set_logging_enabled error: {e}")
             return False

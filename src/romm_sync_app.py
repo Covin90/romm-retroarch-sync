@@ -1144,14 +1144,13 @@ class EnhancedLibrarySection:
                 
                 if previous_rom_ids != current_rom_ids:
                     changes_detected = True
-                    
+
                     # Find added and removed games
                     added_rom_ids = current_rom_ids - previous_rom_ids
                     removed_rom_ids = previous_rom_ids - current_rom_ids
-                    
+
                     if added_rom_ids:
-                        GLib.idle_add(lambda name=collection_name, count=len(added_rom_ids): 
-                            self.parent.log_message(f"🔥 Collection '{name}': {count} games added"))
+                        # Don't log here - let handle_added_games decide if logging is appropriate
                         self.handle_added_games(collection_roms, added_rom_ids, collection_name)
                     
                     if removed_rom_ids:
@@ -1178,20 +1177,34 @@ class EnhancedLibrarySection:
             try:
                 download_dir = Path(self.parent.rom_dir_row.get_text())
                 downloaded_count = 0
-                
+                already_downloaded_count = 0
+
                 # Create a stable reference to collection name
                 current_collection = str(collection_name)
-                
+
+                # First pass: check how many are already downloaded
                 for rom in collection_roms:
                     if rom.get('id') not in added_rom_ids:
                         continue
-                        
+                    processed_game = self.parent.process_single_rom(rom, download_dir)
+                    if processed_game.get('is_downloaded'):
+                        already_downloaded_count += 1
+
+                # Only log the "games added" message if not all are already downloaded
+                total_added = len(added_rom_ids)
+                if already_downloaded_count < total_added:
+                    GLib.idle_add(lambda name=current_collection, count=total_added:
+                        self.parent.log_message(f"�� Collection '{name}': {count} games added"))
+
+                for rom in collection_roms:
+                    if rom.get('id') not in added_rom_ids:
+                        continue
+
                     # Process the new ROM
                     processed_game = self.parent.process_single_rom(rom, download_dir)
 
-                    # Skip if already downloaded
+                    # Skip if already downloaded (already counted in first pass)
                     if processed_game.get('is_downloaded'):
-                        self.parent.log_message(f"  ✅ {processed_game.get('name')} already downloaded")
                         continue
 
                     # Log with stable collection reference
@@ -1320,19 +1333,22 @@ class EnhancedLibrarySection:
                                 )
                             return False
                         GLib.idle_add(send_desktop_notif)
-                    else:
-                        # All games were already downloaded
-                        if self.parent.retroarch:
-                            self.parent.retroarch.send_notification(f"'{current_collection}': {total_added} game{'s' if total_added != 1 else ''} added (already downloaded)")
+                    elif already_downloaded_count > 0 and already_downloaded_count < total_added:
+                        # Some games were already downloaded, but not all
+                        self.parent.log_message(f"  ℹ️ {already_downloaded_count} of {total_added} games already downloaded")
 
-                        # Send desktop notification
-                        def send_desktop_notif_existing():
+                        if self.parent.retroarch:
+                            self.parent.retroarch.send_notification(f"'{current_collection}': {total_added} game{'s' if total_added != 1 else ''} added ({already_downloaded_count} already downloaded)")
+
+                        def send_desktop_notif_partial():
                             self.parent.send_desktop_notification(
                                 "Collection Updated",
-                                f"'{current_collection}': {total_added} game{'s' if total_added != 1 else ''} added (already downloaded)"
+                                f"'{current_collection}': {total_added} game{'s' if total_added != 1 else ''} added ({already_downloaded_count} already downloaded)"
                             )
                             return False
-                        GLib.idle_add(send_desktop_notif_existing)
+                        GLib.idle_add(send_desktop_notif_partial)
+                    # If all games were already downloaded (already_downloaded_count == total_added),
+                    # don't send any notification - this is likely cache initialization
 
             except Exception as e:
                 self.parent.log_message(f"❌ Auto-download error: {e}")
