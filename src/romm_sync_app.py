@@ -476,22 +476,26 @@ class GameItem(GObject.Object):
         return "Not downloaded"
 
 class PlatformItem(GObject.Object):
-    def __init__(self, platform_name, games, loading=False):
+    def __init__(self, platform_name, games, loading=False, sync_status=None):
         super().__init__()
         self.platform_name = platform_name
         self.games = games
         self.loading = loading  # Flag to show loading state
+        self.sync_status = sync_status  # Sync status for collections: 'synced', 'syncing', 'disabled'
         self.child_store = Gio.ListStore()
         self.rebuild_children()
     
-    def update_games(self, new_games, loading=False):
+    def update_games(self, new_games, loading=False, sync_status=None):
         self.games = new_games
         self.loading = loading  # Update loading state
+        if sync_status is not None:
+            self.sync_status = sync_status
         self.rebuild_children()
         # Notify all properties changed
         self.notify('name')
         self.notify('status-text')
         self.notify('size-text')
+        self.notify('sync-status-text')
     
     def rebuild_children(self):
         self.child_store.remove_all()
@@ -559,15 +563,27 @@ class PlatformItem(GObject.Object):
             # When offline, all downloaded, or sizes are equal, just show downloaded size
             result = format_size(downloaded_size)
             return result
-    
+
+    @GObject.Property(type=str, default='')
+    def sync_status_text(self):
+        """Return sync status indicator for collections"""
+        if self.loading:
+            return "loading"
+        if self.sync_status is None:
+            return ""  # Platforms don't have sync status
+
+        # Return status string for visual rendering
+        return self.sync_status  # 'synced', 'syncing', or 'disabled'
+
     def force_property_update(self):
         """Manually force property updates - for debugging"""
         print(f"🔄 Forcing property update for {self.platform_name}")
-        
+
         # Use notify with property names (this should work)
         self.notify('name')
         self.notify('status-text')
         self.notify('size-text')
+        self.notify('sync-status-text')
         
         # Alternative approach: get the current values and use freeze/thaw
         try:
@@ -628,7 +644,7 @@ class LibraryTreeModel:
         """Restore expansion state immediately (used by search)"""
         self._restore_expansion_from_state(expansion_state)
 
-    def update_library(self, games, group_by='platform', loading=False):
+    def update_library(self, games, group_by='platform', loading=False, sync_status_map=None):
         # Save expansion state before update
         expansion_state = {}
         for i in range(self.tree_model.get_n_items()):
@@ -655,13 +671,16 @@ class LibraryTreeModel:
 
         # Add platforms in alphabetical order
         for name, game_list in sorted(groups.items()):
+            # Get sync status for this collection/platform
+            sync_status = sync_status_map.get(name) if sync_status_map else None
+
             if name in existing_platforms:
                 # Reuse existing platform item (preserves state)
                 platform = existing_platforms[name]
-                platform.update_games(game_list, loading=loading)
+                platform.update_games(game_list, loading=loading, sync_status=sync_status)
             else:
                 # Create new platform item
-                platform = PlatformItem(name, game_list, loading=loading)
+                platform = PlatformItem(name, game_list, loading=loading, sync_status=sync_status)
             self.root_store.append(platform)
 
         # Restore expansion after a delay
@@ -699,7 +718,8 @@ class EnhancedLibrarySection:
         self.view_mode_generation = 0  # Track view mode switches to prevent race conditions
         # Collection auto-sync attributes
         self.selected_collections_for_sync = set()  # UI selection state
-        self.actively_syncing_collections = set()   # Auto-sync running state
+        self.actively_syncing_collections = set()   # Auto-sync enabled state (persistent)
+        self.currently_downloading_collections = set()  # Currently downloading state (temporary)
         self.collection_auto_sync_enabled = False
         self.collection_sync_thread = None
         self.collection_sync_interval = 120
@@ -767,50 +787,108 @@ class EnhancedLibrarySection:
         """Download all non-downloaded games in actively syncing collections"""
         if not (self.parent.romm_client and self.parent.romm_client.authenticated):
             return
-        
+
         def download_all():
             try:
                 all_collections = self.parent.romm_client.get_collections()
                 total_to_download = 0
-                
+                collections_with_downloads = []
+
                 for collection in all_collections:
                     collection_name = collection.get('name', '')
                     if collection_name not in self.actively_syncing_collections:
                         continue
-                    
+
                     collection_id = collection.get('id')
                     collection_roms = self.parent.romm_client.get_collection_roms(collection_id)
-                    
+
                     download_dir = Path(self.parent.rom_dir_row.get_text())
                     games_to_download = []
-                    
+
                     for rom in collection_roms:
                         processed_game = self.parent.process_single_rom(rom, download_dir)
-                        
+
                         if not processed_game.get('is_downloaded'):
                             games_to_download.append(processed_game)
-                    
+
                     if games_to_download:
                         total_to_download += len(games_to_download)
-                        GLib.idle_add(lambda name=collection_name, count=len(games_to_download): 
+                        collections_with_downloads.append(collection_name)
+
+                        # Mark this collection as currently downloading
+                        self.currently_downloading_collections.add(collection_name)
+
+                        GLib.idle_add(lambda name=collection_name, count=len(games_to_download):
                                     self.parent.log_message(f"⬇️ Auto-sync: downloading {count} games from '{name}'"))
-                        
+
+                        # Update UI to show orange indicator
+                        GLib.idle_add(lambda name=collection_name: self.update_collection_sync_status(name))
+
                         for game in games_to_download:
-                            GLib.idle_add(lambda g=game: 
+                            GLib.idle_add(lambda g=game:
                                         self.parent.download_game(g, is_bulk_operation=True))
-                
+
                 if total_to_download > 0:
-                    GLib.idle_add(lambda count=total_to_download: 
+                    GLib.idle_add(lambda count=total_to_download:
                                 self.parent.log_message(f"🎯 Auto-sync restored: started download of {count} total games"))
+
+                    # Wait for downloads to complete, then update UI
+                    def wait_and_update():
+                        time.sleep(5)  # Wait for downloads to start
+                        while self.parent.download_progress:
+                            time.sleep(2)  # Check every 2 seconds
+
+                        # All downloads complete - remove downloading status
+                        for collection_name in collections_with_downloads:
+                            self.currently_downloading_collections.discard(collection_name)
+                            GLib.idle_add(lambda name=collection_name: self.update_collection_sync_status(name))
+
+                    threading.Thread(target=wait_and_update, daemon=True).start()
                 else:
-                    GLib.idle_add(lambda: 
+                    GLib.idle_add(lambda:
                                 self.parent.log_message(f"✅ Auto-sync restored: all collections already complete"))
-                
+
             except Exception as e:
-                GLib.idle_add(lambda err=str(e): 
+                GLib.idle_add(lambda err=str(e):
                             self.parent.log_message(f"❌ Auto-sync restore error: {err}"))
-        
+
         threading.Thread(target=download_all, daemon=True).start()
+
+    def update_collection_sync_status(self, collection_name):
+        """Update the visual indicator for a collection's sync status"""
+        if not hasattr(self, 'library_model') or not self.library_model.tree_model:
+            return
+
+        def update_ui():
+            model = self.library_model.tree_model
+            for i in range(model.get_n_items() if model else 0):
+                tree_item = model.get_item(i)
+                if tree_item and tree_item.get_depth() == 0:  # Collection/Platform level
+                    item = tree_item.get_item()
+                    if isinstance(item, PlatformItem) and item.platform_name == collection_name:
+                        # Determine the new sync status
+                        if collection_name in self.currently_downloading_collections:
+                            new_status = 'syncing'  # Orange dot
+                        elif collection_name in self.actively_syncing_collections:
+                            # Check if all games are downloaded
+                            all_downloaded = all(g.get('is_downloaded', False) for g in item.games)
+                            print(f"🔍 DEBUG: Collection '{collection_name}' - {len(item.games)} games, all_downloaded={all_downloaded}")
+                            if item.games:
+                                downloaded_count = sum(1 for g in item.games if g.get('is_downloaded', False))
+                                print(f"🔍 DEBUG: {downloaded_count}/{len(item.games)} games downloaded")
+                            new_status = 'synced' if all_downloaded else 'disabled'  # Green if synced, grey if not
+                        else:
+                            new_status = 'disabled'  # Grey dot (not enabled)
+
+                        print(f"🔍 DEBUG: Setting '{collection_name}' status to: {new_status}")
+                        # Update the sync_status and notify
+                        item.sync_status = new_status
+                        item.notify('sync-status-text')
+                        item.notify('name')
+                        break
+            return False
+
+        GLib.idle_add(update_ui)
 
     def download_game_directly(self, game):
         """Download game directly WITH progress tracking"""
@@ -1004,8 +1082,9 @@ class EnhancedLibrarySection:
             self.parent.log_message(f"🎯 Starting collection sync for {len(self.actively_syncing_collections)} collections...")
             
             # Download all existing games in selected collections first
-            self.download_all_collection_games()
-            
+            # Don't send notifications during startup - only for user-initiated actions
+            self.download_all_collection_games(send_notifications=False)
+
             # Initialize ROM caches for selected collections
             self.initialize_collection_caches()
             
@@ -1027,7 +1106,7 @@ class EnhancedLibrarySection:
             
         self.refresh_collection_checkboxes()
 
-    def download_all_collection_games(self):
+    def download_all_collection_games(self, send_notifications=True):
         """Download all non-downloaded games in selected collections (respecting concurrency limit)"""
         if not (self.parent.romm_client and self.parent.romm_client.authenticated):
             return
@@ -1037,6 +1116,7 @@ class EnhancedLibrarySection:
                 all_collections = self.parent.romm_client.get_collections()
                 total_to_download = 0
                 all_games_to_download = []
+                collections_data = {}  # Track per-collection data
 
                 for collection in all_collections:
                     collection_name = collection.get('name', '')
@@ -1052,18 +1132,48 @@ class EnhancedLibrarySection:
 
                     download_dir = Path(self.parent.rom_dir_row.get_text())
 
+                    # Track collection-specific data
+                    collections_data[collection_name] = {
+                        'total': len(collection_roms),
+                        'to_download': 0,
+                        'already_downloaded': 0
+                    }
+
                     for rom in collection_roms:
                         processed_game = self.parent.process_single_rom(rom, download_dir)
 
                         if not processed_game.get('is_downloaded'):
+                            # Tag game with collection name for tracking
+                            processed_game['_sync_collection'] = collection_name
                             all_games_to_download.append(processed_game)
                             total_to_download += 1
+                            collections_data[collection_name]['to_download'] += 1
+                        else:
+                            collections_data[collection_name]['already_downloaded'] += 1
 
                 if total_to_download > 0:
-                    # Use bulk download method with semaphore-based concurrency control
-                    GLib.idle_add(lambda games=all_games_to_download:
-                                self.parent.download_multiple_games(games))
+                    # Use bulk download method with collection tracking
+                    GLib.idle_add(lambda games=all_games_to_download, cdata=collections_data:
+                                self.parent.download_multiple_games_with_collection_tracking(games, cdata))
                 else:
+                    # All collections are already synced - update their status to green
+                    def update_all_collection_statuses():
+                        for collection_name in collections_data.keys():
+                            self.update_collection_sync_status(collection_name)
+                        return False
+                    GLib.idle_add(update_all_collection_statuses)
+
+                    # Send per-collection notifications (only if requested)
+                    if send_notifications:
+                        for collection_name, data in collections_data.items():
+                            def send_collection_synced_notification(name=collection_name, total=data['total']):
+                                self.parent.send_desktop_notification(
+                                    f"✅ {name} - Sync Complete",
+                                    f"{total}/{total} ROMs synced"
+                                )
+                                return False
+                            GLib.idle_add(send_collection_synced_notification)
+
                     GLib.idle_add(lambda:
                                 self.parent.log_message(f"✅ Collection sync: all selected collections already complete"))
 
@@ -1447,41 +1557,82 @@ class EnhancedLibrarySection:
         """Queue all non-downloaded games from a collection using bulk download"""
         if not (self.parent.romm_client and self.parent.romm_client.authenticated):
             return
-        
+
         def queue_downloads():
             try:
                 all_collections = self.parent.romm_client.get_collections()
-                
+
                 for collection in all_collections:
                     if collection.get('name', '') != collection_name:
                         continue
-                    
+
                     collection_id = collection.get('id')
                     collection_roms = self.parent.romm_client.get_collection_roms(collection_id)
-                    
+
                     download_dir = Path(self.parent.rom_dir_row.get_text())
                     games_to_download = []
-                    
+
                     for rom in collection_roms:
                         processed_game = self.parent.process_single_rom(rom, download_dir)
                         if not processed_game.get('is_downloaded'):
                             processed_game['collection'] = collection_name
                             games_to_download.append(processed_game)
-                    
+
                     if games_to_download:
+                        # Mark this collection as currently downloading
+                        self.currently_downloading_collections.add(collection_name)
+
                         GLib.idle_add(lambda: self.parent.log_message(
                             f"📥 Starting download of {len(games_to_download)} games from '{collection_name}'"))
-                        # Use bulk download method
-                        GLib.idle_add(lambda games=games_to_download: 
-                                    self.parent.download_multiple_games(games))
+
+                        # Update UI to show orange indicator
+                        GLib.idle_add(lambda name=collection_name: self.update_collection_sync_status(name))
+
+                        # Tag games with collection name for tracking
+                        for game in games_to_download:
+                            game['_sync_collection'] = collection_name
+
+                        # Prepare collections_data for tracking
+                        collections_data = {
+                            collection_name: {
+                                'total': len(collection_roms),
+                                'to_download': len(games_to_download),
+                                'already_downloaded': len(collection_roms) - len(games_to_download)
+                            }
+                        }
+
+                        # Use bulk download method with collection tracking
+                        GLib.idle_add(lambda games=games_to_download, cdata=collections_data:
+                                    self.parent.download_multiple_games_with_collection_tracking(games, cdata))
+
+                        # Wait for downloads to complete, then update UI
+                        def wait_and_update():
+                            time.sleep(5)  # Wait for downloads to start
+                            while self.parent.download_progress:
+                                time.sleep(2)  # Check every 2 seconds
+
+                            # All downloads complete - remove downloading status
+                            self.currently_downloading_collections.discard(collection_name)
+                            GLib.idle_add(lambda name=collection_name: self.update_collection_sync_status(name))
+
+                        threading.Thread(target=wait_and_update, daemon=True).start()
                     else:
                         GLib.idle_add(lambda: self.parent.log_message(
                             f"✅ Collection '{collection_name}': all games already downloaded"))
+                        # Update status to 'synced' (green) since all games are already downloaded
+                        GLib.idle_add(lambda name=collection_name: self.update_collection_sync_status(name))
+                        # Send notification that collection is already synced
+                        total_games = len(collection_roms)
+                        GLib.idle_add(lambda name=collection_name, total=total_games:
+                                    self.parent.send_desktop_notification(
+                                        f"✅ {name} - Sync Complete",
+                                        f"{total}/{total} ROMs synced"
+                                    ))
                     break
-                    
+
             except Exception as e:
                 GLib.idle_add(lambda: self.parent.log_message(f"❌ Error: {e}"))
-        
+
         threading.Thread(target=queue_downloads, daemon=True).start()
 
     def on_toggle_collection_auto_sync(self, toggle_button):
@@ -1505,24 +1656,42 @@ class EnhancedLibrarySection:
                 self.start_collection_auto_sync()
                 toggle_button.set_label("Auto-Sync: ON")
                 self.parent.log_message(f"🟡 Collection auto-sync enabled for {len(selected_collections)} collections")
-                
+
+                # Update collection labels to show sync status with a delay to ensure data is loaded
+                def update_statuses():
+                    print(f"🔍 DEBUG: Updating statuses for {len(selected_collections)} collections: {selected_collections}")
+                    print(f"🔍 DEBUG: actively_syncing_collections = {self.actively_syncing_collections}")
+                    for collection_name in selected_collections:
+                        print(f"🔍 DEBUG: Calling update_collection_sync_status for '{collection_name}'")
+                        self.update_collection_sync_status(collection_name)
+                    return False
+                GLib.timeout_add(500, update_statuses)
+
                 # Clear UI selections after enabling
                 self.selected_collections_for_sync.clear()
                 self.save_selected_collections()
                 self.refresh_collection_checkboxes()
                 
         else:
+            # Save collections to update before clearing
+            collections_to_update = self.actively_syncing_collections.copy()
+
             self.stop_collection_auto_sync()
             self.actively_syncing_collections.clear()
-            
-            # Clear UI selections after disabling  
+            self.currently_downloading_collections.clear()
+
+            # Update collection labels to remove sync indicators
+            for collection_name in collections_to_update:
+                self.update_collection_sync_status(collection_name)
+
+            # Clear UI selections after disabling
             self.selected_collections_for_sync.clear()
             self.save_selected_collections()
             self.refresh_collection_checkboxes()
-            
+
             toggle_button.set_label("Auto-Sync: OFF")
             self.parent.log_message("🔴 Collection auto-sync disabled")
-            
+
             # Save the disabled state
             self.save_selected_collections()
 
@@ -1552,11 +1721,11 @@ class EnhancedLibrarySection:
                 is_syncing = is_selected and self.collection_auto_sync_enabled
 
                 if is_syncing:
-                    tooltip = f"🟢 {collection_name} - Selected & Auto-syncing"
+                    tooltip = f"{collection_name} - Selected & Auto-syncing"
                 elif is_selected:
-                    tooltip = f"🟡 {collection_name} - Selected (click button to start sync)"
+                    tooltip = f"{collection_name} - Selected (click button to start sync)"
                 else:
-                    tooltip = f"⚫ {collection_name} - Not selected"
+                    tooltip = f"{collection_name} - Not selected"
 
                 checkbox.set_tooltip_text(tooltip)
                 
@@ -1680,11 +1849,15 @@ class EnhancedLibrarySection:
         if actively_syncing:
             # STOP: Remove selected collections from active sync
             self.actively_syncing_collections -= current_selections
-            
+
             # Stop global sync if no collections left
             if not self.actively_syncing_collections:
                 self.stop_collection_auto_sync()
-            
+
+            # Update collection labels to remove sync indicators
+            for collection_name in actively_syncing:
+                self.update_collection_sync_status(collection_name)
+
             self.parent.log_message(f"Stopped auto-sync for {len(actively_syncing)} collections")
         else:
             # START: Add selected collections to active sync
@@ -1719,8 +1892,17 @@ class EnhancedLibrarySection:
             else:
                 # Just log that we added to existing sync
                 self.collection_auto_sync_enabled = True
-            
+
             self.parent.log_message(f"Started auto-sync for {len(current_selections)} collections")
+
+            # Update collection status indicators with a delay to ensure data is loaded
+            def update_new_collection_statuses():
+                print(f"🔍 DEBUG: Updating statuses for newly enabled collections: {current_selections}")
+                for collection_name in current_selections:
+                    print(f"🔍 DEBUG: Calling update_collection_sync_status for '{collection_name}'")
+                    self.update_collection_sync_status(collection_name)
+                return False
+            GLib.timeout_add(1000, update_new_collection_statuses)
         
         # Save persistent state and clear UI selections
         self.save_selected_collections()
@@ -2078,50 +2260,61 @@ class EnhancedLibrarySection:
     def _update_game_status_display(self, rom_id):
         """Update game status display by directly updating cells"""
         print(f"🔍 DEBUG: _update_game_status_display called for ROM {rom_id}")
-        
+
         # Find and update the GameItem cells directly
         def update_cells():
             model = self.library_model.tree_model
+            print(f"🔍 DEBUG: Tree model has {model.get_n_items() if model else 0} items")
             updated_any = False
             selected_collection = None
-            
+
             # In collections view, try to determine which collection is currently selected
             if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
                 if self.selected_game and self.selected_game.get('rom_id') == rom_id:
                     selected_collection = self.selected_game.get('collection')
-            
+                print(f"🔍 DEBUG: Collections view, selected_collection={selected_collection}")
+
+            games_found = 0
             for i in range(model.get_n_items() if model else 0):
                 tree_item = model.get_item(i)
                 if tree_item and tree_item.get_depth() == 1:  # Game level
                     item = tree_item.get_item()
-                    if isinstance(item, GameItem) and item.game_data.get('rom_id') == rom_id:
-                        # In collections view, prioritize the selected collection
-                        if selected_collection and item.game_data.get('collection') != selected_collection:
-                            continue
-                        
-                        print(f"🔍 DEBUG: Found GameItem, forcing cell update")
-                        item.notify('is-downloaded')
-                        item.notify('size-text') 
-                        item.notify('name')
-                        updated_any = True
-                        
-                        # If we found the selected collection, stop here
-                        if selected_collection:
-                            break
-            
+                    if isinstance(item, GameItem):
+                        games_found += 1
+                        if item.game_data.get('rom_id') == rom_id:
+                            print(f"🔍 DEBUG: Found matching ROM {rom_id}, collection={item.game_data.get('collection')}")
+                            # In collections view, prioritize the selected collection
+                            if selected_collection and item.game_data.get('collection') != selected_collection:
+                                print(f"🔍 DEBUG: Skipping due to collection mismatch")
+                                continue
+
+                            print(f"🔍 DEBUG: Found GameItem, forcing cell update, is_downloaded={item.game_data.get('is_downloaded')}")
+                            item.notify('is-downloaded')
+                            item.notify('size-text')
+                            item.notify('name')
+                            updated_any = True
+
+                            # If we found the selected collection, stop here
+                            if selected_collection:
+                                break
+
+            print(f"🔍 DEBUG: Scanned {games_found} games, updated_any={updated_any}")
+
             # If no selected collection or not found, update all instances
             if not updated_any:
+                print(f"🔍 DEBUG: Fallback loop - scanning all items again")
                 for i in range(model.get_n_items() if model else 0):
                     tree_item = model.get_item(i)
                     if tree_item and tree_item.get_depth() == 1:
                         item = tree_item.get_item()
                         if isinstance(item, GameItem) and item.game_data.get('rom_id') == rom_id:
+                            print(f"🔍 DEBUG: Fallback found GameItem, is_downloaded={item.game_data.get('is_downloaded')}")
                             item.notify('is-downloaded')
-                            item.notify('size-text') 
+                            item.notify('size-text')
                             item.notify('name')
-            
+
             return False
-        
+
         GLib.idle_add(update_cells)
 
     def on_open_in_romm_clicked(self, button):
@@ -2591,7 +2784,16 @@ class EnhancedLibrarySection:
         status_column = Gtk.ColumnViewColumn.new("Status", status_factory)
         status_column.set_fixed_width(80)
         self.column_view.append_column(status_column)
-        
+
+        # Sync Status column (for collections only)
+        sync_status_factory = Gtk.SignalListItemFactory()
+        sync_status_factory.connect('setup', self.setup_sync_status_cell)
+        sync_status_factory.connect('bind', self.bind_sync_status_cell)
+        self.sync_status_column = Gtk.ColumnViewColumn.new("Sync", sync_status_factory)
+        self.sync_status_column.set_fixed_width(50)
+        self.sync_status_column.set_visible(False)  # Hidden by default (platform view)
+        self.column_view.append_column(self.sync_status_column)
+
         # Size column
         size_factory = Gtk.SignalListItemFactory()
         size_factory.connect('setup', self.setup_size_cell)
@@ -2655,14 +2857,24 @@ class EnhancedLibrarySection:
             # Show collection sync controls
             if hasattr(self, 'collection_sync_box'):
                 self.collection_sync_box.set_visible(True)
+
+            # Show sync status column (only for collections)
+            if hasattr(self, 'sync_status_column'):
+                self.sync_status_column.set_visible(True)
+
             self.load_collections_view()
         else:
             # Platform view
             toggle_button.set_label("Collections")
             self.current_view_mode = 'platform'
+
             # Hide collection sync controls
             if hasattr(self, 'collection_sync_box'):
                 self.collection_sync_box.set_visible(False)
+
+            # Hide sync status column (not needed for platforms)
+            if hasattr(self, 'sync_status_column'):
+                self.sync_status_column.set_visible(False)
 
             original_games = self.parent.available_games.copy()
             self.library_model.update_library(original_games, group_by='platform')
@@ -2692,7 +2904,15 @@ class EnhancedLibrarySection:
 
         # If cache is valid, show it immediately without placeholder (no flicker)
         if cache_valid:
-            self.library_model.update_library(self.collections_games, group_by='collection')
+            # Build sync status map for cached data
+            cached_sync_status = {}
+            for game in self.collections_games:
+                collection_name = game.get('collection', 'Unknown')
+                if collection_name not in cached_sync_status:
+                    is_syncing = collection_name in self.actively_syncing_collections
+                    cached_sync_status[collection_name] = 'syncing' if is_syncing else 'disabled'
+
+            self.library_model.update_library(self.collections_games, group_by='collection', sync_status_map=cached_sync_status)
             return
 
         # Show loading placeholder for cases where we need to load data
@@ -2765,16 +2985,40 @@ class EnhancedLibrarySection:
                         existing_games_map[rom_id] = game
                 
                 all_collection_games = []
+                collection_sync_status = {}  # Map collection name to sync status
+
                 for collection in custom_collections:
                     collection_id = collection.get('id')
                     collection_name = collection.get('name', 'Unknown Collection')
-                    
+
                     collection_roms = self.parent.romm_client.get_collection_roms(collection_id)
-                    
+
+                    # Determine sync status for this collection
+                    is_syncing = collection_name in self.actively_syncing_collections
+                    if is_syncing:
+                        # Check if fully synced
+                        downloaded_count = 0
+                        download_dir = Path(self.parent.rom_dir_row.get_text())
+
+                        for rom in collection_roms:
+                            platform_slug = rom.get('platform_slug', 'Unknown')
+                            file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
+                            platform_dir = download_dir / platform_slug
+                            local_path = platform_dir / file_name
+                            if local_path.exists() and local_path.stat().st_size > 1024:
+                                downloaded_count += 1
+
+                        if downloaded_count == len(collection_roms) and len(collection_roms) > 0:
+                            collection_sync_status[collection_name] = 'synced'
+                        else:
+                            collection_sync_status[collection_name] = 'syncing'
+                    else:
+                        collection_sync_status[collection_name] = 'disabled'
+
                     for rom in collection_roms:
                         # First process the ROM normally
                         processed_game = self.parent.process_single_rom(rom, Path(self.parent.rom_dir_row.get_text()))
-                        
+
                         # Then merge with existing game data to preserve download status
                         rom_id = rom.get('id')
                         if rom_id and rom_id in existing_games_map:
@@ -2783,7 +3027,7 @@ class EnhancedLibrarySection:
                             processed_game['is_downloaded'] = existing_game.get('is_downloaded', False)
                             processed_game['local_path'] = existing_game.get('local_path')
                             processed_game['local_size'] = existing_game.get('local_size', 0)
-                        
+
                         # Add collection info
                         processed_game['collection'] = collection_name
                         all_collection_games.append(processed_game)
@@ -2807,7 +3051,7 @@ class EnhancedLibrarySection:
                     import time
                     self.collections_games = all_collection_games_copy
                     self.collections_cache_time = time.time()  # Update cache timestamp
-                    self.library_model.update_library(self.collections_games, group_by='collection')
+                    self.library_model.update_library(self.collections_games, group_by='collection', sync_status_map=collection_sync_status)
                     self.parent.log_message(f"Loaded {len(custom_collections)} custom collections with {len(all_collection_games)} games")
                     return False
 
@@ -2840,18 +3084,19 @@ class EnhancedLibrarySection:
         
         if isinstance(item, PlatformItem):
             icon.set_from_icon_name("folder-symbolic")
-            # IMPORTANT: Bind the label to the 'name' property instead of setting text directly
-            # This means when platform_item.notify('name') is called, the label will automatically update
-            item.bind_property('name', label, 'label', GObject.BindingFlags.SYNC_CREATE)
-            
-            if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
-                collection_name = item.platform_name
-                is_actively_syncing = collection_name in self.actively_syncing_collections
 
-                if collection_name in getattr(self, 'actively_syncing_collections', set()):
-                    label.set_markup(f"🔄 {item.platform_name}")
-                else:
-                    label.set_markup(f"{item.platform_name}")  # Normal
+            if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
+                # Dynamic label update for collections - just show the name, status dots will show the state
+                def update_collection_label(*args):
+                    collection_name = item.platform_name
+                    label.set_text(collection_name)
+
+                # Connect to name property changes to trigger label updates
+                item.connect('notify::name', update_collection_label)
+                update_collection_label()  # Initial update
+            else:
+                # For platforms view, use simple binding
+                item.bind_property('name', label, 'label', GObject.BindingFlags.SYNC_CREATE)
         else:
             # For games, set up dynamic icon updates
             def update_icon_and_name(*args):
@@ -2957,7 +3202,60 @@ class EnhancedLibrarySection:
         label.set_halign(Gtk.Align.END)
         label.add_css_class('numeric')
         list_item.set_child(label)
-    
+
+    def setup_sync_status_cell(self, factory, list_item):
+        """Setup sync status indicator for collections"""
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        box.set_halign(Gtk.Align.CENTER)
+        box.set_valign(Gtk.Align.CENTER)
+
+        # Create a drawing area for the colored dot
+        drawing_area = Gtk.DrawingArea()
+        drawing_area.set_size_request(10, 10)
+        drawing_area.set_halign(Gtk.Align.CENTER)
+        drawing_area.set_valign(Gtk.Align.CENTER)
+
+        box.append(drawing_area)
+        list_item.set_child(box)
+
+    def bind_sync_status_cell(self, factory, list_item):
+        """Bind sync status for collections"""
+        tree_item = list_item.get_item()
+        item = tree_item.get_item()
+        box = list_item.get_child()
+        drawing_area = box.get_first_child()
+
+        if isinstance(item, PlatformItem):
+            def update_status(*args):
+                status = item.sync_status_text
+
+                def draw_func(area, cr, width, height):
+                    # Determine color based on status
+                    if status == 'synced':
+                        cr.set_source_rgb(0.29, 0.86, 0.50)  # Green (#4ade80)
+                    elif status == 'syncing':
+                        cr.set_source_rgb(0.98, 0.57, 0.24)  # Orange (#fb923c)
+                    elif status == 'disabled':
+                        cr.set_source_rgb(0.42, 0.45, 0.50)  # Grey (#6b7280)
+                    elif status == 'loading':
+                        cr.set_source_rgb(0.6, 0.6, 0.6)  # Light grey
+                    else:
+                        return  # Don't draw anything for empty status
+
+                    # Draw a filled circle
+                    radius = min(width, height) / 2.0
+                    cr.arc(width / 2.0, height / 2.0, radius - 1, 0, 2 * 3.14159)
+                    cr.fill()
+
+                drawing_area.set_draw_func(draw_func)
+                drawing_area.queue_draw()
+
+            item.connect('notify::sync-status-text', update_status)
+            update_status()  # Initial draw
+        elif isinstance(item, GameItem):
+            # Games don't have sync status - don't draw anything
+            drawing_area.set_draw_func(lambda *args: None)
+
     def create_action_bar(self):
         action_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         action_box.set_margin_top(6)
@@ -6981,6 +7279,70 @@ class SyncWindow(Gtk.ApplicationWindow):
         # ADD AUTO-CONNECT LOGIC:
         GLib.timeout_add(50, self.try_auto_connect)
 
+    def create_status_dot(self, color='grey', size=10):
+        """Create a Cairo-drawn status dot widget
+
+        Args:
+            color: 'green', 'orange', 'red', 'grey', or 'yellow'
+            size: Size of the dot in pixels (default: 10)
+
+        Returns:
+            Gtk.DrawingArea with colored dot
+        """
+        drawing_area = Gtk.DrawingArea()
+        drawing_area.set_size_request(size, size)
+        drawing_area.set_halign(Gtk.Align.CENTER)
+        drawing_area.set_valign(Gtk.Align.CENTER)
+
+        def draw_func(area, cr, width, height):
+            # Determine RGB color
+            if color == 'green':
+                cr.set_source_rgb(0.29, 0.86, 0.50)  # #4ade80
+            elif color == 'orange':
+                cr.set_source_rgb(0.98, 0.57, 0.24)  # #fb923c
+            elif color == 'red':
+                cr.set_source_rgb(0.97, 0.44, 0.44)  # #f87171
+            elif color == 'yellow':
+                cr.set_source_rgb(0.98, 0.80, 0.27)  # #facc15
+            else:  # grey
+                cr.set_source_rgb(0.42, 0.45, 0.50)  # #6b7280
+
+            # Draw filled circle
+            radius = min(width, height) / 2.0
+            cr.arc(width / 2.0, height / 2.0, radius - 1, 0, 2 * 3.14159)
+            cr.fill()
+
+        drawing_area.set_draw_func(draw_func)
+        return drawing_area
+
+    def update_status_dot(self, drawing_area, color='grey'):
+        """Update an existing status dot with a new color
+
+        Args:
+            drawing_area: The Gtk.DrawingArea to update
+            color: 'green', 'orange', 'red', 'grey', or 'yellow'
+        """
+        def draw_func(area, cr, width, height):
+            # Determine RGB color
+            if color == 'green':
+                cr.set_source_rgb(0.29, 0.86, 0.50)  # #4ade80
+            elif color == 'orange':
+                cr.set_source_rgb(0.98, 0.57, 0.24)  # #fb923c
+            elif color == 'red':
+                cr.set_source_rgb(0.97, 0.44, 0.44)  # #f87171
+            elif color == 'yellow':
+                cr.set_source_rgb(0.98, 0.80, 0.27)  # #facc15
+            else:  # grey
+                cr.set_source_rgb(0.42, 0.45, 0.50)  # #6b7280
+
+            # Draw filled circle
+            radius = min(width, height) / 2.0
+            cr.arc(width / 2.0, height / 2.0, radius - 1, 0, 2 * 3.14159)
+            cr.fill()
+
+        drawing_area.set_draw_func(draw_func)
+        drawing_area.queue_draw()
+
     def format_sync_interval(self, seconds):
         """Format seconds into user-friendly string"""
         if seconds < 60:
@@ -8089,7 +8451,12 @@ class SyncWindow(Gtk.ApplicationWindow):
         self.connection_expander = Adw.ExpanderRow()
         self.connection_expander.set_title("RomM Connection")
         self.connection_expander.set_subtitle("Not connected - expand to configure")
-        
+
+        # Add status dot as prefix (15px size for better visibility)
+        self.connection_status_dot = self.create_status_dot('grey', size=15)
+        self.connection_status_dot.set_margin_end(8)
+        self.connection_expander.add_prefix(self.connection_status_dot)
+
         # Add toggle switch as suffix to enable/disable connection
         self.connection_enable_switch = Gtk.Switch()
         self.connection_enable_switch.set_valign(Gtk.Align.CENTER)
@@ -8147,6 +8514,11 @@ class SyncWindow(Gtk.ApplicationWindow):
         self.retroarch_expander = Adw.ExpanderRow()
         self.retroarch_expander.set_title("RetroArch")
         self.retroarch_expander.set_subtitle("Installation and core information")
+
+        # Add status dot as prefix (15px size for better visibility)
+        self.retroarch_status_dot = self.create_status_dot('grey', size=15)
+        self.retroarch_status_dot.set_margin_end(8)
+        self.retroarch_expander.add_prefix(self.retroarch_status_dot)
 
         # Refresh button
         refresh_container = Gtk.Box()
@@ -8448,7 +8820,8 @@ class SyncWindow(Gtk.ApplicationWindow):
             self.auto_sync.stop_auto_sync()
             # Turn off auto-sync switch when disconnected
             self.autosync_enable_switch.set_active(False)
-            self.autosync_status_row.set_subtitle("🔴 Disabled - not connected to RomM")
+            self.autosync_status_row.set_subtitle("Disabled - not connected to RomM")
+            self.update_status_dot(self.autosync_status_dot, 'red')
         
         self.update_connection_ui("disconnected")
         self.log_message("Disconnected from RomM")
@@ -8461,29 +8834,44 @@ class SyncWindow(Gtk.ApplicationWindow):
     def update_connection_ui(self, state):
         """Update connection UI based on state"""
         if state == "connecting":
-            self.connection_expander.set_subtitle("🟡 Connecting...")
-            
+            self.connection_expander.set_subtitle("Connecting...")
+            self.update_status_dot(self.connection_status_dot, 'yellow')
+
         elif state == "loading":
-            self.connection_expander.set_subtitle("🔄 Loading games...")
-            
+            self.connection_expander.set_subtitle("Loading games...")
+            self.update_status_dot(self.connection_status_dot, 'yellow')
+
         elif state == "connected":
             # Add game count when connected
             game_count = len(getattr(self, 'available_games', []))
             if game_count > 0:
-                subtitle = f"🟢 Connected - {game_count:,} Games"
+                subtitle = f"Connected - {game_count:,} Games"
             else:
-                subtitle = "🟢 Connected"
+                subtitle = "Connected"
             self.connection_expander.set_subtitle(subtitle)
-                
+            self.update_status_dot(self.connection_status_dot, 'green')
+
         elif state == "failed":
-            self.connection_expander.set_subtitle("🔴 Connection failed")
-            
+            self.connection_expander.set_subtitle("Connection failed")
+            self.update_status_dot(self.connection_status_dot, 'red')
+
         elif state == "disconnected":
-            self.connection_expander.set_subtitle("🔴 Disconnected")
+            self.connection_expander.set_subtitle("Disconnected")
+            self.update_status_dot(self.connection_status_dot, 'red')
 
     def update_connection_ui_with_message(self, message):
         """Update connection UI with custom message"""
-        self.connection_expander.set_subtitle(message)     
+        # Remove emoji and update dot color based on message content
+        clean_message = message.replace("🟢 ", "").replace("🟡 ", "").replace("🔴 ", "")
+        self.connection_expander.set_subtitle(clean_message)
+
+        # Update dot color based on original message
+        if "🟢" in message:
+            self.update_status_dot(self.connection_status_dot, 'green')
+        elif "🟡" in message:
+            self.update_status_dot(self.connection_status_dot, 'yellow')
+        elif "🔴" in message:
+            self.update_status_dot(self.connection_status_dot, 'red')     
 
     def update_status_file(self):
             """Update status file for Decky plugin"""
@@ -8679,18 +9067,21 @@ class SyncWindow(Gtk.ApplicationWindow):
                 
                 # Start auto-sync
                 self.auto_sync.start_auto_sync()
-                self.autosync_status_row.set_subtitle("🟢 Active - monitoring for changes")
+                self.autosync_status_row.set_subtitle("Active - monitoring for changes")
+                self.update_status_dot(self.autosync_status_dot, 'green')
                 
                 self.log_message("🔄 Auto-sync enabled")
                 self.update_status_file()
             else:
                 self.log_message("⚠️ Please connect to RomM before enabling auto-sync")
-                self.autosync_status_row.set_subtitle("🔴 Disabled - not connected to RomM")
+                self.autosync_status_row.set_subtitle("Disabled - not connected to RomM")
+                self.update_status_dot(self.autosync_status_dot, 'red')
                 switch_row.set_active(False)
                 self.update_status_file()
         else:
             self.auto_sync.stop_auto_sync()
-            self.autosync_status_row.set_subtitle("🔴 Disabled")
+            self.autosync_status_row.set_subtitle("Disabled")
+            self.update_status_dot(self.autosync_status_dot, 'red')
             self.log_message("⏹️ Auto-sync disabled")
             self.update_status_file()
 
@@ -8874,7 +9265,13 @@ class SyncWindow(Gtk.ApplicationWindow):
         # Status indicator
         self.autosync_status_row = Adw.ActionRow()
         self.autosync_status_row.set_title("Status")
-        self.autosync_status_row.set_subtitle("🔴 Disabled")
+        self.autosync_status_row.set_subtitle("Disabled")
+
+        # Add status dot as prefix
+        self.autosync_status_dot = self.create_status_dot('red')
+        self.autosync_status_dot.set_margin_end(8)
+        self.autosync_status_row.add_prefix(self.autosync_status_dot)
+
         self.autosync_expander.add_row(self.autosync_status_row)
         
         download_sync_group.add(self.autosync_expander)
@@ -8892,7 +9289,8 @@ class SyncWindow(Gtk.ApplicationWindow):
                 
                 # Start auto-sync
                 self.auto_sync.start_auto_sync()
-                self.autosync_status_row.set_subtitle("🟢 Active - monitoring for changes")
+                self.autosync_status_row.set_subtitle("Active - monitoring for changes")
+                self.update_status_dot(self.autosync_status_dot, 'green')
                 
                 self.log_message("🔄 Auto-sync enabled")
             else:
@@ -8900,7 +9298,8 @@ class SyncWindow(Gtk.ApplicationWindow):
                 switch_row.set_active(False)
         else:
             self.auto_sync.stop_auto_sync()
-            self.autosync_status_row.set_subtitle("🔴 Disabled")
+            self.autosync_status_row.set_subtitle("Disabled")
+            self.update_status_dot(self.autosync_status_dot, 'red')
             self.log_message("⏹️ Auto-sync disabled")
 
     def on_collection_sync_interval_changed(self, spin_row, pspec):
@@ -9215,10 +9614,12 @@ class SyncWindow(Gtk.ApplicationWindow):
                             install_type = "Native"
                         
                         self.retroarch_info_row.set_subtitle(f"Found: {install_type} - {self.retroarch.retroarch_executable}")
-                        self.retroarch_expander.set_subtitle(f"🟢 {install_type} RetroArch detected")
+                        self.retroarch_expander.set_subtitle(f"{install_type} RetroArch detected")
+                        self.update_status_dot(self.retroarch_status_dot, 'green')
                     else:
                         self.retroarch_info_row.set_subtitle("Not found")
-                        self.retroarch_expander.set_subtitle("🔴 RetroArch not found")
+                        self.retroarch_expander.set_subtitle("RetroArch not found")
+                        self.update_status_dot(self.retroarch_status_dot, 'red')
             except Exception as e:
                 print(f"Error updating RetroArch info: {e}")
                 if hasattr(self, 'retroarch_info_row'):
@@ -9245,9 +9646,9 @@ class SyncWindow(Gtk.ApplicationWindow):
                 if hasattr(self, 'retroarch_connection_row'):
                     network_ok, network_status = self.retroarch.check_network_commands_config()
                     if network_ok:
-                        self.retroarch_connection_row.set_subtitle(f"🟢 {network_status}")
+                        self.retroarch_connection_row.set_subtitle(f"{network_status}")
                     else:
-                        self.retroarch_connection_row.set_subtitle(f"🔴 {network_status} - Turn ON in Settings → Network Commands for improved sync and notifications")
+                        self.retroarch_connection_row.set_subtitle(f"{network_status} - Turn ON in Settings → Network Commands for improved sync and notifications")
                         
             except Exception as e:
                 print(f"Error checking RetroArch info: {e}")
@@ -9524,10 +9925,126 @@ class SyncWindow(Gtk.ApplicationWindow):
                         self.library_section.refresh_all_platform_checkboxes()
                         delattr(self, '_downloading_rom_ids')
                 self.log_message(f"✅ Bulk download complete ({download_count} games)")
+
+                # Send desktop notification when bulk download completes
+                self.send_desktop_notification(
+                    "Downloads Complete",
+                    f"Successfully downloaded {download_count} game{'s' if download_count != 1 else ''}"
+                )
+
                 delattr(self, '_bulk_download_remaining')
                 return False
             return True
         
+        GLib.timeout_add(500, check_completion)
+
+    def download_multiple_games_with_collection_tracking(self, games, collections_data):
+        """Download multiple games with per-collection tracking and notifications"""
+        count = len(games)
+        games_to_download = list(games)
+
+        # Filter to only games that aren't already downloaded
+        not_downloaded = [g for g in games_to_download if not g.get('is_downloaded', False)]
+
+        if not not_downloaded:
+            self.log_message("All selected games are already downloaded")
+            return
+
+        # Update count to reflect actual games to download
+        download_count = len(not_downloaded)
+
+        # CAPTURE SELECTION STATE BEFORE BLOCKING
+        if hasattr(self, 'library_section'):
+            self._downloading_rom_ids = set()
+            for game in not_downloaded:
+                identifier_type, identifier_value = self.library_section.get_game_identifier(game)
+                if identifier_type == 'rom_id':
+                    self._downloading_rom_ids.add(identifier_value)
+
+        # BLOCK TREE REFRESHES DURING BULK OPERATION
+        self._dialog_open = True
+        if hasattr(self, 'library_section'):
+            self.library_section._block_selection_updates(True)
+
+        # Track completion per collection
+        self._bulk_download_remaining = download_count
+        self._collection_downloads = {}
+
+        # Initialize per-collection counters
+        for collection_name, data in collections_data.items():
+            if data['to_download'] > 0:
+                self._collection_downloads[collection_name] = {
+                    'total': data['total'],
+                    'remaining': data['to_download'],
+                    'downloaded': data['already_downloaded']
+                }
+
+        # Get max concurrent setting and create semaphore
+        max_concurrent = int(self.settings.get('Download', 'max_concurrent', '3'))
+        self.log_message(f"🚀 Starting bulk download of {download_count} games (max {max_concurrent} concurrent)...")
+
+        import threading
+        semaphore = threading.Semaphore(max_concurrent)
+        download_lock = threading.Lock()
+
+        def controlled_download(game):
+            """Download with proper semaphore control and collection tracking"""
+            semaphore.acquire()  # Wait for slot
+            try:
+                # Call download_game but pass semaphore to control the actual download thread
+                self.download_game_controlled(game, semaphore, is_bulk_operation=True,
+                                            on_complete=lambda g=game: on_game_complete(g))
+            except Exception as e:
+                self.log_message(f"Download error for {game.get('name')}: {e}")
+                semaphore.release()  # Ensure release on error
+
+        def on_game_complete(game):
+            """Called when a game download completes - track per collection"""
+            collection_name = game.get('_sync_collection')
+            if collection_name and collection_name in self._collection_downloads:
+                with download_lock:
+                    self._collection_downloads[collection_name]['remaining'] -= 1
+                    self._collection_downloads[collection_name]['downloaded'] += 1
+
+                    # If this collection is complete, send notification
+                    if self._collection_downloads[collection_name]['remaining'] == 0:
+                        total = self._collection_downloads[collection_name]['total']
+                        downloaded = self._collection_downloads[collection_name]['downloaded']
+
+                        self.send_desktop_notification(
+                            f"✅ {collection_name} - Sync Complete",
+                            f"{downloaded}/{total} ROMs synced"
+                        )
+                        self.log_message(f"✅ Collection '{collection_name}' sync complete: {downloaded}/{total} ROMs")
+
+        # Start all downloads (semaphore controls actual concurrency)
+        for game in not_downloaded:
+            threading.Thread(target=controlled_download, args=(game,), daemon=True).start()
+
+        # Check for completion periodically
+        def check_completion():
+            if hasattr(self, '_bulk_download_remaining') and self._bulk_download_remaining <= 0:
+                self._dialog_open = False
+                if hasattr(self, 'library_section'):
+                    self.library_section._block_selection_updates(False)
+                    if hasattr(self, '_downloading_rom_ids'):
+                        for rom_id in self._downloading_rom_ids:
+                            self.library_section.selected_rom_ids.discard(rom_id)
+                        self.library_section.sync_selected_checkboxes()
+                        self.library_section.update_action_buttons()
+                        self.library_section.update_selection_label()
+                        self.library_section.refresh_all_platform_checkboxes()
+                        delattr(self, '_downloading_rom_ids')
+                self.log_message(f"✅ All downloads complete ({download_count} games)")
+
+                # Clean up collection tracking
+                if hasattr(self, '_collection_downloads'):
+                    delattr(self, '_collection_downloads')
+
+                delattr(self, '_bulk_download_remaining')
+                return False
+            return True
+
         GLib.timeout_add(500, check_completion)
 
     def delete_multiple_games(self, games):
@@ -10064,19 +10581,20 @@ class SyncWindow(Gtk.ApplicationWindow):
         
         threading.Thread(target=download, daemon=True).start()
 
-    def download_game_controlled(self, game, semaphore, is_bulk_operation=False):
+    def download_game_controlled(self, game, semaphore, is_bulk_operation=False, on_complete=None):
         """Download with semaphore already acquired - releases when complete"""
         def download():
+            success = False  # Track success for on_complete callback
             try:
                 rom_name = game['name']
                 rom_id = game['rom_id']
                 platform = game['platform']
                 platform_slug = game.get('platform_slug', platform)
                 file_name = game['file_name']
-                
+
                 # Track current download for progress updates
                 self._current_download_rom_id = rom_id
-                
+
                 # Initialize progress and throttling for this game
                 self.download_progress[rom_id] = {
                     'progress': 0.0,
@@ -10087,11 +10605,11 @@ class SyncWindow(Gtk.ApplicationWindow):
                     'total': 0
                 }
                 self._last_progress_update[rom_id] = 0  # Reset throttling
-                
+
                 # Update tree view to show download starting
-                GLib.idle_add(lambda: self.library_section.update_game_progress(rom_id, self.download_progress[rom_id]) 
+                GLib.idle_add(lambda: self.library_section.update_game_progress(rom_id, self.download_progress[rom_id])
                             if hasattr(self, 'library_section') else None)
-                
+
                 # Get download directory and create platform directory
                 download_dir = Path(self.rom_dir_row.get_text())
                 # Use mapped slug for RetroDECK compatibility
@@ -10102,7 +10620,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                 platform_dir = download_dir / mapped_slug
                 platform_dir.mkdir(parents=True, exist_ok=True)
                 download_path = platform_dir / file_name
-                
+
                 # Log file size for large downloads
                 try:
                     # Try to get file size from ROM data
@@ -10110,13 +10628,14 @@ class SyncWindow(Gtk.ApplicationWindow):
                     expected_size = romm_data.get('fs_size_bytes', 0)
                 except:
                     pass
-                
+
                 # Download with throttled progress tracking
-                success, message = self.romm_client.download_rom(
+                download_success, message = self.romm_client.download_rom(
                     rom_id, rom_name, download_path, lambda progress: self.update_download_progress(progress, rom_id)
                 )
-                
-                if success:
+
+                if download_success:
+                    success = True
                     # Mark download complete
                     current_progress = self.download_progress.get(rom_id, {})
                     if current_progress.get('downloaded', 0) > 0:
@@ -10341,9 +10860,15 @@ class SyncWindow(Gtk.ApplicationWindow):
                     GLib.idle_add(lambda: self.library_section.update_game_progress(rom_id, self.download_progress[rom_id])
                                 if hasattr(self, 'library_section') else None)
                 
-                GLib.idle_add(lambda err=str(e), n=game['name']: 
+                GLib.idle_add(lambda err=str(e), n=game['name']:
                             self.log_message(f"Download error for {n}: {err}"))
             finally:
+                # Call on_complete callback if provided (even on failure to track completion)
+                if on_complete and success:
+                    try:
+                        on_complete(game)
+                    except Exception as e:
+                        print(f"Error in on_complete callback: {e}")
                 semaphore.release()  # Always release when done
         
         threading.Thread(target=download, daemon=True).start()
