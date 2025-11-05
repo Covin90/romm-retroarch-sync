@@ -2704,6 +2704,11 @@ class EnhancedLibrarySection:
         self.view_mode_toggle = Gtk.ToggleButton()
         self.view_mode_toggle.set_label("Collections")
         self.view_mode_toggle.set_tooltip_text("Switch between Platforms and Collections view")
+        # Set fixed width to accommodate both labels
+        label_widget = self.view_mode_toggle.get_child()
+        if label_widget:
+            label_widget.set_width_chars(11)  # "Collections" length
+            label_widget.set_max_width_chars(11)
         self.view_mode_toggle.connect('toggled', self.on_view_mode_toggled)
         toolbar_box.append(self.view_mode_toggle)
         
@@ -2909,10 +2914,24 @@ class EnhancedLibrarySection:
         if cache_valid:
             # Build sync status map for cached data
             cached_sync_status = {}
+            collection_games_map = {}  # Group games by collection
+
+            # Group games by collection
             for game in self.collections_games:
                 collection_name = game.get('collection', 'Unknown')
-                if collection_name not in cached_sync_status:
-                    is_syncing = collection_name in self.actively_syncing_collections
+                if collection_name not in collection_games_map:
+                    collection_games_map[collection_name] = []
+                collection_games_map[collection_name].append(game)
+
+            # Calculate sync status for each collection
+            for collection_name, games in collection_games_map.items():
+                is_syncing = collection_name in self.actively_syncing_collections
+                if is_syncing:
+                    # Check if all games are downloaded
+                    all_downloaded = all(game.get('is_downloaded', False) for game in games)
+                    cached_sync_status[collection_name] = 'synced' if all_downloaded else 'syncing'
+                else:
+                    cached_sync_status[collection_name] = 'disabled'
                     cached_sync_status[collection_name] = 'syncing' if is_syncing else 'disabled'
 
             self.library_model.update_library(self.collections_games, group_by='collection', sync_status_map=cached_sync_status)
@@ -3963,6 +3982,8 @@ class EnhancedLibrarySection:
                 switch = Gtk.Switch()
                 switch.set_valign(Gtk.Align.CENTER)
                 switch.set_halign(Gtk.Align.CENTER)
+                # Make switch smaller
+                switch.add_css_class('compact-switch')
                 box.append(switch)
 
                 switch.set_visible(True)
@@ -8300,6 +8321,20 @@ class SyncWindow(Gtk.ApplicationWindow):
                 font-family: -gtk-system-font;
                 font-size: 1em;
                 color: @dim_label_color;
+            }
+
+            /* Much smaller toggle switches for collection view - using scale transform */
+            switch.compact-switch {
+                transform: scale(0.65);
+                margin: -8px;
+            }
+
+            /* Also apply to collection-specific classes */
+            switch.collection-synced,
+            switch.collection-partial-sync,
+            switch.collection-not-synced {
+                transform: scale(0.65);
+                margin: -8px;
             }
             """)
             Gtk.StyleContext.add_provider_for_display(
