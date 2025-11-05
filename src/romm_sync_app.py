@@ -2543,6 +2543,25 @@ class EnhancedLibrarySection:
             platform = game_data.get('platform', '')
             return ('game_key', f"{name}|{platform}")
 
+    def is_game_in_autosync_collection(self, game_data):
+        """Check if a game is in any collection that has autosync enabled"""
+        rom_id = game_data.get('rom_id')
+
+        # If no rom_id, check the current collection only
+        if not rom_id:
+            collection_name = game_data.get('collection', '')
+            return collection_name in self.actively_syncing_collections
+
+        # Check all collections that contain this rom_id
+        if hasattr(self, 'collections_games'):
+            for collection_game in self.collections_games:
+                if collection_game.get('rom_id') == rom_id:
+                    collection_name = collection_game.get('collection', '')
+                    if collection_name in self.actively_syncing_collections:
+                        return True
+
+        return False
+
     def _block_selection_updates(self, block=True):
         """Temporarily block selection updates during dialogs"""
         self._selection_blocked = block
@@ -3392,7 +3411,7 @@ class EnhancedLibrarySection:
         if self.selected_game:
             is_downloaded = self.selected_game.get('is_downloaded', False)
             is_connected = self.parent.romm_client and self.parent.romm_client.authenticated
-            
+
             if is_downloaded:
                 self.action_button.set_label("Launch")
                 self.action_button.remove_css_class('warning')
@@ -3401,9 +3420,11 @@ class EnhancedLibrarySection:
                 self.action_button.set_label("Download")
                 self.action_button.remove_css_class('suggested-action')
                 self.action_button.add_css_class('warning')
-            
+
             self.action_button.set_sensitive(True)
-            self.delete_button.set_sensitive(is_downloaded)
+            # Check if game is in autosync collection - disable delete if so
+            is_in_autosync = self.is_game_in_autosync_collection(self.selected_game)
+            self.delete_button.set_sensitive(is_downloaded and not is_in_autosync)
             self.open_in_romm_button.set_sensitive(is_connected and self.selected_game.get('rom_id'))
             return  # Exit early, don't check other selections
         
@@ -3475,9 +3496,11 @@ class EnhancedLibrarySection:
                     self.action_button.set_label("Download")
                     self.action_button.remove_css_class('suggested-action')
                     self.action_button.add_css_class('warning')
-                
+
                 self.action_button.set_sensitive(True)
-                self.delete_button.set_sensitive(is_downloaded)
+                # Check if game is in autosync collection - disable delete if so
+                is_in_autosync = self.is_game_in_autosync_collection(game)
+                self.delete_button.set_sensitive(is_downloaded and not is_in_autosync)
                 self.open_in_romm_button.set_sensitive(is_connected and game.get('rom_id'))
             else:
                 # Multiple checkbox selections
@@ -3491,8 +3514,10 @@ class EnhancedLibrarySection:
                     self.action_button.remove_css_class('warning')
                     self.action_button.remove_css_class('suggested-action')
                     self.action_button.set_sensitive(False)
-                
-                self.delete_button.set_sensitive(len(downloaded_games) > 0)
+
+                # Check if any selected games are in autosync collections
+                has_autosync_game = any(self.is_game_in_autosync_collection(g) for g in selected_games)
+                self.delete_button.set_sensitive(len(downloaded_games) > 0 and not has_autosync_game)
                 self.open_in_romm_button.set_sensitive(False)  # Disable for multi-selection
             return
         
@@ -3945,6 +3970,14 @@ class EnhancedLibrarySection:
                 rom_id = game_data.get('rom_id')
                 collection_name = game_data.get('collection', '')
                 game_name = game_data.get('name', 'NO_NAME')
+
+                # Check if collection has autosync enabled - disable checkbox if so
+                if collection_name in self.actively_syncing_collections:
+                    checkbox.set_sensitive(False)
+                    checkbox.set_tooltip_text(f"Cannot select - '{collection_name}' has auto-sync enabled")
+                else:
+                    checkbox.set_sensitive(True)
+                    checkbox.set_tooltip_text("")
 
                 if rom_id and collection_name:
                     collection_key = f"collection:{rom_id}:{collection_name}"
