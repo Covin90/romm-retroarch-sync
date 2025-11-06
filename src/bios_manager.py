@@ -211,16 +211,11 @@ class BiosManager:
 
     def find_system_directory(self):
         """Find RetroArch system/BIOS directory"""
-        self.log(f"🔍 DEBUG: find_system_directory called")
-        self.log(f"🔍 DEBUG: self.settings is: {self.settings}")
-        
         # Check for custom BIOS path override first
         if self.settings:
             custom_bios_path = self.settings.get('BIOS', 'custom_path', '').strip()
-            self.log(f"🔍 DEBUG: Custom BIOS path from settings: '{custom_bios_path}'")
             if custom_bios_path:  # Only use if not empty
                 custom_dir = Path(custom_bios_path)
-                self.log(f"🔍 DEBUG: Custom dir exists: {custom_dir.exists()}")
                 if custom_dir.exists():
                     self.log(f"📁 Using custom BIOS directory: {custom_dir}")
                     return custom_dir
@@ -233,10 +228,6 @@ class BiosManager:
                     except Exception as e:
                         self.log(f"❌ Failed to create custom BIOS directory: {e}")
                         self.log("⚠️ Falling back to auto-detection")
-        else:
-            self.log("🔍 DEBUG: No settings object available")
-        
-        self.log("🔍 DEBUG: Using auto-detection")
 
         possible_dirs = [
             # RetroDECK
@@ -419,8 +410,6 @@ class BiosManager:
     
     def download_bios_from_romm(self, platform_name, bios_filename):
             """Download a specific BIOS file from RomM's firmware API"""
-            self.log(f"🔍 DEBUG: Download target directory: {self.system_dir}")
-            
             if not self.romm_client or not self.romm_client.authenticated:
                 self.log("❌ Not connected to RomM")
                 return False
@@ -467,10 +456,9 @@ class BiosManager:
                             if firmware.get('file_name') == bios_filename:
                                 firmware_id = firmware.get('id')
                                 self.log(f"🔍 Found BIOS: {bios_filename} (ID: {firmware_id})")
-                                
+
                                 # Construct the download URL using the firmware ID and filename
                                 download_url = f'/api/firmware/{firmware_id}/content/{bios_filename}'
-                                self.log(f"🔍 DEBUG: Constructed download URL: {urljoin(self.romm_client.base_url, download_url)}")
 
                                 # STEP 1: Download the file from the constructed URL
                                 file_response = self.romm_client.session.get(
