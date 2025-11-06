@@ -2098,11 +2098,22 @@ class EnhancedLibrarySection:
                                         print(f"   Exists: {local_path.exists()}, Size: {local_path.stat().st_size if local_path.exists() else 0}")
                                     game['is_downloaded'] = is_downloaded
                                     game['local_path'] = str(local_path) if is_downloaded else None
+                                    # Update size from local file if downloaded
                                     if is_downloaded:
+                                        game['local_size'] = local_path.stat().st_size
                                         downloaded_count += 1
+                                    elif 'local_size' not in game:
+                                        game['local_size'] = 0
+                                    # Ensure romm_data exists for size display
+                                    if 'romm_data' not in game:
+                                        game['romm_data'] = {'fs_size_bytes': game.get('local_size', 0)}
                                 else:
                                     game['is_downloaded'] = False
                                     game['local_path'] = None
+                                    if 'local_size' not in game:
+                                        game['local_size'] = 0
+                                    if 'romm_data' not in game:
+                                        game['romm_data'] = {'fs_size_bytes': 0}
 
                             print(f"📊 Updated download status: {downloaded_count}/{len(cached_games)} games downloaded")
                             self.collections_games = cached_games
@@ -2158,6 +2169,18 @@ class EnhancedLibrarySection:
                         local_path = download_dir / platform_slug / file_name if file_name else None
                         is_downloaded = local_path and local_path.exists() and local_path.stat().st_size > 1024
 
+                        # Get file size from local file if downloaded, otherwise from ROM metadata
+                        local_size = 0
+                        if is_downloaded and local_path:
+                            local_size = local_path.stat().st_size
+                        elif rom.get('fs_size_bytes'):
+                            local_size = rom.get('fs_size_bytes')
+
+                        # Store romm_data for total size calculation (used by size_text property)
+                        romm_data = {
+                            'fs_size_bytes': rom.get('fs_size_bytes', 0) or local_size
+                        }
+
                         game = {
                             'name': Path(rom.get('fs_name', 'unknown')).stem,
                             'rom_id': rom.get('id'),
@@ -2166,6 +2189,8 @@ class EnhancedLibrarySection:
                             'file_name': rom.get('fs_name'),
                             'is_downloaded': is_downloaded,
                             'local_path': str(local_path) if is_downloaded else None,
+                            'local_size': local_size,  # Add size info
+                            'romm_data': romm_data,  # Add romm_data for total size display
                             'collection': collection.get('name')
                         }
                         all_collection_games.append(game)
