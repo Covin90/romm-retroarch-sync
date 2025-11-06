@@ -3455,30 +3455,49 @@ class EnhancedLibrarySection:
             update_icon_and_name()
 
     def bind_status_cell(self, factory, list_item):
-        """Show percentage during downloads, normal status otherwise"""
+        """Show percentage during downloads, Cairo icons otherwise"""
         tree_item = list_item.get_item()
         item = tree_item.get_item()
-        label = list_item.get_child()
-        
+        box = list_item.get_child()
+
+        # Get the drawing area and label from the box
+        drawing_area = box.get_first_child()
+        label = drawing_area.get_next_sibling()
+
         if isinstance(item, PlatformItem):
+            # For platforms, show text status
+            drawing_area.set_visible(False)
+            label.set_visible(True)
             item.bind_property('status-text', label, 'label', GObject.BindingFlags.SYNC_CREATE)
         elif isinstance(item, GameItem):
             # Connect to name property changes to update status
             def update_status(*args):
                 rom_id = item.game_data.get('rom_id')
                 progress_info = self.parent.download_progress.get(rom_id) if rom_id else None
-                
+
                 if progress_info and progress_info.get('downloading'):
+                    # Show percentage as text
+                    drawing_area.set_visible(False)
+                    label.set_visible(True)
                     progress = progress_info.get('progress', 0.0)
                     label.set_text(f"{progress*100:.0f}%")
                 elif progress_info and progress_info.get('completed'):
-                    label.set_text("✅")
+                    # Show green checkmark icon
+                    label.set_visible(False)
+                    drawing_area.set_visible(True)
+                    self.parent.draw_download_status_icon(drawing_area, 'completed')
                 elif progress_info and progress_info.get('failed'):
-                    label.set_text("❌")
+                    # Show red X icon
+                    label.set_visible(False)
+                    drawing_area.set_visible(True)
+                    self.parent.draw_download_status_icon(drawing_area, 'failed')
                 else:
-                    status = "✅" if item.is_downloaded else "⬇️"
-                    label.set_text(status)
-            
+                    # Show download status icon
+                    label.set_visible(False)
+                    drawing_area.set_visible(True)
+                    status_type = 'downloaded' if item.is_downloaded else 'not_downloaded'
+                    self.parent.draw_download_status_icon(drawing_area, status_type)
+
             item.connect('notify::name', update_status)
             update_status()  # Initial update
 
@@ -3528,11 +3547,27 @@ class EnhancedLibrarySection:
             update_size()  # Initial update
 
     def setup_status_cell(self, factory, list_item):
-        """Simple status label - no progress bar needed"""
+        """Cairo-drawn status icons for download status"""
+        # Create a box to hold either a drawing area or label (for percentage)
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        box.set_halign(Gtk.Align.CENTER)
+        box.set_valign(Gtk.Align.CENTER)
+
+        # Create drawing area for icons
+        drawing_area = Gtk.DrawingArea()
+        drawing_area.set_size_request(16, 16)
+        drawing_area.set_halign(Gtk.Align.CENTER)
+        drawing_area.set_valign(Gtk.Align.CENTER)
+        box.append(drawing_area)
+
+        # Create label for percentage text (hidden by default)
         label = Gtk.Label()
         label.set_halign(Gtk.Align.CENTER)
         label.add_css_class('numeric')
-        list_item.set_child(label)
+        label.set_visible(False)
+        box.append(label)
+
+        list_item.set_child(box)
 
 
     def setup_size_cell(self, factory, list_item):
@@ -7909,6 +7944,67 @@ class SyncWindow(Gtk.ApplicationWindow):
             radius = min(width, height) / 2.0
             cr.arc(width / 2.0, height / 2.0, radius - 1, 0, 2 * 3.14159)
             cr.fill()
+
+        drawing_area.set_draw_func(draw_func)
+        drawing_area.queue_draw()
+
+    def draw_download_status_icon(self, drawing_area, status_type):
+        """Draw a download status icon using Cairo
+
+        Args:
+            drawing_area: The Gtk.DrawingArea to draw on
+            status_type: 'downloaded' (green checkmark), 'not_downloaded' (blue down arrow),
+                        'completed' (green checkmark), 'failed' (red X)
+        """
+        def draw_func(area, cr, width, height):
+            center_x = width / 2.0
+            center_y = height / 2.0
+
+            if status_type in ['downloaded', 'completed']:
+                # Green checkmark
+                cr.set_source_rgb(0.29, 0.86, 0.50)  # Green #4ade80
+                cr.set_line_width(2.0)
+                cr.set_line_cap(1)  # Round caps
+                cr.set_line_join(1)  # Round joins
+
+                # Draw checkmark path
+                cr.move_to(center_x - 4, center_y)
+                cr.line_to(center_x - 1, center_y + 3)
+                cr.line_to(center_x + 4, center_y - 3)
+                cr.stroke()
+
+            elif status_type == 'not_downloaded':
+                # Blue down arrow
+                cr.set_source_rgb(0.37, 0.51, 0.98)  # Blue #5e82fa
+                cr.set_line_width(2.0)
+                cr.set_line_cap(1)  # Round caps
+                cr.set_line_join(1)  # Round joins
+
+                # Draw arrow shaft
+                cr.move_to(center_x, center_y - 4)
+                cr.line_to(center_x, center_y + 3)
+                cr.stroke()
+
+                # Draw arrow head
+                cr.move_to(center_x - 3, center_y)
+                cr.line_to(center_x, center_y + 3)
+                cr.line_to(center_x + 3, center_y)
+                cr.stroke()
+
+            elif status_type == 'failed':
+                # Red X
+                cr.set_source_rgb(0.97, 0.44, 0.44)  # Red #f87171
+                cr.set_line_width(2.0)
+                cr.set_line_cap(1)  # Round caps
+
+                # Draw X
+                cr.move_to(center_x - 4, center_y - 4)
+                cr.line_to(center_x + 4, center_y + 4)
+                cr.stroke()
+
+                cr.move_to(center_x + 4, center_y - 4)
+                cr.line_to(center_x - 4, center_y + 4)
+                cr.stroke()
 
         drawing_area.set_draw_func(draw_func)
         drawing_area.queue_draw()
