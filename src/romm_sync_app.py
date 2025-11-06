@@ -4132,9 +4132,7 @@ class EnhancedLibrarySection:
             )
 
         # Show confirmation dialog
-        dialog = Adw.MessageDialog.new(self.parent)
-        dialog.set_heading(f"Delete Collection: {collection_name}?")
-        dialog.set_body(message_body)
+        dialog = Adw.AlertDialog.new(f"Delete Collection: {collection_name}?", message_body)
         dialog.add_response("cancel", "Cancel")
         dialog.add_response("delete", f"Delete {delete_count} Game(s)")
         dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
@@ -5381,7 +5379,6 @@ class RomMClient:
             for field in possible_filename_fields:
                 if field in rom_details and rom_details[field]:
                     filename = rom_details[field]
-                    print(f"Found filename in field '{field}': {filename}")
                     break
             
             if not filename:
@@ -5401,12 +5398,6 @@ class RomMClient:
                     rom_details.get('fs_extension', '') == '' or \
                     len(rom_details.get('files', [])) > 1
 
-            print(f"DEBUG: filename = '{filename}'")
-            print(f"DEBUG: rom_details.get('multi') = {rom_details.get('multi')}")
-            print(f"DEBUG: rom_details.get('fs_extension') = '{rom_details.get('fs_extension')}'")
-            print(f"DEBUG: files count = {len(rom_details.get('files', []))}")
-            print(f"DEBUG: is_folder = {is_folder}")
-
             if is_folder:
                 folder_name = rom_details.get('fs_name', filename)
                 download_path = download_path.parent / folder_name
@@ -5414,18 +5405,13 @@ class RomMClient:
 
             # Use same API endpoint for both files and folders
             api_endpoint = f'/api/roms/{rom_id}/content/{filename}'
-            print(f"DEBUG: Using API endpoint: {api_endpoint}")
-            
+
             response = self.session.get(
                 urljoin(self.base_url, api_endpoint),
                 stream=True,
                 timeout=30
             )
-            
-            print(f"API Response: {response.status_code}")
-            print(f"Content-Type: {response.headers.get('content-type', 'unknown')}")
-            print(f"Content-Length: {response.headers.get('content-length', 'Not provided')}")
-            
+
             if response.status_code != 200:
                 return False, f"API download failed: HTTP {response.status_code}"
             
@@ -5438,8 +5424,7 @@ class RomMClient:
             
             # Get total file size from headers
             total_size = int(response.headers.get('content-length', 0))
-            print(f"File size from header: {total_size} bytes")
-            
+
             # For folders, use ROM metadata size for progress tracking
             if is_folder:
                 metadata_size = rom_details.get('fs_size_bytes', 0)
@@ -5469,8 +5454,6 @@ class RomMClient:
                 
                 with zipfile.ZipFile(io.BytesIO(content)) as zip_ref:
                     zip_ref.extractall(download_path)
-                    
-                print(f"Extracted folder to {download_path}")
             else:
                 with open(download_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
@@ -5523,10 +5506,7 @@ class RomMClient:
                         with zipfile.ZipFile(download_path, 'r') as zip_ref:
                             zip_ref.extractall(extract_dir)
                         download_path.unlink()
-                        print(f"Extracted directory-based game to {extract_dir}")
-            
-            print(f"Successfully downloaded {actual_downloaded} bytes to {download_path}")
-            
+
             # Verify the download
             if actual_downloaded == 0:
                 return False, "Downloaded file is empty"
@@ -5684,7 +5664,6 @@ class RomMClient:
                                 print(f"Could not inspect file content: {e}")
                         
                         if file_size > 0:
-                            print(f"Successfully downloaded {filename} ({file_size} bytes)")
                             return True
                         else:
                             print(f"Downloaded file is empty")
@@ -10333,9 +10312,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             if response == "delete":
                 self.delete_game_file(selected_game)
         
-        dialog = Adw.MessageDialog.new(self)
-        dialog.set_heading("Delete Game?")
-        dialog.set_body(f"Are you sure you want to delete '{selected_game['name']}'? This will permanently remove the ROM file from your computer.")
+        dialog = Adw.AlertDialog.new("Delete Game?", f"Are you sure you want to delete '{selected_game['name']}'? This will permanently remove the ROM file from your computer.")
         dialog.add_response("cancel", "Cancel")
         dialog.add_response("delete", "Delete")
         dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
@@ -10487,7 +10464,7 @@ class SyncWindow(Gtk.ApplicationWindow):
         def on_game_complete(game):
             """Called when a game download completes - track per collection"""
             collection_name = game.get('_sync_collection')
-            if collection_name and collection_name in self._collection_downloads:
+            if collection_name and hasattr(self, '_collection_downloads') and collection_name in self._collection_downloads:
                 with download_lock:
                     self._collection_downloads[collection_name]['remaining'] -= 1
                     self._collection_downloads[collection_name]['downloaded'] += 1
@@ -10550,9 +10527,7 @@ class SyncWindow(Gtk.ApplicationWindow):
         if hasattr(self, 'library_section'):
             self.library_section._block_selection_updates(True)
 
-        dialog = Adw.MessageDialog.new(self)
-        dialog.set_heading(f"Delete {count} Games?")
-        dialog.set_body(f"Are you sure you want to delete {count} selected games?")
+        dialog = Adw.AlertDialog.new(f"Delete {count} Games?", f"Are you sure you want to delete {count} selected games?")
         dialog.add_response("cancel", "Cancel")
         dialog.add_response("delete", "Delete Selected")
         dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
@@ -12716,9 +12691,7 @@ class AutoSyncManager:
                     download_choice = [False]  # Use list to modify from nested function
                     
                     def ask_user():
-                        dialog = Adw.MessageDialog.new(self.parent_window)
-                        dialog.set_heading(f"{file_type.title()} Conflict Detected")
-                        dialog.set_body(f"Local {file_type}: {local_str}\nServer {file_type}: {server_str}\n\nWhich version do you want to keep?")
+                        dialog = Adw.AlertDialog.new(f"{file_type.title()} Conflict Detected", f"Local {file_type}: {local_str}\nServer {file_type}: {server_str}\n\nWhich version do you want to keep?")
                         dialog.add_response("local", "Keep Local")
                         dialog.add_response("server", "Download Server")
                         dialog.set_default_response("local")
