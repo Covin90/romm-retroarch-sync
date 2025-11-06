@@ -717,6 +717,20 @@ class EnhancedLibrarySection:
         self.collections_cache_time = 0
         self.collections_cache_duration = 300
         self.view_mode_generation = 0  # Track view mode switches to prevent race conditions
+        # Store selections for each view mode
+        self.platform_view_selection = set()  # Store platform view row selections
+        self.collection_view_selection = set()  # Store collection view row selections
+        # Store checkbox and game selections for each view mode
+        self.platform_view_checkboxes = set()
+        self.platform_view_rom_ids = set()
+        self.platform_view_game_keys = set()
+        self.platform_view_selected_game = None
+        self.platform_view_expanded = set()  # Store expanded platform names
+        self.collection_view_checkboxes = set()
+        self.collection_view_rom_ids = set()
+        self.collection_view_game_keys = set()
+        self.collection_view_selected_game = None
+        self.collection_view_expanded = set()  # Store expanded collection names
         # Collection auto-sync attributes
         self.selected_collections_for_sync = set()  # UI selection state
         self.actively_syncing_collections = set()   # Auto-sync enabled state (persistent)
@@ -2868,8 +2882,91 @@ class EnhancedLibrarySection:
         box.append(label)
         list_item.set_child(box)
 
+    def save_current_selection(self):
+        """Save current row selections, checkbox states, and expanded states based on view mode"""
+        selection_model = self.column_view.get_model()
+        if not selection_model:
+            return
+
+        selected_indices = set()
+        expanded_items = set()
+
+        # Save both selections and expanded states
+        for i in range(selection_model.get_n_items()):
+            tree_item = selection_model.get_item(i)
+            if tree_item:
+                # Save selection
+                if selection_model.is_selected(i):
+                    selected_indices.add(i)
+                # Save expanded state for top-level items (platforms/collections)
+                if tree_item.get_depth() == 0 and tree_item.get_expanded():
+                    item = tree_item.get_item()
+                    if isinstance(item, PlatformItem):
+                        expanded_items.add(item.platform_name)
+
+        if self.current_view_mode == 'platform':
+            self.platform_view_selection = selected_indices
+            self.platform_view_checkboxes = self.selected_checkboxes.copy()
+            self.platform_view_rom_ids = self.selected_rom_ids.copy()
+            self.platform_view_game_keys = self.selected_game_keys.copy()
+            self.platform_view_selected_game = self.selected_game
+            self.platform_view_expanded = expanded_items
+        else:
+            self.collection_view_selection = selected_indices
+            self.collection_view_checkboxes = self.selected_checkboxes.copy()
+            self.collection_view_rom_ids = self.selected_rom_ids.copy()
+            self.collection_view_game_keys = self.selected_game_keys.copy()
+            self.collection_view_selected_game = self.selected_game
+            self.collection_view_expanded = expanded_items
+
+    def restore_saved_selection(self):
+        """Restore saved row selections, checkbox states, and expanded states based on view mode"""
+        selection_model = self.column_view.get_model()
+        if not selection_model:
+            return
+
+        if self.current_view_mode == 'platform':
+            saved_selection = self.platform_view_selection
+            saved_expanded = self.platform_view_expanded
+            self.selected_checkboxes = self.platform_view_checkboxes.copy()
+            self.selected_rom_ids = self.platform_view_rom_ids.copy()
+            self.selected_game_keys = self.platform_view_game_keys.copy()
+            self.selected_game = self.platform_view_selected_game
+        else:
+            saved_selection = self.collection_view_selection
+            saved_expanded = self.collection_view_expanded
+            self.selected_checkboxes = self.collection_view_checkboxes.copy()
+            self.selected_rom_ids = self.collection_view_rom_ids.copy()
+            self.selected_game_keys = self.collection_view_game_keys.copy()
+            self.selected_game = self.collection_view_selected_game
+
+        # Restore expanded state for platforms/collections ONLY if they were expanded before
+        if saved_expanded:
+            n_items = selection_model.get_n_items()
+            for i in range(n_items):
+                tree_item = selection_model.get_item(i)
+                if tree_item and tree_item.get_depth() == 0:
+                    item = tree_item.get_item()
+                    if isinstance(item, PlatformItem):
+                        if item.platform_name in saved_expanded:
+                            tree_item.set_expanded(True)
+
+        # Restore row selection for saved indices
+        if saved_selection:
+            n_items = selection_model.get_n_items()
+            for index in saved_selection:
+                if index < n_items:
+                    selection_model.select_item(index, False)  # False = don't unselect others
+
+        # Update UI to reflect restored selections
+        self.update_selection_label()
+        self.update_action_buttons()
+
     def on_view_mode_toggled(self, toggle_button):
         """Switch between platform and collection view"""
+        # Save current selection before switching
+        self.save_current_selection()
+
         # Increment generation counter to invalidate any pending background loads
         self.view_mode_generation += 1
 
@@ -2880,6 +2977,19 @@ class EnhancedLibrarySection:
 
             # IMMEDIATELY clear the tree to remove platform view data
             self.library_model.root_store.remove_all()
+
+            # Clear all selections when switching views
+            selection_model = self.column_view.get_model()
+            if selection_model:
+                selection_model.unselect_all()
+            self.selected_checkboxes.clear()
+            self.selected_rom_ids.clear()
+            self.selected_game_keys.clear()
+            self.selected_game = None
+            self.selected_collection = None
+            # Update UI immediately to reflect cleared selections
+            self.update_selection_label()
+            self.update_action_buttons()
 
             # Force GTK to render the empty tree NOW
             context = GLib.MainContext.default()
@@ -2893,6 +3003,16 @@ class EnhancedLibrarySection:
                 self.sync_status_column.set_visible(True)
 
             self.load_collections_view()
+
+            # Restore saved selection and refresh checkboxes after the view is loaded
+            def restore_and_refresh():
+                self.restore_saved_selection()
+                # Force checkbox sync after data is loaded and expanded
+                GLib.timeout_add(100, self.force_checkbox_sync)
+                GLib.timeout_add(200, self.force_checkbox_sync)
+                GLib.timeout_add(300, self.force_checkbox_sync)
+                return False
+            GLib.idle_add(restore_and_refresh)
         else:
             # Platform view
             toggle_button.set_label("Collections")
@@ -2904,8 +3024,31 @@ class EnhancedLibrarySection:
             if hasattr(self, 'sync_status_column'):
                 self.sync_status_column.set_visible(False)
 
+            # Clear all selections when switching views
+            selection_model = self.column_view.get_model()
+            if selection_model:
+                selection_model.unselect_all()
+            self.selected_checkboxes.clear()
+            self.selected_rom_ids.clear()
+            self.selected_game_keys.clear()
+            self.selected_game = None
+            self.selected_collection = None
+            # Update UI immediately to reflect cleared selections
+            self.update_selection_label()
+            self.update_action_buttons()
+
             original_games = self.parent.available_games.copy()
             self.library_model.update_library(original_games, group_by='platform')
+
+            # Restore saved selection and refresh checkboxes after the view is loaded
+            def restore_and_refresh():
+                self.restore_saved_selection()
+                # Force checkbox sync after data is loaded and expanded
+                GLib.timeout_add(100, self.force_checkbox_sync)
+                GLib.timeout_add(200, self.force_checkbox_sync)
+                GLib.timeout_add(300, self.force_checkbox_sync)
+                return False
+            GLib.idle_add(restore_and_refresh)
 
     def load_collections_view(self):
         """Load and display custom collections only"""
@@ -3969,7 +4112,21 @@ class EnhancedLibrarySection:
         dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
 
         def on_response(dialog, response):
-            if response == "delete":
+            if response == "cancel":
+                # User cancelled - clear selection to avoid stale state
+                self.selected_collection = None
+                # Clear the row selection
+                def clear_selection():
+                    try:
+                        selection_model = self.column_view.get_model()
+                        if selection_model:
+                            selection_model.unselect_all()
+                        self.update_action_buttons()
+                    except:
+                        pass
+                    return False
+                GLib.idle_add(clear_selection)
+            elif response == "delete":
                 # Disable autosync for this collection first
                 if collection_name in self.actively_syncing_collections:
                     self.actively_syncing_collections.discard(collection_name)
@@ -4002,8 +4159,22 @@ class EnhancedLibrarySection:
                 else:
                     self.parent.log_message(f"All games in '{collection_name}' are protected by other autosync collections")
 
-                # Clear the selected collection
+                # Clear the selected collection and row selection
                 self.selected_collection = None
+
+                # Clear the row selection to prevent lingering UI state
+                def clear_selection():
+                    try:
+                        selection_model = self.column_view.get_model()
+                        if selection_model:
+                            selection_model.unselect_all()
+                        # Also update button states
+                        self.update_action_buttons()
+                    except:
+                        pass
+                    return False
+
+                GLib.idle_add(clear_selection)
 
         dialog.connect('response', on_response)
         dialog.present()
@@ -4555,10 +4726,36 @@ class EnhancedLibrarySection:
         """Force all visible checkboxes to match current selection state"""
         def sync_checkboxes(widget):
             if isinstance(widget, Gtk.CheckButton):
-                if hasattr(widget, 'game_item') and hasattr(widget, 'is_platform'):
-                    if not widget.is_platform:  # Game checkbox
+                if hasattr(widget, 'is_platform'):
+                    if widget.is_platform:  # Platform checkbox
+                        # Check if all games in this platform are selected
+                        if hasattr(widget, 'platform_item'):
+                            platform_item = widget.platform_item
+                            games = platform_item.games
+                            total_games = len(games)
+                            selected_games = 0
+
+                            for game in games:
+                                identifier_type, identifier_value = self.get_game_identifier(game)
+                                if identifier_type == 'rom_id' and identifier_value in self.selected_rom_ids:
+                                    selected_games += 1
+                                elif identifier_type == 'game_key' and identifier_value in self.selected_game_keys:
+                                    selected_games += 1
+
+                            widget._updating = True
+                            if selected_games == total_games and total_games > 0:
+                                widget.set_active(True)
+                                widget.set_inconsistent(False)
+                            elif selected_games > 0:
+                                widget.set_active(False)
+                                widget.set_inconsistent(True)
+                            else:
+                                widget.set_active(False)
+                                widget.set_inconsistent(False)
+                            widget._updating = False
+                    elif hasattr(widget, 'game_item'):  # Game checkbox
                         game_data = widget.game_item.game_data
-                        
+
                         should_be_active = False
                         if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
                             # Collections view: use collection-aware identifier
@@ -4574,19 +4771,19 @@ class EnhancedLibrarySection:
                                 should_be_active = True
                             elif identifier_type == 'game_key' and identifier_value in self.selected_game_keys:
                                 should_be_active = True
-                        
+
                         if widget.get_active() != should_be_active:
                             widget._updating = True
                             widget.set_active(should_be_active)
                             widget._updating = False
-            
+
             # Continue walking
             if hasattr(widget, 'get_first_child'):
                 child = widget.get_first_child()
                 while child:
                     sync_checkboxes(child)
                     child = child.get_next_sibling()
-        
+
         sync_checkboxes(self.column_view)
 
     def _find_checkbox_for_tree_item(self, target_tree_item):
