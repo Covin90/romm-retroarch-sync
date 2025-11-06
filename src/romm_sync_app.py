@@ -702,6 +702,7 @@ class EnhancedLibrarySection:
         self.parent = parent_window
         self.library_model = LibraryTreeModel()
         self.selected_game = None
+        self.selected_collection = None  # Track selected collection for deletion
         self.selected_checkboxes = set()  # Keep this for compatibility
         self.selected_rom_ids = set()     # Add this new tracking
         self.selected_game_keys = set()   # Add this for non-ROM ID games
@@ -3531,13 +3532,29 @@ class EnhancedLibrarySection:
         if len(selected_positions) == 1:
             tree_item = selection_model.get_item(selected_positions[0])
             item = tree_item.get_item()
-            
+
             if isinstance(item, PlatformItem):
-                # Platform selected
-                self.action_button.set_sensitive(False)
-                self.delete_button.set_sensitive(False)
-                self.open_in_romm_button.set_sensitive(is_connected)
-                return
+                # Check if this is a collection (not a platform)
+                is_collection_view = hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection'
+
+                if is_collection_view:
+                    # Collection selected - enable delete button
+                    collection_name = item.platform_name
+                    has_downloaded_games = any(g.get('is_downloaded', False) for g in item.games)
+                    self.action_button.set_sensitive(False)
+                    self.delete_button.set_sensitive(has_downloaded_games)
+                    self.delete_button.set_tooltip_text(f"Delete downloaded games from '{collection_name}'")
+                    self.open_in_romm_button.set_sensitive(is_connected)
+                    # Store the selected collection for delete handler
+                    self.selected_collection = collection_name
+                    return
+                else:
+                    # Platform selected - disable delete
+                    self.action_button.set_sensitive(False)
+                    self.delete_button.set_sensitive(False)
+                    self.open_in_romm_button.set_sensitive(is_connected)
+                    self.selected_collection = None
+                    return
         
         # No selections - disable all buttons
         self.action_button.set_sensitive(False)
@@ -3578,6 +3595,7 @@ class EnhancedLibrarySection:
             
             if isinstance(item, GameItem):
                 self.selected_game = item.game_data
+                self.selected_collection = None  # Clear collection selection
                 # Clear checkbox selections without full refresh
                 if self.selected_checkboxes or self.selected_rom_ids or self.selected_game_keys:
                     self.selected_checkboxes.clear()
@@ -3587,11 +3605,13 @@ class EnhancedLibrarySection:
                     GLib.idle_add(self.refresh_all_platform_checkboxes)
             elif isinstance(item, PlatformItem):
                 self.selected_game = None
+                # Note: selected_collection is set in update_action_buttons for collection rows
             # Update button states for both game and platform selections
             self.update_action_buttons()
         else:
             # Multiple or no row selection
             self.selected_game = None
+            self.selected_collection = None  # Clear collection selection
             # Update button states
             self.update_action_buttons()
         
@@ -3812,9 +3832,15 @@ class EnhancedLibrarySection:
                 GLib.timeout_add(500, self.clear_checkbox_selection)  # Small delay for UI feedback
 
     def on_delete_clicked(self, button):
-        """Handle delete button for single or multiple items"""
+        """Handle delete button for single or multiple items, including collections"""
+        # Check if a collection row is selected (not individual games)
+        if hasattr(self, 'selected_collection') and self.selected_collection:
+            # Collection deletion
+            self.delete_collection(self.selected_collection)
+            return
+
         selected_games = []
-        
+
         # Priority 1: If there's a row selection (single game clicked), use that exclusively
         if self.selected_game:
             selected_games = [self.selected_game]
@@ -3824,7 +3850,7 @@ class EnhancedLibrarySection:
                 games_to_check = getattr(self, 'collections_games', [])
             else:
                 games_to_check = self.parent.available_games
-            
+
             for game in games_to_check:  # CHANGED: was self.parent.available_games
                 # Handle collection mode differently
                 if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
@@ -3841,12 +3867,12 @@ class EnhancedLibrarySection:
                         selected_games.append(game)
                     elif identifier_type == 'game_key' and identifier_value in self.selected_game_keys:
                         selected_games.append(game)
-        
+
         downloaded_games = [g for g in selected_games if g.get('is_downloaded', False)]
-        
+
         if not downloaded_games:
             return
-        
+
         if len(downloaded_games) == 1:
             # Single deletion - use existing logic
             if hasattr(self.parent, 'delete_game_file'):
@@ -3859,6 +3885,128 @@ class EnhancedLibrarySection:
         # Clear checkbox selections after operation
         if len(downloaded_games) > 1:  # Only clear for multi-selection operations
             GLib.timeout_add(500, self.clear_checkbox_selection)  # Small delay for UI feedback
+
+    def delete_collection(self, collection_name):
+        """Delete downloaded games from a collection with safety checks"""
+        # Get all games in this collection
+        collection_games = [g for g in self.collections_games if g.get('collection') == collection_name]
+        downloaded_games = [g for g in collection_games if g.get('is_downloaded', False)]
+
+        if not downloaded_games:
+            self.parent.log_message(f"No downloaded games in '{collection_name}' to delete")
+            return
+
+        # Determine which games can be safely deleted
+        # (only delete games that are NOT in other autosync-enabled collections)
+        games_to_delete = []
+        games_protected = []
+
+        for game in downloaded_games:
+            rom_id = game.get('rom_id')
+            if not rom_id:
+                # No ROM ID, can't check other collections, so include for deletion
+                games_to_delete.append(game)
+                continue
+
+            # Check if this game exists in other autosync collections
+            found_in_other_autosync = False
+            for other_collection_game in self.collections_games:
+                other_collection = other_collection_game.get('collection', '')
+                # Skip if it's the same collection we're deleting from
+                if other_collection == collection_name:
+                    continue
+                # Check if this is the same game and the other collection has autosync
+                if other_collection_game.get('rom_id') == rom_id:
+                    if other_collection in self.actively_syncing_collections:
+                        found_in_other_autosync = True
+                        games_protected.append((game, other_collection))
+                        break
+
+            if not found_in_other_autosync:
+                games_to_delete.append(game)
+
+        # Build confirmation message
+        total_count = len(downloaded_games)
+        delete_count = len(games_to_delete)
+        protected_count = len(games_protected)
+
+        # Prepare dialog message
+        if protected_count > 0:
+            # Some games are protected
+            protected_list = []
+            # Group by collection for cleaner message
+            protected_by_collection = {}
+            for game, other_coll in games_protected:
+                if other_coll not in protected_by_collection:
+                    protected_by_collection[other_coll] = []
+                protected_by_collection[other_coll].append(game.get('name', 'Unknown'))
+
+            protected_details = "\n".join(
+                f"  • {coll}: {len(games)} game(s)"
+                for coll, games in protected_by_collection.items()
+            )
+
+            message_body = (
+                f"Found {total_count} downloaded game(s) in '{collection_name}':\n\n"
+                f"  • {delete_count} will be deleted\n"
+                f"  • {protected_count} will be kept (in other autosync collections)\n\n"
+                f"Protected games are in:\n{protected_details}\n\n"
+                f"Auto-sync for '{collection_name}' will be disabled."
+            )
+        else:
+            # All games will be deleted
+            message_body = (
+                f"This will delete all {delete_count} downloaded game(s) from '{collection_name}'.\n\n"
+                f"Auto-sync for this collection will be disabled."
+            )
+
+        # Show confirmation dialog
+        dialog = Adw.MessageDialog.new(self.parent)
+        dialog.set_heading(f"Delete Collection: {collection_name}?")
+        dialog.set_body(message_body)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("delete", f"Delete {delete_count} Game(s)")
+        dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
+
+        def on_response(dialog, response):
+            if response == "delete":
+                # Disable autosync for this collection first
+                if collection_name in self.actively_syncing_collections:
+                    self.actively_syncing_collections.discard(collection_name)
+                    self.selected_collections_for_sync.discard(collection_name)
+
+                    # Stop global sync if no collections left
+                    if not self.actively_syncing_collections:
+                        self.stop_collection_auto_sync()
+
+                    # Save the updated settings
+                    self.save_selected_collections()
+                    self.parent.log_message(f"🔄 Auto-sync disabled for '{collection_name}'")
+
+                # Delete the games
+                if games_to_delete:
+                    self.parent.log_message(f"🗑️ Deleting {len(games_to_delete)} game(s) from '{collection_name}'...")
+                    for game in games_to_delete:
+                        self.parent.delete_game_file(game, is_bulk_operation=True)
+
+                    # Refresh the collections view after deletion
+                    GLib.timeout_add(1000, lambda: self.load_collections_view() or False)
+
+                    if protected_count > 0:
+                        self.parent.log_message(
+                            f"✅ Deleted {delete_count} game(s), kept {protected_count} game(s) "
+                            f"(protected by other autosync collections)"
+                        )
+                    else:
+                        self.parent.log_message(f"✅ Deleted {delete_count} game(s) from '{collection_name}'")
+                else:
+                    self.parent.log_message(f"All games in '{collection_name}' are protected by other autosync collections")
+
+                # Clear the selected collection
+                self.selected_collection = None
+
+        dialog.connect('response', on_response)
+        dialog.present()
 
     def update_single_game(self, updated_game_data, skip_platform_update=False):
         """Update a single game in the tree without rebuilding - preserves expansion state"""
