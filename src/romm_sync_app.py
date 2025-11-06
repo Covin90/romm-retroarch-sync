@@ -777,16 +777,20 @@ class EnhancedLibrarySection:
                         collection_roms = self.parent.romm_client.get_collection_roms(collection.get('id'))
                         all_synced_rom_ids.update(rom.get('id') for rom in collection_roms if rom.get('id'))
                 
-                # Check local games
+                # Check local games - ONLY check games that were previously in synced collections
+                # Don't touch games downloaded outside of collection sync!
                 removed_count = 0
                 for game in self.parent.available_games:
-                    if (game.get('is_downloaded') and 
-                        game.get('rom_id') not in all_synced_rom_ids and
-                        game.get('rom_id')):
-                        
-                        # This game is no longer in any synced collection
-                        GLib.idle_add(lambda g=game: self.parent.delete_game_file(g, is_bulk_operation=True))
-                        removed_count += 1
+                    if (game.get('is_downloaded') and
+                        game.get('rom_id') and
+                        game.get('rom_id') not in all_synced_rom_ids):
+
+                        # Check if this game was actually part of a synced collection before
+                        # by checking if it has collection metadata
+                        if game.get('collection'):
+                            # This game WAS in a synced collection but is no longer
+                            GLib.idle_add(lambda g=game: self.parent.delete_game_file(g, is_bulk_operation=True))
+                            removed_count += 1
                 
                 if removed_count > 0:
                     GLib.idle_add(lambda count=removed_count: 
@@ -2075,8 +2079,36 @@ class EnhancedLibrarySection:
                         cache_age = time.time() - games_cache_file.stat().st_mtime
                         if cache_age < 3600:  # 1 hour
                             with open(games_cache_file, 'r') as f:
-                                self.collections_games = json.load(f)
+                                cached_games = json.load(f)
+
+                            # Update download status by checking filesystem
+                            download_dir = Path(self.parent.rom_dir_row.get_text())
+                            downloaded_count = 0
+                            print(f"🔍 Checking downloads in: {download_dir}")
+                            for game in cached_games:
+                                # Use platform_slug if available, otherwise fallback to platform name
+                                platform_slug = game.get('platform_slug') or game.get('platform', 'Unknown')
+                                file_name = game.get('file_name')
+                                if file_name:
+                                    local_path = download_dir / platform_slug / file_name
+                                    is_downloaded = local_path.exists() and local_path.stat().st_size > 1024
+                                    if not is_downloaded and downloaded_count == 0:
+                                        # Debug first non-downloaded game
+                                        print(f"🔍 Checking: {local_path}")
+                                        print(f"   Exists: {local_path.exists()}, Size: {local_path.stat().st_size if local_path.exists() else 0}")
+                                    game['is_downloaded'] = is_downloaded
+                                    game['local_path'] = str(local_path) if is_downloaded else None
+                                    if is_downloaded:
+                                        downloaded_count += 1
+                                else:
+                                    game['is_downloaded'] = False
+                                    game['local_path'] = None
+
+                            print(f"📊 Updated download status: {downloaded_count}/{len(cached_games)} games downloaded")
+                            self.collections_games = cached_games
+                            self.collections_cache_time = time.time()  # Mark cache as valid
                             print(f"⚡ Loaded {len(self.collections_games)} games from cache in {time.time()-start_time:.2f}s")
+                            print(f"✅ Collections ready for instant loading (cache valid for {self.collections_cache_duration}s)")
                             return
                     except:
                         pass
@@ -2113,17 +2145,27 @@ class EnhancedLibrarySection:
                     with open(roms_cache_file, 'w') as f:
                         json.dump(self._collections_rom_cache, f)
                 
-                # Build games list
+                # Build games list with download status check
                 all_collection_games = []
+                download_dir = Path(self.parent.rom_dir_row.get_text())
+
                 for collection in custom_collections:
                     cache_key = f"{collection.get('id')}:{collection.get('name')}"
                     for rom in self._collections_rom_cache.get(cache_key, []):
+                        # Check if file is actually downloaded
+                        platform_slug = rom.get('platform_slug') or rom.get('platform_name', 'Unknown')
+                        file_name = rom.get('fs_name')
+                        local_path = download_dir / platform_slug / file_name if file_name else None
+                        is_downloaded = local_path and local_path.exists() and local_path.stat().st_size > 1024
+
                         game = {
                             'name': Path(rom.get('fs_name', 'unknown')).stem,
                             'rom_id': rom.get('id'),
                             'platform': rom.get('platform_name', 'Unknown'),
+                            'platform_slug': platform_slug,  # Store slug for future use
                             'file_name': rom.get('fs_name'),
-                            'is_downloaded': False,
+                            'is_downloaded': is_downloaded,
+                            'local_path': str(local_path) if is_downloaded else None,
                             'collection': collection.get('name')
                         }
                         all_collection_games.append(game)
@@ -2136,11 +2178,13 @@ class EnhancedLibrarySection:
                     pass
                 
                 self.collections_games = all_collection_games
+                self.collections_cache_time = time.time()  # Mark cache as valid
                 print(f"✅ Ready in {time.time()-start_time:.2f}s ({len(all_collection_games)} games)")
-                
+                print(f"✅ Collections ready for instant loading (cache valid for {self.collections_cache_duration}s)")
+
             except Exception as e:
                 print(f"Error: {e}")
-        
+
         threading.Thread(target=load_collections_optimized, daemon=True).start()
 
     def on_toggle_filter(self, button):
@@ -3091,11 +3135,13 @@ class EnhancedLibrarySection:
                 is_syncing = collection_name in self.actively_syncing_collections
                 if is_syncing:
                     # Check if all games are downloaded
-                    all_downloaded = all(game.get('is_downloaded', False) for game in games)
+                    downloaded_count = sum(1 for game in games if game.get('is_downloaded', False))
+                    total_count = len(games)
+                    all_downloaded = downloaded_count == total_count
+                    print(f"🔍 Collection '{collection_name}': {downloaded_count}/{total_count} downloaded")
                     cached_sync_status[collection_name] = 'synced' if all_downloaded else 'syncing'
                 else:
                     cached_sync_status[collection_name] = 'disabled'
-                    cached_sync_status[collection_name] = 'syncing' if is_syncing else 'disabled'
 
             self.library_model.update_library(self.collections_games, group_by='collection', sync_status_map=cached_sync_status)
             return
@@ -9166,11 +9212,8 @@ class SyncWindow(Gtk.ApplicationWindow):
                     # Move this right after authentication success, before other operations
                     def preload_collections_smart():
                         if hasattr(self, 'library_section'):
-                            # Only cache if actually needed
-                            if self.library_section.should_cache_collections_at_startup():
-                                self.library_section.cache_collections_data()
-                            else:
-                                print("⏭️ Skipping collections cache - not recently used")
+                            # Always cache collections data to ensure instant loading
+                            self.library_section.cache_collections_data()
 
                     # Call immediately, not as thread
                     GLib.timeout_add(100, lambda: (threading.Thread(target=preload_collections_smart, daemon=True).start(), False)[1])
