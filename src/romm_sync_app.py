@@ -3455,7 +3455,7 @@ class EnhancedLibrarySection:
             update_icon_and_name()
 
     def bind_status_cell(self, factory, list_item):
-        """Show percentage during downloads, Cairo icons otherwise"""
+        """Show percentage/icons using Cairo drawing"""
         tree_item = list_item.get_item()
         item = tree_item.get_item()
         box = list_item.get_child()
@@ -3475,26 +3475,22 @@ class EnhancedLibrarySection:
                 rom_id = item.game_data.get('rom_id')
                 progress_info = self.parent.download_progress.get(rom_id) if rom_id else None
 
+                # Always hide label and use drawing area for games
+                label.set_visible(False)
+                drawing_area.set_visible(True)
+
                 if progress_info and progress_info.get('downloading'):
-                    # Show percentage as text
-                    drawing_area.set_visible(False)
-                    label.set_visible(True)
+                    # Show percentage using Cairo (orange)
                     progress = progress_info.get('progress', 0.0)
-                    label.set_text(f"{progress*100:.0f}%")
+                    self.parent.draw_download_status_icon(drawing_area, 'downloading', progress)
                 elif progress_info and progress_info.get('completed'):
                     # Show green checkmark icon
-                    label.set_visible(False)
-                    drawing_area.set_visible(True)
                     self.parent.draw_download_status_icon(drawing_area, 'completed')
                 elif progress_info and progress_info.get('failed'):
                     # Show red X icon
-                    label.set_visible(False)
-                    drawing_area.set_visible(True)
                     self.parent.draw_download_status_icon(drawing_area, 'failed')
                 else:
                     # Show download status icon
-                    label.set_visible(False)
-                    drawing_area.set_visible(True)
                     status_type = 'downloaded' if item.is_downloaded else 'not_downloaded'
                     self.parent.draw_download_status_icon(drawing_area, status_type)
 
@@ -3553,9 +3549,9 @@ class EnhancedLibrarySection:
         box.set_halign(Gtk.Align.CENTER)
         box.set_valign(Gtk.Align.CENTER)
 
-        # Create drawing area for icons
+        # Create drawing area for icons and text (wider to accommodate percentage)
         drawing_area = Gtk.DrawingArea()
-        drawing_area.set_size_request(16, 16)
+        drawing_area.set_size_request(50, 16)
         drawing_area.set_halign(Gtk.Align.CENTER)
         drawing_area.set_valign(Gtk.Align.CENTER)
         box.append(drawing_area)
@@ -7948,13 +7944,14 @@ class SyncWindow(Gtk.ApplicationWindow):
         drawing_area.set_draw_func(draw_func)
         drawing_area.queue_draw()
 
-    def draw_download_status_icon(self, drawing_area, status_type):
-        """Draw a download status icon using Cairo
+    def draw_download_status_icon(self, drawing_area, status_type, progress=None):
+        """Draw a download status icon or percentage using Cairo
 
         Args:
             drawing_area: The Gtk.DrawingArea to draw on
             status_type: 'downloaded' (green checkmark), 'not_downloaded' (blue down arrow),
-                        'completed' (green checkmark), 'failed' (red X)
+                        'completed' (green checkmark), 'failed' (red X), 'downloading' (percentage)
+            progress: Progress value (0.0 to 1.0) for downloading status
         """
         def draw_func(area, cr, width, height):
             center_x = width / 2.0
@@ -8005,6 +8002,23 @@ class SyncWindow(Gtk.ApplicationWindow):
                 cr.move_to(center_x + 4, center_y - 4)
                 cr.line_to(center_x - 4, center_y + 4)
                 cr.stroke()
+
+            elif status_type == 'downloading' and progress is not None:
+                # Orange percentage text
+                cr.set_source_rgb(0.98, 0.57, 0.24)  # Orange #fb923c
+
+                # Draw percentage text
+                percentage_text = f"{progress*100:.0f}%"
+                cr.select_font_face("Sans", 0, 0)  # Normal, Non Bold
+                cr.set_font_size(15)
+
+                # Get text extents to center it
+                extents = cr.text_extents(percentage_text)
+                text_x = center_x - extents.width / 2 - extents.x_bearing
+                text_y = center_y - extents.height / 2 - extents.y_bearing
+
+                cr.move_to(text_x, text_y)
+                cr.show_text(percentage_text)
 
         drawing_area.set_draw_func(draw_func)
         drawing_area.queue_draw()
@@ -10933,8 +10947,7 @@ class SyncWindow(Gtk.ApplicationWindow):
 
     def download_game(self, game, is_bulk_operation=False):
         """Download a single game from RomM and its saves (with BIOS check)"""
-        print(f"DEBUG DOWNLOAD START: {game.get('name')} - ROM ID: {game.get('rom_id')}")
-        
+
         if not self.romm_client or not self.romm_client.authenticated:
             self.log_message("Please connect to RomM first")
             return
@@ -10978,14 +10991,12 @@ class SyncWindow(Gtk.ApplicationWindow):
         
         def download():
             try:
-                print(f"DEBUG THREAD START: Starting download thread for {game['name']}")
                 rom_name = game['name']
                 rom_id = game['rom_id']
                 platform = game['platform']
                 platform_slug = game.get('platform_slug', platform)
                 file_name = game['file_name']
-                print(f"DEBUG VARS: rom_id={rom_id}, platform={platform}, platform_slug={platform_slug}, file_name={file_name}")
-                
+
                 # Track current download for progress updates
                 self._current_download_rom_id = rom_id
                 
@@ -11014,9 +11025,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                 platform_dir = download_dir / mapped_slug
                 platform_dir.mkdir(parents=True, exist_ok=True)
                 download_path = platform_dir / file_name
-                print(f"DEBUG DOWNLOAD: platform_slug='{platform_slug}', download_path='{download_path}'")
-                print(f"DEBUG ACTUAL DOWNLOAD: Creating folder '{platform_dir}' for file '{file_name}'")
-                
+
                 # Log file size for large downloads
                 try:
                     # Try to get file size from ROM data
