@@ -6240,9 +6240,6 @@ class RetroArchInterface:
         self.port = 55355
         print(f"🔧 RetroArch network settings: {self.host}:{self.port}")
 
-        # Cache for RetroDECK detection to avoid repeated logging
-        self._is_retrodeck_cached = None
-
         # Platform to core mapping
         self.platform_core_map = {
             'Super Nintendo Entertainment System': ['snes9x', 'bsnes', 'mesen-s'],
@@ -6774,48 +6771,37 @@ class RetroArchInterface:
 
     def is_retrodeck_installation(self):
         """Enhanced RetroDECK detection using multiple methods"""
-        # Return cached result if already detected
-        if self._is_retrodeck_cached is not None:
-            return self._is_retrodeck_cached
-
         # Method 1: Check executable command
         if self.retroarch_executable and 'retrodeck' in str(self.retroarch_executable).lower():
-            self._is_retrodeck_cached = True
-            print("🔍 RetroDECK detected from executable path")
             return True
-
+        
         # Method 2: Check if RetroDECK directories exist
         retrodeck_paths = [
             Path.home() / 'retrodeck',
             Path.home() / '.var/app/net.retrodeck.retrodeck'
         ]
-
+        
         for path in retrodeck_paths:
             if path.exists():
-                self._is_retrodeck_cached = True
                 print(f"🔍 RetroDECK path found: {path}")
                 return True
-
+        
         # Method 3: Check save directories for RetroDECK structure
         for save_type, directory in self.save_dirs.items():
             if 'retrodeck' in str(directory).lower():
-                self._is_retrodeck_cached = True
                 print(f"🔍 RetroDECK detected from save path: {directory}")
                 return True
-
+        
         # Method 4: Check Flatpak list
         try:
             import subprocess
             result = subprocess.run(['flatpak', 'list'], capture_output=True, text=True, timeout=5)
             if 'net.retrodeck.retrodeck' in result.stdout:
-                self._is_retrodeck_cached = True
                 print("🔍 RetroDECK detected via Flatpak list")
                 return True
         except:
             pass
-
-        # Cache negative result too
-        self._is_retrodeck_cached = False
+        
         return False
 
     def get_core_from_platform_slug(self, platform_slug):
@@ -9565,12 +9551,7 @@ class SyncWindow(Gtk.ApplicationWindow):
         page = Adw.PreferencesPage()
         page.add(log_group)
         page.add(advanced_group)
-
-        # Suppress deprecation warning - this is still the correct API for PreferencesWindow
-        import warnings
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=DeprecationWarning)
-            dialog.add(page)
+        dialog.add(page)
         
         dialog.present()
 
