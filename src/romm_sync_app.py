@@ -590,8 +590,7 @@ class PlatformItem(GObject.Object):
             current_name = self.name
             current_status = self.status_text
             current_size = self.size_text
-            print(f"🔍 Current values: name='{current_name}', status='{current_status}', size='{current_size}'")
-            
+
             # Force a freeze/thaw cycle to trigger updates
             self.freeze_notify()
             self.thaw_notify()
@@ -891,15 +890,10 @@ class EnhancedLibrarySection:
                         elif collection_name in self.actively_syncing_collections:
                             # Check if all games are downloaded
                             all_downloaded = all(g.get('is_downloaded', False) for g in item.games)
-                            print(f"🔍 DEBUG: Collection '{collection_name}' - {len(item.games)} games, all_downloaded={all_downloaded}")
-                            if item.games:
-                                downloaded_count = sum(1 for g in item.games if g.get('is_downloaded', False))
-                                print(f"🔍 DEBUG: {downloaded_count}/{len(item.games)} games downloaded")
                             new_status = 'synced' if all_downloaded else 'disabled'  # Green if synced, grey if not
                         else:
                             new_status = 'disabled'  # Grey dot (not enabled)
 
-                        print(f"🔍 DEBUG: Setting '{collection_name}' status to: {new_status}")
                         # Update the sync_status and notify
                         item.sync_status = new_status
                         item.notify('sync-status-text')
@@ -1572,15 +1566,10 @@ class EnhancedLibrarySection:
 
     def on_collection_checkbox_changed(self, checkbox, collection_name):
         """Handle collection selection (visual state only)"""
-        print(f"🔍 COLLECTION TOGGLE: '{collection_name}' -> {checkbox.get_active()}")
-        print(f"🔍 BEFORE: Selected collections: {list(self.selected_collections_for_sync)}")
-        
         if checkbox.get_active():
             self.selected_collections_for_sync.add(collection_name)
         else:
             self.selected_collections_for_sync.discard(collection_name)
-        
-        print(f"🔍 AFTER: Selected collections: {list(self.selected_collections_for_sync)}")
         
         self.save_selected_collections()
         self.update_sync_button_state()
@@ -1693,10 +1682,7 @@ class EnhancedLibrarySection:
 
                 # Update collection labels to show sync status with a delay to ensure data is loaded
                 def update_statuses():
-                    print(f"🔍 DEBUG: Updating statuses for {len(selected_collections)} collections: {selected_collections}")
-                    print(f"🔍 DEBUG: actively_syncing_collections = {self.actively_syncing_collections}")
                     for collection_name in selected_collections:
-                        print(f"🔍 DEBUG: Calling update_collection_sync_status for '{collection_name}'")
                         self.update_collection_sync_status(collection_name)
                     return False
                 GLib.timeout_add(500, update_statuses)
@@ -1747,10 +1733,11 @@ class EnhancedLibrarySection:
             checkbox.platform_item = item
             checkbox.tree_item = tree_item
             checkbox.is_platform = True
-            
+
             # In collections view, show sync selection (no status colors)
             if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
                 # Show different visual states:
+                collection_name = item.platform_name
                 is_selected = collection_name in self.selected_collections_for_sync
                 is_syncing = is_selected and self.collection_auto_sync_enabled
 
@@ -1911,9 +1898,7 @@ class EnhancedLibrarySection:
 
             # Update collection status indicators with a delay to ensure data is loaded
             def update_new_collection_statuses():
-                print(f"🔍 DEBUG: Updating statuses for newly enabled collections: {current_selections}")
                 for collection_name in current_selections:
-                    print(f"🔍 DEBUG: Calling update_collection_sync_status for '{collection_name}'")
                     self.update_collection_sync_status(collection_name)
                 return False
             GLib.timeout_add(1000, update_new_collection_statuses)
@@ -2084,7 +2069,6 @@ class EnhancedLibrarySection:
                             # Update download status by checking filesystem
                             download_dir = Path(self.parent.rom_dir_row.get_text())
                             downloaded_count = 0
-                            print(f"🔍 Checking downloads in: {download_dir}")
                             for game in cached_games:
                                 # Use platform_slug if available, otherwise fallback to platform name
                                 platform_slug = game.get('platform_slug') or game.get('platform', 'Unknown')
@@ -2092,10 +2076,6 @@ class EnhancedLibrarySection:
                                 if file_name:
                                     local_path = download_dir / platform_slug / file_name
                                     is_downloaded = local_path.exists() and local_path.stat().st_size > 1024
-                                    if not is_downloaded and downloaded_count == 0:
-                                        # Debug first non-downloaded game
-                                        print(f"🔍 Checking: {local_path}")
-                                        print(f"   Exists: {local_path.exists()}, Size: {local_path.stat().st_size if local_path.exists() else 0}")
                                     game['is_downloaded'] = is_downloaded
                                     game['local_path'] = str(local_path) if is_downloaded else None
                                     # Update size from local file if downloaded
@@ -2348,9 +2328,6 @@ class EnhancedLibrarySection:
 
     def update_game_progress(self, rom_id, progress_info):
         """Update progress for a specific game"""
-        print(f"🔍 DEBUG: update_game_progress called for ROM {rom_id}")
-        print(f"🔍 DEBUG: Progress info: {progress_info}")
-        
         if progress_info:
             self.game_progress[rom_id] = progress_info
         elif rom_id in self.game_progress:
@@ -2361,12 +2338,10 @@ class EnhancedLibrarySection:
         
     def _update_game_status_display(self, rom_id):
         """Update game status display by directly updating cells"""
-        print(f"🔍 DEBUG: _update_game_status_display called for ROM {rom_id}")
 
         # Find and update the GameItem cells directly
         def update_cells():
             model = self.library_model.tree_model
-            print(f"🔍 DEBUG: Tree model has {model.get_n_items() if model else 0} items")
             updated_any = False
             selected_collection = None
 
@@ -2374,7 +2349,6 @@ class EnhancedLibrarySection:
             if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
                 if self.selected_game and self.selected_game.get('rom_id') == rom_id:
                     selected_collection = self.selected_game.get('collection')
-                print(f"🔍 DEBUG: Collections view, selected_collection={selected_collection}")
 
             games_found = 0
             for i in range(model.get_n_items() if model else 0):
@@ -2384,13 +2358,10 @@ class EnhancedLibrarySection:
                     if isinstance(item, GameItem):
                         games_found += 1
                         if item.game_data.get('rom_id') == rom_id:
-                            print(f"🔍 DEBUG: Found matching ROM {rom_id}, collection={item.game_data.get('collection')}")
                             # In collections view, prioritize the selected collection
                             if selected_collection and item.game_data.get('collection') != selected_collection:
-                                print(f"🔍 DEBUG: Skipping due to collection mismatch")
                                 continue
 
-                            print(f"🔍 DEBUG: Found GameItem, forcing cell update, is_downloaded={item.game_data.get('is_downloaded')}")
                             item.notify('is-downloaded')
                             item.notify('size-text')
                             item.notify('name')
@@ -2400,17 +2371,13 @@ class EnhancedLibrarySection:
                             if selected_collection:
                                 break
 
-            print(f"🔍 DEBUG: Scanned {games_found} games, updated_any={updated_any}")
-
             # If no selected collection or not found, update all instances
             if not updated_any:
-                print(f"🔍 DEBUG: Fallback loop - scanning all items again")
                 for i in range(model.get_n_items() if model else 0):
                     tree_item = model.get_item(i)
                     if tree_item and tree_item.get_depth() == 1:
                         item = tree_item.get_item()
                         if isinstance(item, GameItem) and item.game_data.get('rom_id') == rom_id:
-                            print(f"🔍 DEBUG: Fallback found GameItem, is_downloaded={item.game_data.get('is_downloaded')}")
                             item.notify('is-downloaded')
                             item.notify('size-text')
                             item.notify('name')
@@ -3163,7 +3130,6 @@ class EnhancedLibrarySection:
                     downloaded_count = sum(1 for game in games if game.get('is_downloaded', False))
                     total_count = len(games)
                     all_downloaded = downloaded_count == total_count
-                    print(f"🔍 Collection '{collection_name}': {downloaded_count}/{total_count} downloaded")
                     cached_sync_status[collection_name] = 'synced' if all_downloaded else 'syncing'
                 else:
                     cached_sync_status[collection_name] = 'disabled'
@@ -3643,16 +3609,7 @@ class EnhancedLibrarySection:
             self.open_in_romm_button.set_sensitive(is_connected and self.selected_game.get('rom_id'))
             return  # Exit early, don't check other selections
         
-        print(f"🔍 update_action_buttons: Getting selected games...")
-        selected_games = self.get_selected_games()  # This should trigger our debug
-        print(f"🔍 update_action_buttons: Got {len(selected_games)} selected games")
-        
-        # DEBUG: Show current selection state
-        print(f"🔍 DEBUG update_action_buttons called")
-        print(f"🔍 DEBUG   selected_rom_ids: {len(self.selected_rom_ids)} items")
-        print(f"🔍 DEBUG   selected_game_keys: {len(self.selected_game_keys)} items")
-        print(f"🔍 DEBUG   selected_checkboxes: {len(self.selected_checkboxes)} items")
-        print(f"🔍 DEBUG   selected_game: {self.selected_game.get('name') if self.selected_game else None}")
+        selected_games = self.get_selected_games()
         
         is_connected = self.parent.romm_client and self.parent.romm_client.authenticated
         
@@ -4488,17 +4445,13 @@ class EnhancedLibrarySection:
         if hasattr(checkbox, 'is_platform') and checkbox.is_platform:
             platform_name = checkbox.platform_item.platform_name
             platform_item = checkbox.platform_item
-            print(f"🔍 MAIN TOGGLE: Platform '{platform_name}' -> {checkbox.get_active()}")
-            
+
             # Check if this is collections view
             if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
-                print(f"🔍 Collection checkbox handling for '{platform_name}'")
-                
                 # Handle collection selection - select/unselect all games in collection
                 should_select = checkbox.get_active()
                 
                 if should_select:
-                    print(f"🔍 SELECTING all games in collection {platform_name}")
                     for game in platform_item.games:
                         rom_id = game.get('rom_id')
                         collection_name = game.get('collection', platform_name)
@@ -4506,7 +4459,6 @@ class EnhancedLibrarySection:
                             collection_key = f"collection:{rom_id}:{collection_name}"
                             self.selected_game_keys.add(collection_key)
                 else:
-                    print(f"🔍 DESELECTING all games in collection {platform_name}")
                     for game in platform_item.games:
                         rom_id = game.get('rom_id')
                         collection_name = game.get('collection', platform_name)
@@ -4623,8 +4575,6 @@ class EnhancedLibrarySection:
 
     def on_switch_toggled(self, switch, collection_name):
         """Handle switch toggle for collection auto-sync"""
-        print(f"🔍 SWITCH TOGGLE: '{collection_name}' -> {switch.get_active()}")
-
         if switch.get_active():
             # ENABLE: Add collection to sync
             self.selected_collections_for_sync.add(collection_name)
@@ -5989,7 +5939,6 @@ class RomMClient:
                                 print(f"⚠️ Timestamp mismatch: expected {timestamp}")
                             
                             # Verify the link
-                            print(f"🔍 Verifying screenshot link with matching timestamp...")
                             verification_success = self.verify_screenshot_link(save_state_id, screenshot_id, save_type)
                             if verification_success:
                                 print(f"🎉 PERFECT! Screenshot linked successfully - should appear on RomM!")
@@ -6019,9 +5968,6 @@ class RomMClient:
             return self.upload_save(rom_id, save_type, file_path)
 
     def upload_save_and_get_id(self, rom_id, save_type, file_path, emulator=None):
-        print(f"🔍 DEBUG: upload_save_and_get_id called with emulator: {emulator}")
-        print(f"🔍 DEBUG: rom_id={rom_id}, save_type={save_type}")
-        
         try:
             file_path = Path(file_path)
             
@@ -6032,15 +5978,13 @@ class RomMClient:
                 endpoint = f'/api/{save_type}?rom_id={rom_id}'
             
             upload_url = urljoin(self.base_url, endpoint)
-            print(f"🔍 DEBUG: Upload URL: {upload_url}")
-            
+
             # Use correct field names
             if save_type == 'states':
                 file_field_name = 'stateFile'
             elif save_type == 'saves':
                 file_field_name = 'saveFile'
             else:
-                print(f"🔍 DEBUG: Unknown save type: {save_type}")
                 return None, None
 
             original_basename = file_path.stem
@@ -6067,11 +6011,7 @@ class RomMClient:
             
             with open(file_path, 'rb') as f:
                 files = {file_field_name: (romm_filename, f.read(), 'application/octet-stream')}
-                
-                print(f"🔍 DEBUG: About to POST to {upload_url}")
-                print(f"🔍 DEBUG: File field: {file_field_name}")
-                print(f"🔍 DEBUG: Filename: {romm_filename}")
-                
+
                 response = self.session.post(
                     upload_url,
                     files=files,
@@ -6095,12 +6035,7 @@ class RomMClient:
                         return None, None
                     except Exception as e:
                         print(f"JSON parsing error: {e}")
-                        # ENHANCED DEBUG: Show raw response info when JSON parsing fails
-                        print(f"🔍 COMPRESSION DEBUG:")
-                        print(f"  Content-Encoding: {response.headers.get('content-encoding', 'none')}")
-                        print(f"  Content-Length: {response.headers.get('content-length', 'unknown')}")
-                        print(f"  Response encoding: {response.encoding}")
-                        
+
                         # Try alternative parsing methods
                         try:
                             # Method 1: Force decode response content
@@ -6251,7 +6186,6 @@ class RomMClient:
                                         print(f"   Screenshot data: {response_data}")
                                         
                                         # Always verify the linking worked by checking the save state
-                                        print(f"🔍 Verifying screenshot link...")
                                         verification_success = self.verify_screenshot_link(save_state_id, screenshot_id, 'states')
                                         if verification_success:
                                             print(f"✅ Screenshot link verified - should appear on RomM!")
@@ -7199,13 +7133,11 @@ class RetroArchInterface:
         
         for path in retrodeck_paths:
             if path.exists():
-                print(f"🔍 RetroDECK path found: {path}")
                 return True
-        
+
         # Method 3: Check save directories for RetroDECK structure
         for save_type, directory in self.save_dirs.items():
             if 'retrodeck' in str(directory).lower():
-                print(f"🔍 RetroDECK detected from save path: {directory}")
                 return True
         
         # Method 4: Check Flatpak list
@@ -7283,9 +7215,7 @@ class RetroArchInterface:
         
         # DEBUG: Show detection info (use print instead of self.log)
         is_retrodeck = self.is_retrodeck_installation()
-        print(f"🔍 DEBUG: RetroDECK detected: {is_retrodeck}")
-        print(f"🔍 DEBUG: Save path: {file_path}")
-        
+
         if file_path.parent.name in ['saves', 'states']:
             return {
                 'directory_name': None,
@@ -7302,13 +7232,10 @@ class RetroArchInterface:
             # Using platform slugs (RetroDECK default)
             retroarch_emulator = directory_name
             romm_emulator = self.get_core_from_platform_slug(directory_name)
-            print(f"🔍 Platform slug detected: {directory_name} → {romm_emulator}")
         else:
             # Using core names (standard RetroArch or RetroDECK with core names enabled)
             retroarch_emulator = directory_name
             romm_emulator = self.get_romm_emulator_name(directory_name)
-            if is_retrodeck:
-                print(f"🔍 RetroDECK using core names: {directory_name}")
         
         return {
             'directory_name': directory_name,
@@ -7622,14 +7549,6 @@ class RetroArchInterface:
         """Find the thumbnail file corresponding to a save state"""
         state_path = Path(state_file_path)
         
-        print(f"🔍 DEBUG: Looking for screenshot for: {state_path}")
-        print(f"🔍 DEBUG: Directory contents:")
-        try:
-            for file in state_path.parent.iterdir():
-                print(f"     {file.name}")
-        except:
-            print("     Error listing directory")
-        
         thumbnails_dir = self.find_thumbnails_directory()
         
         # RetroArch thumbnail naming patterns
@@ -7677,8 +7596,7 @@ class RetroArchInterface:
                     print(f"⚠️ Found empty thumbnail file: {thumbnail_path}")
             else:
                 # Debug: Show first few failed attempts
-                if i < 3:
-                    print(f"🔍 Thumbnail not found: {thumbnail_path}")
+                pass
         
         print(f"❌ No thumbnail found for {state_path.name}")
         return None
@@ -10960,12 +10878,8 @@ class SyncWindow(Gtk.ApplicationWindow):
                         game['local_path'] = str(download_path)
                         game['local_size'] = file_size
 
-                        print(f"🔍 DEBUG: About to call update_ui() via GLib.idle_add")
-
                         # Update UI - update both the underlying games list AND current view
                         def update_ui():
-                            print(f"🔍 DEBUG: update_ui() called for ROM {rom_id}")
-                            
                             # ALWAYS update the underlying available_games list first
                             for i, existing_game in enumerate(self.available_games):
                                 if existing_game.get('rom_id') == game.get('rom_id'):
@@ -11019,51 +10933,29 @@ class SyncWindow(Gtk.ApplicationWindow):
                             self.library_section.update_single_game(game, skip_platform_update=is_bulk_operation)
 
                         GLib.idle_add(update_ui)
-                        print(f"🔍 DEBUG: GLib.idle_add(update_ui) called")
-                                    
-                        # Find and debug the GameItem
-                        def debug_and_update():
+
+                        # Update the GameItem
+                        def update_game_item():
                             model = self.library_section.library_model.tree_model
-                            print(f"🔍 DEBUG: Searching tree model with {model.get_n_items() if model else 0} items")
-                            
-                            found_item = False
+
                             for i in range(model.get_n_items() if model else 0):
                                 tree_item = model.get_item(i)
                                 if tree_item and tree_item.get_depth() == 1:  # Game level
                                     item = tree_item.get_item()
                                     if isinstance(item, GameItem):
-                                        print(f"🔍 DEBUG: Found GameItem {item.game_data.get('name')} ROM ID: {item.game_data.get('rom_id')}")
                                         if item.game_data.get('rom_id') == rom_id:
-                                            print(f"🔍 DEBUG: MATCH! Found target GameItem at index {i}")
-                                            print(f"🔍 DEBUG: GameItem data before: is_downloaded={item.game_data.get('is_downloaded')}")
-                                            
                                             # Update data
                                             item.game_data.update(game)
-                                            print(f"🔍 DEBUG: GameItem data after: is_downloaded={item.game_data.get('is_downloaded')}")
-                                            
+
                                             # Test progress tracking
-                                            print(f"🔍 DEBUG: Testing progress tracking...")
                                             test_progress = {'progress': 0.5, 'downloading': True, 'filename': rom_name}
                                             self.library_section.update_game_progress(rom_id, test_progress)
-                                            print(f"🔍 DEBUG: Progress tracking test sent")
-                                            
-                                            found_item = True
+
                                             break
-                            
-                            if not found_item:
-                                print(f"🔍 DEBUG: GameItem NOT FOUND in tree!")
-                                print(f"🔍 DEBUG: Looking for ROM ID: {rom_id}")
-                                print(f"🔍 DEBUG: All GameItems in tree:")
-                                for i in range(model.get_n_items() if model else 0):
-                                    tree_item = model.get_item(i)
-                                    if tree_item and tree_item.get_depth() == 1:
-                                        item = tree_item.get_item()
-                                        if isinstance(item, GameItem):
-                                            print(f"  - {item.game_data.get('name')} (ROM ID: {item.game_data.get('rom_id')})")
-                            
+
                             return False
-                        
-                        GLib.idle_add(debug_and_update)
+
+                        GLib.idle_add(update_game_item)
 
                         # Bulk operation handling
                         if is_bulk_operation and hasattr(self, 'library_section'):
@@ -11257,11 +11149,9 @@ class SyncWindow(Gtk.ApplicationWindow):
                         game['is_downloaded'] = True
                         game['local_path'] = str(download_path)
                         game['local_size'] = file_size
-                        
-                        # Update UI 
+
+                        # Update UI
                         def update_ui():
-                            print(f"🔍 DEBUG: update_ui() called for ROM {rom_id}")
-                            
                             # Update master games list
                             for i, existing_game in enumerate(self.available_games):
                                 if existing_game.get('rom_id') == game.get('rom_id'):
@@ -11351,7 +11241,6 @@ class SyncWindow(Gtk.ApplicationWindow):
                                 GLib.timeout_add(1000, lambda: (clear_selections(), False)[1])
 
                         GLib.idle_add(update_ui)
-                        print(f"🔍 DEBUG: GLib.idle_add(update_ui) called")
 
                         # Bulk operation handling
                         if is_bulk_operation and hasattr(self, 'library_section'):
@@ -12905,12 +12794,10 @@ class AutoSyncManager:
                             # Use platform slug (RetroDECK default)
                             platform_slug = self.get_platform_slug_from_emulator(romm_emulator)
                             emulator_save_dir = save_base_dir / platform_slug
-                            print(f"🔍 Saves using platform slug: {platform_slug}")
                         else:
                             # Use core name (standard RetroArch)
                             retroarch_emulator_dir = self.retroarch.get_retroarch_directory_name(romm_emulator)
                             emulator_save_dir = save_base_dir / retroarch_emulator_dir
-                            print(f"🔍 Saves using core name: {retroarch_emulator_dir}")
                         
                         if emulator_save_dir:
                             emulator_save_dir.mkdir(parents=True, exist_ok=True)
@@ -12974,12 +12861,10 @@ class AutoSyncManager:
                             # Use platform slug (RetroDECK default)
                             platform_slug = self.get_platform_slug_from_emulator(romm_emulator)
                             emulator_state_dir = state_base_dir / platform_slug
-                            print(f"🔍 States using platform slug: {platform_slug}")
                         else:
                             # Use core name (standard RetroArch)
                             retroarch_emulator_dir = self.retroarch.get_retroarch_directory_name(romm_emulator)
                             emulator_state_dir = state_base_dir / retroarch_emulator_dir
-                            print(f"🔍 States using core name: {retroarch_emulator_dir}")
                         
                         if emulator_state_dir:
                             emulator_state_dir.mkdir(parents=True, exist_ok=True)
