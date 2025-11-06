@@ -2770,17 +2770,25 @@ class EnhancedLibrarySection:
         self.platform_filter.connect('notify::selected-item', self.on_platform_filter_changed)
         toolbar_box.append(self.platform_filter)
 
-        # Collection/Platform toggle
-        self.view_mode_toggle = Gtk.ToggleButton()
-        self.view_mode_toggle.set_label("Collections")
-        self.view_mode_toggle.set_tooltip_text("Switch between Platforms and Collections view")
-        # Set fixed width to accommodate both labels
-        label_widget = self.view_mode_toggle.get_child()
-        if label_widget:
-            label_widget.set_width_chars(11)  # "Collections" length
-            label_widget.set_max_width_chars(11)
-        self.view_mode_toggle.connect('toggled', self.on_view_mode_toggled)
-        toolbar_box.append(self.view_mode_toggle)
+        # Collection/Platform toggle - round toggle group
+        toggle_group_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        toggle_group_box.add_css_class('linked')
+        toggle_group_box.add_css_class('pill')
+
+        self.platforms_toggle_btn = Gtk.ToggleButton(label="Platforms")
+        self.platforms_toggle_btn.set_active(True)  # Start with Platforms view
+        self.platforms_toggle_btn.connect('toggled', self.on_platforms_toggle)
+        toggle_group_box.append(self.platforms_toggle_btn)
+
+        self.collections_toggle_btn = Gtk.ToggleButton(label="Collections")
+        self.collections_toggle_btn.set_group(self.platforms_toggle_btn)  # Link them as a group
+        self.collections_toggle_btn.connect('toggled', self.on_collections_toggle)
+        toggle_group_box.append(self.collections_toggle_btn)
+
+        toolbar_box.append(toggle_group_box)
+
+        # Store reference for backward compatibility
+        self.view_mode_toggle = self.collections_toggle_btn
         
         # View options
         view_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=3)
@@ -2998,6 +3006,115 @@ class EnhancedLibrarySection:
         self.update_selection_label()
         self.update_action_buttons()
 
+    def on_platforms_toggle(self, toggle_button):
+        """Handle Platforms button toggle"""
+        if toggle_button.get_active():
+            self.switch_to_platform_view()
+
+    def on_collections_toggle(self, toggle_button):
+        """Handle Collections button toggle"""
+        if toggle_button.get_active():
+            self.switch_to_collection_view()
+
+    def switch_to_collection_view(self):
+        """Switch to collection view"""
+        # Save current selection before switching
+        self.save_current_selection()
+
+        # Increment generation counter to invalidate any pending background loads
+        self.view_mode_generation += 1
+
+        self.current_view_mode = 'collection'
+
+        # Hide platform filter in collections view
+        if hasattr(self, 'platform_filter'):
+            self.platform_filter.set_visible(False)
+
+        # IMMEDIATELY clear the tree to remove platform view data
+        self.library_model.root_store.remove_all()
+
+        # Clear all selections when switching views
+        selection_model = self.column_view.get_model()
+        if selection_model:
+            selection_model.unselect_all()
+        self.selected_checkboxes.clear()
+        self.selected_rom_ids.clear()
+        self.selected_game_keys.clear()
+        self.selected_game = None
+        self.selected_collection = None
+        # Update UI immediately to reflect cleared selections
+        self.update_selection_label()
+        self.update_action_buttons()
+
+        # Force GTK to render the empty tree NOW
+        context = GLib.MainContext.default()
+        while context.pending():
+            context.iteration(False)
+
+        # Collection sync controls removed - using toggle switches now
+
+        # Show sync status column (only for collections)
+        if hasattr(self, 'sync_status_column'):
+            self.sync_status_column.set_visible(True)
+
+        self.load_collections_view()
+
+        # Restore saved selection and refresh checkboxes after the view is loaded
+        def restore_and_refresh():
+            self.restore_saved_selection()
+            # Force checkbox sync after data is loaded and expanded
+            GLib.timeout_add(100, self.force_checkbox_sync)
+            GLib.timeout_add(200, self.force_checkbox_sync)
+            GLib.timeout_add(300, self.force_checkbox_sync)
+            return False
+        GLib.idle_add(restore_and_refresh)
+
+    def switch_to_platform_view(self):
+        """Switch to platform view"""
+        # Save current selection before switching
+        self.save_current_selection()
+
+        # Increment generation counter to invalidate any pending background loads
+        self.view_mode_generation += 1
+
+        self.current_view_mode = 'platform'
+
+        # Show platform filter in platform view
+        if hasattr(self, 'platform_filter'):
+            self.platform_filter.set_visible(True)
+
+        # Collection sync controls removed - using toggle switches now
+
+        # Hide sync status column (not needed for platforms)
+        if hasattr(self, 'sync_status_column'):
+            self.sync_status_column.set_visible(False)
+
+        # Clear all selections when switching views
+        selection_model = self.column_view.get_model()
+        if selection_model:
+            selection_model.unselect_all()
+        self.selected_checkboxes.clear()
+        self.selected_rom_ids.clear()
+        self.selected_game_keys.clear()
+        self.selected_game = None
+        self.selected_collection = None
+        # Update UI immediately to reflect cleared selections
+        self.update_selection_label()
+        self.update_action_buttons()
+
+        original_games = self.parent.available_games.copy()
+        self.library_model.update_library(original_games, group_by='platform')
+
+        # Restore saved selection and refresh checkboxes after the view is loaded
+        def restore_and_refresh():
+            self.restore_saved_selection()
+            # Force checkbox sync after data is loaded and expanded
+            GLib.timeout_add(100, self.force_checkbox_sync)
+            GLib.timeout_add(200, self.force_checkbox_sync)
+            GLib.timeout_add(300, self.force_checkbox_sync)
+            return False
+        GLib.idle_add(restore_and_refresh)
+
     def on_view_mode_toggled(self, toggle_button):
         """Switch between platform and collection view"""
         # Save current selection before switching
@@ -3008,7 +3125,6 @@ class EnhancedLibrarySection:
 
         if toggle_button.get_active():
             # Collections view
-            toggle_button.set_label("Platforms")
             self.current_view_mode = 'collection'
 
             # IMMEDIATELY clear the tree to remove platform view data
