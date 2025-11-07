@@ -36,6 +36,11 @@ gi.require_version('Adw', '1')
 
 from gi.repository import Gtk, Adw, GLib, Gio, GObject
 
+# Custom exception for download cancellation
+class DownloadCancelledException(Exception):
+    """Raised when a download is cancelled by the user"""
+    pass
+
 class GameDataCache:
     """Cache RomM game data locally for offline use"""
     
@@ -3731,7 +3736,10 @@ class EnhancedLibrarySection:
     
     def update_action_buttons(self):
         """Update action buttons based on selected game(s) or platform"""
-        if getattr(self, '_selection_blocked', False):
+        # Allow button updates during bulk downloads to show Cancel state
+        # but still block during other dialogs
+        is_bulk_download = self.parent._bulk_download_in_progress if hasattr(self, 'parent') else False
+        if getattr(self, '_selection_blocked', False) and not is_bulk_download:
             return
         
         # ADD THIS BLOCK HERE:
@@ -3739,14 +3747,30 @@ class EnhancedLibrarySection:
         if self.selected_game:
             is_downloaded = self.selected_game.get('is_downloaded', False)
             is_connected = self.parent.romm_client and self.parent.romm_client.authenticated
+            rom_id = self.selected_game.get('rom_id')
 
-            if is_downloaded:
+            # Check if download is in progress FOR THIS SPECIFIC GAME
+            is_downloading = (rom_id and rom_id in self.parent.download_progress and
+                            self.parent.download_progress[rom_id].get('downloading', False))
+
+            # Check if this is part of a bulk download
+            is_bulk_download = self.parent._bulk_download_in_progress
+
+            # Clear all button style classes first
+            self.action_button.remove_css_class('warning')
+            self.action_button.remove_css_class('suggested-action')
+            self.action_button.remove_css_class('destructive-action')
+
+            if is_downloading:
+                # Always show "Cancel" for single row selection
+                # (bulk downloads are handled in the multiple checkbox selection case)
+                self.action_button.set_label("Cancel")
+                self.action_button.add_css_class('destructive-action')
+            elif is_downloaded:
                 self.action_button.set_label("Launch")
-                self.action_button.remove_css_class('warning')
                 self.action_button.add_css_class('suggested-action')
             else:
                 self.action_button.set_label("Download")
-                self.action_button.remove_css_class('suggested-action')
                 self.action_button.add_css_class('warning')
 
             self.action_button.set_sensitive(True)
@@ -3789,31 +3813,51 @@ class EnhancedLibrarySection:
         # Priority 2: Handle checkbox selections (takes precedence when present)
         if selected_games:
             downloaded_games = [g for g in selected_games if g.get('is_downloaded', False)]
-            not_downloaded_games = [g for g in selected_games if not g.get('is_downloaded', False)]
+            # Exclude games that are currently downloading from not_downloaded list
+            downloading_rom_ids = set(rom_id for rom_id in self.parent.download_progress.keys()
+                                     if self.parent.download_progress[rom_id].get('downloading', False))
+            not_downloaded_games = [g for g in selected_games
+                                   if not g.get('is_downloaded', False)
+                                   and g.get('rom_id') not in downloading_rom_ids]
             
             if len(selected_games) == 1:
                 # Single checkbox selection
                 game = selected_games[0]
                 is_downloaded = game.get('is_downloaded', False)
-                
+                rom_id = game.get('rom_id')
+
                 # ADD THIS CHECK for collections view:
                 if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
                     # In collections, ensure we check the actual download status
-                    rom_id = game.get('rom_id')
                     if rom_id:
                         # Cross-reference with main games list for accurate download status
                         for main_game in self.parent.available_games:
                             if main_game.get('rom_id') == rom_id:
                                 is_downloaded = main_game.get('is_downloaded', False)
                                 break
-                
-                if is_downloaded:
+
+                # Check if download is in progress FOR THIS SPECIFIC GAME
+                is_downloading = (rom_id and rom_id in self.parent.download_progress and
+                                self.parent.download_progress[rom_id].get('downloading', False))
+
+                # Check if this is part of a bulk download
+                is_bulk_download = self.parent._bulk_download_in_progress
+
+                # Clear all button style classes first
+                self.action_button.remove_css_class('warning')
+                self.action_button.remove_css_class('suggested-action')
+                self.action_button.remove_css_class('destructive-action')
+
+                if is_downloading:
+                    # Always show "Cancel" for single selection
+                    # (bulk downloads are handled in the multiple selection case)
+                    self.action_button.set_label("Cancel")
+                    self.action_button.add_css_class('destructive-action')
+                elif is_downloaded:
                     self.action_button.set_label("Launch")
-                    self.action_button.remove_css_class('warning')
                     self.action_button.add_css_class('suggested-action')
                 else:
                     self.action_button.set_label("Download")
-                    self.action_button.remove_css_class('suggested-action')
                     self.action_button.add_css_class('warning')
 
                 self.action_button.set_sensitive(True)
@@ -3823,15 +3867,35 @@ class EnhancedLibrarySection:
                 self.open_in_romm_button.set_sensitive(is_connected and game.get('rom_id'))
             else:
                 # Multiple checkbox selections
-                if not_downloaded_games:
+                # Check if this is part of a bulk download
+                is_bulk_download = self.parent._bulk_download_in_progress
+
+                # Check if any selected games are currently downloading
+                downloading_games = [g for g in selected_games
+                                   if g.get('rom_id') and g.get('rom_id') in self.parent.download_progress
+                                   and self.parent.download_progress[g.get('rom_id')].get('downloading', False)]
+
+                # Clear all button style classes first
+                self.action_button.remove_css_class('warning')
+                self.action_button.remove_css_class('suggested-action')
+                self.action_button.remove_css_class('destructive-action')
+
+                # Prioritize bulk download state - show Cancel All even if individual downloads haven't started yet
+                if is_bulk_download:
+                    self.action_button.set_label("Cancel All")
+                    self.action_button.add_css_class('destructive-action')
+                    self.action_button.set_sensitive(True)
+                elif downloading_games:
+                    # Multiple individual downloads (not part of bulk)
+                    self.action_button.set_label(f"Cancel ({len(downloading_games)})")
+                    self.action_button.add_css_class('destructive-action')
+                    self.action_button.set_sensitive(True)
+                elif not_downloaded_games:
                     self.action_button.set_label(f"Download ({len(not_downloaded_games)})")
-                    self.action_button.remove_css_class('suggested-action')
                     self.action_button.add_css_class('warning')
                     self.action_button.set_sensitive(True)
                 elif downloaded_games:
                     self.action_button.set_label("Launch")
-                    self.action_button.remove_css_class('warning')
-                    self.action_button.remove_css_class('suggested-action')
                     self.action_button.set_sensitive(False)
 
                 # Check if any selected games are in autosync collections
@@ -3839,7 +3903,7 @@ class EnhancedLibrarySection:
                 self.delete_button.set_sensitive(len(downloaded_games) > 0 and not has_autosync_game)
                 self.open_in_romm_button.set_sensitive(False)  # Disable for multi-selection
             return
-        
+
         # Priority 3: Check for single platform row selection (only if no checkboxes and no game row selected)
         selection_model = self.column_view.get_model()
         selected_positions = []
@@ -4077,18 +4141,28 @@ class EnhancedLibrarySection:
                 self.parent.refresh_games_list()
     
     def on_action_clicked(self, button):
-        """Handle main action button (download/launch) for single or multiple items"""
-        
+        """Handle main action button (download/launch/cancel) for single or multiple items"""
+
         # ADD THIS BLOCK FIRST:
-        # Priority: Handle single row selection directly  
+        # Priority: Handle single row selection directly
         if self.selected_game:
             game = self.selected_game
-            if game.get('is_downloaded', False):
+            rom_id = game.get('rom_id')
+
+            # Check if download is in progress - if so, cancel it
+            is_downloading = (rom_id and rom_id in self.parent.download_progress and
+                            self.parent.download_progress[rom_id].get('downloading', False))
+
+            if is_downloading:
+                # Cancel the download
+                if hasattr(self.parent, 'cancel_download'):
+                    self.parent.cancel_download(rom_id)
+            elif game.get('is_downloaded', False):
                 # Launch the game
                 if hasattr(self.parent, 'launch_game'):
                     self.parent.launch_game(game)
             else:
-                # Download the game  
+                # Download the game
                 if hasattr(self.parent, 'download_game'):
                     self.parent.download_game(game)
             return  # Exit early, don't process checkbox logic
@@ -4128,7 +4202,17 @@ class EnhancedLibrarySection:
             if len(selected_games) == 1:
                 # Single selection - use existing logic
                 game = selected_games[0]
-                if game.get('is_downloaded', False):
+                rom_id = game.get('rom_id')
+
+                # Check if download is in progress - if so, cancel it
+                is_downloading = (rom_id and rom_id in self.parent.download_progress and
+                                self.parent.download_progress[rom_id].get('downloading', False))
+
+                if is_downloading:
+                    # Cancel the download
+                    if hasattr(self.parent, 'cancel_download'):
+                        self.parent.cancel_download(rom_id)
+                elif game.get('is_downloaded', False):
                     # Launch the game
                     if hasattr(self.parent, 'launch_game'):
                         self.parent.launch_game(game)
@@ -4137,16 +4221,31 @@ class EnhancedLibrarySection:
                     if hasattr(self.parent, 'download_game'):
                         self.parent.download_game(game)
             else:
-                # Multiple selection - only download (launching multiple games isn't practical)
-                not_downloaded_games = [g for g in selected_games if not g.get('is_downloaded', False)]
-                
-                if not_downloaded_games:
-                    # Download multiple games immediately without confirmation
-                    if hasattr(self.parent, 'download_multiple_games'):
-                        self.parent.download_multiple_games(not_downloaded_games)
+                # Multiple selection
+                # Check if this is a bulk download that should be cancelled
+                is_bulk_download = self.parent._bulk_download_in_progress
+                if is_bulk_download:
+                    # Cancel the bulk download - pick any downloading game and cancel it
+                    # This will trigger bulk cancellation
+                    for game in selected_games:
+                        rom_id = game.get('rom_id')
+                        if rom_id and rom_id in self.parent.download_progress:
+                            if self.parent.download_progress[rom_id].get('downloading', False):
+                                if hasattr(self.parent, 'cancel_download'):
+                                    self.parent.cancel_download(rom_id)
+                                break
+                else:
+                    # Not a bulk download - check for download action
+                    not_downloaded_games = [g for g in selected_games if not g.get('is_downloaded', False)]
+
+                    if not_downloaded_games:
+                        # Download multiple games immediately without confirmation
+                        if hasattr(self.parent, 'download_multiple_games'):
+                            self.parent.download_multiple_games(not_downloaded_games)
 
             # Clear checkbox selections after operation
-            if len(selected_games) > 1:  # Only clear for multi-selection operations
+            # Don't clear if bulk download started - selections will be cleared when bulk completes
+            if len(selected_games) > 1 and not self.parent._bulk_download_in_progress:
                 GLib.timeout_add(500, self.clear_checkbox_selection)  # Small delay for UI feedback
 
     def on_delete_clicked(self, button):
@@ -4999,17 +5098,25 @@ class EnhancedLibrarySection:
 
     def clear_checkbox_selection(self):
         """Clear all checkbox selections"""
+        # Don't clear selections during bulk downloads - they'll be cleared when the bulk operation completes
+        if hasattr(self.parent, '_bulk_download_in_progress') and self.parent._bulk_download_in_progress:
+            return
+
         self.selected_checkboxes.clear()
         self.selected_rom_ids.clear()
         self.selected_game_keys.clear()
         self.update_action_buttons()
         self.update_selection_label()
-        
+
         # Force UI refresh to update checkboxes
         GLib.idle_add(lambda: self.update_games_library(self.parent.available_games))
 
     def clear_checkbox_selections_smooth(self):
         """Clear checkbox selections without full tree refresh"""
+        # Don't clear selections during bulk downloads - they'll be cleared when the bulk operation completes
+        if hasattr(self.parent, '_bulk_download_in_progress') and self.parent._bulk_download_in_progress:
+            return
+
         self.selected_checkboxes.clear()
         self.selected_rom_ids.clear()
         self.selected_game_keys.clear()
@@ -5505,8 +5612,16 @@ class RomMClient:
         
         return final_games
         
-    def download_rom(self, rom_id, rom_name, download_path, progress_callback=None):
-        """Download a ROM file with progress tracking"""
+    def download_rom(self, rom_id, rom_name, download_path, progress_callback=None, cancellation_checker=None):
+        """Download a ROM file with progress tracking
+
+        Args:
+            rom_id: ROM identifier
+            rom_name: ROM display name
+            download_path: Path to save the download
+            progress_callback: Optional callback for progress updates
+            cancellation_checker: Optional callable that returns True if download should be cancelled
+        """
         try:
             # First, get detailed ROM info to find the filename
             rom_details_response = self.session.get(
@@ -5594,20 +5709,32 @@ class RomMClient:
                 # For folders, download as zip then extract
                 import io
                 import zipfile
-                
+
+                # Check for cancellation before starting folder download
+                if cancellation_checker and cancellation_checker():
+                    raise DownloadCancelledException(f"Download cancelled: {rom_name}")
+
                 # Read all content first
                 content = response.content
                 actual_downloaded = len(content)
-                
+
+                # Check for cancellation before extraction
+                if cancellation_checker and cancellation_checker():
+                    raise DownloadCancelledException(f"Download cancelled: {rom_name}")
+
                 with zipfile.ZipFile(io.BytesIO(content)) as zip_ref:
                     zip_ref.extractall(download_path)
             else:
                 with open(download_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
+                        # Check for cancellation
+                        if cancellation_checker and cancellation_checker():
+                            raise DownloadCancelledException(f"Download cancelled: {rom_name}")
+
                         if chunk:
                             f.write(chunk)
                             actual_downloaded += len(chunk)
-                            
+
                             # Update progress
                             if progress_callback:
                                 if total_size > 0:
@@ -5672,7 +5799,10 @@ class RomMClient:
                 progress_callback(final_progress)
             
             return True, f"Download successful ({actual_downloaded} bytes)"
-            
+
+        except DownloadCancelledException as e:
+            print(f"Download cancelled: {e}")
+            return False, "cancelled"
         except Exception as e:
             print(f"Download exception: {e}")
             return False, f"Download error: {e}"
@@ -7810,6 +7940,13 @@ class SyncWindow(Gtk.ApplicationWindow):
         self.download_progress = {}
         self._last_progress_update = {}  # rom_id -> timestamp
         self._progress_update_interval = 0.1  # Update UI every 100ms max
+
+        # Download cancellation infrastructure
+        self._cancelled_downloads = set()  # Track rom_ids of cancelled downloads
+        self._download_threads = {}  # Track active download threads by rom_id
+        self._cancellation_lock = threading.Lock()  # Thread-safe access to cancellation state
+        self._bulk_download_cancelled = False  # Flag to cancel entire bulk operation
+        self._bulk_download_in_progress = False  # Track if bulk download is active
 
         self.setup_ui()
         self.debug_retroarch_status() 
@@ -10551,17 +10688,21 @@ class SyncWindow(Gtk.ApplicationWindow):
         """Download multiple games with concurrency limit"""
         count = len(games)
         games_to_download = list(games)
-        
+
         # Filter to only games that aren't already downloaded
         not_downloaded = [g for g in games_to_download if not g.get('is_downloaded', False)]
-        
+
         if not not_downloaded:
             self.log_message("All selected games are already downloaded")
             return
-        
+
         # Update count to reflect actual games to download
         download_count = len(not_downloaded)
-        
+
+        # SET BULK DOWNLOAD STATE FIRST - before anything that might trigger UI updates
+        self._bulk_download_in_progress = True
+        self._bulk_download_cancelled = False
+
         # CAPTURE SELECTION STATE BEFORE BLOCKING
         if hasattr(self, 'library_section'):
             self._downloading_rom_ids = set()
@@ -10569,12 +10710,16 @@ class SyncWindow(Gtk.ApplicationWindow):
                 identifier_type, identifier_value = self.library_section.get_game_identifier(game)
                 if identifier_type == 'rom_id':
                     self._downloading_rom_ids.add(identifier_value)
-        
+
         # BLOCK TREE REFRESHES DURING BULK OPERATION
         self._dialog_open = True
         if hasattr(self, 'library_section'):
             self.library_section._block_selection_updates(True)
-        
+
+        # Update UI to show "Cancel All" button immediately
+        if hasattr(self, 'library_section'):
+            GLib.idle_add(lambda: self.library_section.update_action_buttons())
+
         # Track completion
         self._bulk_download_remaining = download_count
         
@@ -10603,6 +10748,7 @@ class SyncWindow(Gtk.ApplicationWindow):
         def check_completion():
             if hasattr(self, '_bulk_download_remaining') and self._bulk_download_remaining <= 0:
                 self._dialog_open = False
+                self._bulk_download_in_progress = False
                 if hasattr(self, 'library_section'):
                     self.library_section._block_selection_updates(False)
                     if hasattr(self, '_downloading_rom_ids'):
@@ -10613,13 +10759,21 @@ class SyncWindow(Gtk.ApplicationWindow):
                         self.library_section.update_selection_label()
                         self.library_section.refresh_all_platform_checkboxes()
                         delattr(self, '_downloading_rom_ids')
-                self.log_message(f"✅ Bulk download complete ({download_count} games)")
 
-                # Send desktop notification when bulk download completes
-                self.send_desktop_notification(
-                    "Downloads Complete",
-                    f"Successfully downloaded {download_count} game{'s' if download_count != 1 else ''}"
-                )
+                # Check if this was a cancellation
+                was_cancelled = self._bulk_download_cancelled
+                self._bulk_download_cancelled = False
+
+                if was_cancelled:
+                    self.log_message(f"⊗ Bulk download cancelled")
+                else:
+                    self.log_message(f"✅ Bulk download complete ({download_count} games)")
+
+                    # Send desktop notification when bulk download completes
+                    self.send_desktop_notification(
+                        "Downloads Complete",
+                        f"Successfully downloaded {download_count} game{'s' if download_count != 1 else ''}"
+                    )
 
                 delattr(self, '_bulk_download_remaining')
                 return False
@@ -10642,6 +10796,10 @@ class SyncWindow(Gtk.ApplicationWindow):
         # Update count to reflect actual games to download
         download_count = len(not_downloaded)
 
+        # SET BULK DOWNLOAD STATE FIRST - before anything that might trigger UI updates
+        self._bulk_download_in_progress = True
+        self._bulk_download_cancelled = False
+
         # CAPTURE SELECTION STATE BEFORE BLOCKING
         if hasattr(self, 'library_section'):
             self._downloading_rom_ids = set()
@@ -10654,6 +10812,10 @@ class SyncWindow(Gtk.ApplicationWindow):
         self._dialog_open = True
         if hasattr(self, 'library_section'):
             self.library_section._block_selection_updates(True)
+
+        # Update UI to show "Cancel All" button immediately
+        if hasattr(self, 'library_section'):
+            GLib.idle_add(lambda: self.library_section.update_action_buttons())
 
         # Track completion per collection
         self._bulk_download_remaining = download_count
@@ -10714,6 +10876,7 @@ class SyncWindow(Gtk.ApplicationWindow):
         def check_completion():
             if hasattr(self, '_bulk_download_remaining') and self._bulk_download_remaining <= 0:
                 self._dialog_open = False
+                self._bulk_download_in_progress = False
                 if hasattr(self, 'library_section'):
                     self.library_section._block_selection_updates(False)
                     if hasattr(self, '_downloading_rom_ids'):
@@ -10724,7 +10887,15 @@ class SyncWindow(Gtk.ApplicationWindow):
                         self.library_section.update_selection_label()
                         self.library_section.refresh_all_platform_checkboxes()
                         delattr(self, '_downloading_rom_ids')
-                self.log_message(f"✅ All downloads complete ({download_count} games)")
+
+                # Check if this was a cancellation
+                was_cancelled = self._bulk_download_cancelled
+                self._bulk_download_cancelled = False
+
+                if was_cancelled:
+                    self.log_message(f"⊗ Bulk download cancelled")
+                else:
+                    self.log_message(f"✅ All downloads complete ({download_count} games)")
 
                 # Clean up collection tracking
                 if hasattr(self, '_collection_downloads'):
@@ -10945,12 +11116,39 @@ class SyncWindow(Gtk.ApplicationWindow):
         # Return True to prevent the window from being destroyed
         return True
 
+    def cancel_download(self, rom_id):
+        """Cancel an in-progress download. If part of a bulk operation, cancels all downloads.
+
+        Args:
+            rom_id: The ROM ID to cancel
+        """
+        with self._cancellation_lock:
+            # Check if this is part of a bulk download
+            if self._bulk_download_in_progress:
+                # Cancel ALL downloads in the bulk operation
+                self._bulk_download_cancelled = True
+                # Mark all currently downloading games for cancellation
+                for downloading_rom_id in list(self._download_threads.keys()):
+                    self._cancelled_downloads.add(downloading_rom_id)
+                self.log_message(f"Cancelling bulk download operation...")
+                return True
+            elif rom_id in self._download_threads:
+                # Single download cancellation
+                self._cancelled_downloads.add(rom_id)
+                self.log_message(f"Cancelling download...")
+                return True
+            return False
+
     def download_game(self, game, is_bulk_operation=False):
         """Download a single game from RomM and its saves (with BIOS check)"""
 
         if not self.romm_client or not self.romm_client.authenticated:
             self.log_message("Please connect to RomM first")
             return
+
+        # Check if bulk download has been cancelled
+        if is_bulk_operation and self._bulk_download_cancelled:
+            return  # Don't start new downloads if bulk operation is cancelled
         
         # Check BIOS requirements first if enabled
         auto_download_setting = 'false'  # Force disable
@@ -10999,7 +11197,14 @@ class SyncWindow(Gtk.ApplicationWindow):
 
                 # Track current download for progress updates
                 self._current_download_rom_id = rom_id
-                
+
+                # Track this download thread
+                current_thread = threading.current_thread()
+                with self._cancellation_lock:
+                    self._download_threads[rom_id] = current_thread
+                    # Ensure this download is not marked as cancelled
+                    self._cancelled_downloads.discard(rom_id)
+
                 # Initialize progress and throttling for this game
                 self.download_progress[rom_id] = {
                     'progress': 0.0,
@@ -11012,7 +11217,11 @@ class SyncWindow(Gtk.ApplicationWindow):
                 self._last_progress_update[rom_id] = 0  # Reset throttling
                 
                 # Update tree view to show download starting
-                GLib.idle_add(lambda: self.library_section.update_game_progress(rom_id, self.download_progress[rom_id]) 
+                GLib.idle_add(lambda: self.library_section.update_game_progress(rom_id, self.download_progress[rom_id])
+                            if hasattr(self, 'library_section') else None)
+
+                # Update action buttons to show "Cancel" button
+                GLib.idle_add(lambda: self.library_section.update_action_buttons()
                             if hasattr(self, 'library_section') else None)
                 
                 # Get download directory and create platform directory
@@ -11034,9 +11243,15 @@ class SyncWindow(Gtk.ApplicationWindow):
                 except:
                     pass
                 
-                # Download with throttled progress tracking
+                # Download with throttled progress tracking and cancellation support
+                def is_cancelled():
+                    with self._cancellation_lock:
+                        return rom_id in self._cancelled_downloads
+
                 success, message = self.romm_client.download_rom(
-                    rom_id, rom_name, download_path, lambda progress: self.update_download_progress(progress, rom_id)
+                    rom_id, rom_name, download_path,
+                    progress_callback=lambda progress: self.update_download_progress(progress, rom_id),
+                    cancellation_checker=is_cancelled
                 )
                 
                 if success:
@@ -11059,8 +11274,14 @@ class SyncWindow(Gtk.ApplicationWindow):
                     }
                     
                     # Force final update
-                    GLib.idle_add(lambda: self.library_section.update_game_progress(rom_id, self.download_progress[rom_id]) 
+                    GLib.idle_add(lambda: self.library_section.update_game_progress(rom_id, self.download_progress[rom_id])
                                 if hasattr(self, 'library_section') else None)
+
+                    # Update action buttons back to "Download" or "Launch"
+                    # Don't update if bulk download is in progress - keep "Cancel All" button
+                    if not is_bulk_operation:
+                        GLib.idle_add(lambda: self.library_section.update_action_buttons()
+                                    if hasattr(self, 'library_section') else None)
                     
                     # Rest of success handling...
                     if download_path.exists():
@@ -11194,30 +11415,76 @@ class SyncWindow(Gtk.ApplicationWindow):
                             GLib.idle_add(lambda n=rom_name: self.log_message(f"✓ {n} ready to play"))
                 
                 else:
-                    # Mark download failed
-                    self.download_progress[rom_id] = {
-                        'progress': 0.0,
-                        'downloading': False,
-                        'failed': True,
-                        'filename': rom_name
-                    }
-                    
-                    GLib.idle_add(lambda: self.library_section.update_game_progress(rom_id, self.download_progress[rom_id]) 
-                                if hasattr(self, 'library_section') else None)
-                    
-                    GLib.idle_add(lambda n=rom_name, m=message: 
-                                self.log_message(f"✗ Failed to download {n}: {m}"))
+                    # Check if this was a cancellation
+                    was_cancelled = (message == "cancelled")
+
+                    if was_cancelled:
+                        # Mark download as cancelled
+                        self.download_progress[rom_id] = {
+                            'progress': 0.0,
+                            'downloading': False,
+                            'cancelled': True,
+                            'filename': rom_name
+                        }
+
+                        # Clean up partial download file
+                        if download_path.exists():
+                            try:
+                                if download_path.is_file():
+                                    download_path.unlink()
+                                elif download_path.is_dir():
+                                    shutil.rmtree(download_path)
+                            except Exception as e:
+                                print(f"Failed to clean up partial download: {e}")
+
+                        GLib.idle_add(lambda: self.library_section.update_game_progress(rom_id, self.download_progress[rom_id])
+                                    if hasattr(self, 'library_section') else None)
+
+                        # Update action buttons back to "Download"
+                        # Don't update if bulk download is in progress - keep "Cancel All" button
+                        if not is_bulk_operation:
+                            GLib.idle_add(lambda: self.library_section.update_action_buttons()
+                                        if hasattr(self, 'library_section') else None)
+
+                        GLib.idle_add(lambda n=rom_name:
+                                    self.log_message(f"⊗ Cancelled download: {n}"))
+                    else:
+                        # Mark download failed
+                        self.download_progress[rom_id] = {
+                            'progress': 0.0,
+                            'downloading': False,
+                            'failed': True,
+                            'filename': rom_name
+                        }
+
+                        GLib.idle_add(lambda: self.library_section.update_game_progress(rom_id, self.download_progress[rom_id])
+                                    if hasattr(self, 'library_section') else None)
+
+                        # Update action buttons back to "Download"
+                        # Don't update if bulk download is in progress - keep "Cancel All" button
+                        if not is_bulk_operation:
+                            GLib.idle_add(lambda: self.library_section.update_action_buttons()
+                                        if hasattr(self, 'library_section') else None)
+
+                        GLib.idle_add(lambda n=rom_name, m=message:
+                                    self.log_message(f"✗ Failed to download {n}: {m}"))
                 
                 # Clean up progress and throttling data
                 def cleanup_progress():
                     time.sleep(3)  # Show completed/failed state for 3 seconds
-                    
+
                     # More thorough cleanup
                     if rom_id in self.download_progress:
                         del self.download_progress[rom_id]
                     if rom_id in self._last_progress_update:
                         del self._last_progress_update[rom_id]
-                    
+
+                    # Clean up download thread tracking
+                    with self._cancellation_lock:
+                        if rom_id in self._download_threads:
+                            del self._download_threads[rom_id]
+                        self._cancelled_downloads.discard(rom_id)
+
                     # Clean up current download tracking
                     if hasattr(self, '_current_download_rom_id') and self._current_download_rom_id == rom_id:
                         delattr(self, '_current_download_rom_id')
@@ -11262,6 +11529,13 @@ class SyncWindow(Gtk.ApplicationWindow):
         def download():
             success = False  # Track success for on_complete callback
             try:
+                # Check if bulk download has been cancelled before starting
+                if is_bulk_operation and self._bulk_download_cancelled:
+                    semaphore.release()
+                    if on_complete:
+                        on_complete(False)
+                    return  # Don't start if bulk operation is cancelled
+
                 rom_name = game['name']
                 rom_id = game['rom_id']
                 platform = game['platform']
@@ -11331,8 +11605,14 @@ class SyncWindow(Gtk.ApplicationWindow):
                     }
                     
                     # Force final update
-                    GLib.idle_add(lambda: self.library_section.update_game_progress(rom_id, self.download_progress[rom_id]) 
+                    GLib.idle_add(lambda: self.library_section.update_game_progress(rom_id, self.download_progress[rom_id])
                                 if hasattr(self, 'library_section') else None)
+
+                    # Update action buttons back to "Download" or "Launch"
+                    # Don't update if bulk download is in progress - keep "Cancel All" button
+                    if not is_bulk_operation:
+                        GLib.idle_add(lambda: self.library_section.update_action_buttons()
+                                    if hasattr(self, 'library_section') else None)
                     
                     # Rest of success handling...
                     if download_path.exists():
@@ -11423,7 +11703,8 @@ class SyncWindow(Gtk.ApplicationWindow):
                                         item.game_data.update(game)
 
                             # Clear selections after download completes
-                            if hasattr(self, 'library_section'):
+                            # Don't clear selections during bulk downloads - wait until all complete
+                            if not is_bulk_operation and hasattr(self, 'library_section'):
                                 def clear_selections():
                                     self.library_section.selected_checkboxes.clear()
                                     self.library_section.selected_rom_ids.clear()
@@ -11432,7 +11713,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                                     self.library_section.update_action_buttons()
                                     self.library_section.update_selection_label()
                                     self.library_section.force_checkbox_sync()
-                                
+
                                 # Clear selections after a short delay
                                 GLib.timeout_add(1000, lambda: (clear_selections(), False)[1])
 
@@ -11479,30 +11760,76 @@ class SyncWindow(Gtk.ApplicationWindow):
                             GLib.idle_add(lambda n=rom_name: self.log_message(f"✓ {n} ready to play"))
                 
                 else:
-                    # Mark download failed
-                    self.download_progress[rom_id] = {
-                        'progress': 0.0,
-                        'downloading': False,
-                        'failed': True,
-                        'filename': rom_name
-                    }
-                    
-                    GLib.idle_add(lambda: self.library_section.update_game_progress(rom_id, self.download_progress[rom_id]) 
-                                if hasattr(self, 'library_section') else None)
-                    
-                    GLib.idle_add(lambda n=rom_name, m=message: 
-                                self.log_message(f"✗ Failed to download {n}: {m}"))
+                    # Check if this was a cancellation
+                    was_cancelled = (message == "cancelled")
+
+                    if was_cancelled:
+                        # Mark download as cancelled
+                        self.download_progress[rom_id] = {
+                            'progress': 0.0,
+                            'downloading': False,
+                            'cancelled': True,
+                            'filename': rom_name
+                        }
+
+                        # Clean up partial download file
+                        if download_path.exists():
+                            try:
+                                if download_path.is_file():
+                                    download_path.unlink()
+                                elif download_path.is_dir():
+                                    shutil.rmtree(download_path)
+                            except Exception as e:
+                                print(f"Failed to clean up partial download: {e}")
+
+                        GLib.idle_add(lambda: self.library_section.update_game_progress(rom_id, self.download_progress[rom_id])
+                                    if hasattr(self, 'library_section') else None)
+
+                        # Update action buttons back to "Download"
+                        # Don't update if bulk download is in progress - keep "Cancel All" button
+                        if not is_bulk_operation:
+                            GLib.idle_add(lambda: self.library_section.update_action_buttons()
+                                        if hasattr(self, 'library_section') else None)
+
+                        GLib.idle_add(lambda n=rom_name:
+                                    self.log_message(f"⊗ Cancelled download: {n}"))
+                    else:
+                        # Mark download failed
+                        self.download_progress[rom_id] = {
+                            'progress': 0.0,
+                            'downloading': False,
+                            'failed': True,
+                            'filename': rom_name
+                        }
+
+                        GLib.idle_add(lambda: self.library_section.update_game_progress(rom_id, self.download_progress[rom_id])
+                                    if hasattr(self, 'library_section') else None)
+
+                        # Update action buttons back to "Download"
+                        # Don't update if bulk download is in progress - keep "Cancel All" button
+                        if not is_bulk_operation:
+                            GLib.idle_add(lambda: self.library_section.update_action_buttons()
+                                        if hasattr(self, 'library_section') else None)
+
+                        GLib.idle_add(lambda n=rom_name, m=message:
+                                    self.log_message(f"✗ Failed to download {n}: {m}"))
                 
                 # Clean up progress and throttling data
                 def cleanup_progress():
                     time.sleep(3)  # Show completed/failed state for 3 seconds
-                    
+
                     # More thorough cleanup
                     if rom_id in self.download_progress:
                         del self.download_progress[rom_id]
                     if rom_id in self._last_progress_update:
                         del self._last_progress_update[rom_id]
-                    
+
+                    # Clean up download thread tracking
+                    with self._cancellation_lock:
+                        if rom_id in self._download_threads:
+                            del self._download_threads[rom_id]
+                        self._cancelled_downloads.discard(rom_id)
+
                     # Clean up current download tracking
                     if hasattr(self, '_current_download_rom_id') and self._current_download_rom_id == rom_id:
                         delattr(self, '_current_download_rom_id')
