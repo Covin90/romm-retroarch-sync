@@ -3645,7 +3645,7 @@ class EnhancedLibrarySection:
         self.action_button.set_size_request(125, -1)  # Fixed width for text
         self.action_button.set_hexpand(False)
         self.action_button.set_halign(Gtk.Align.START)
-        self.action_button.connect('clicked', self.on_action_clicked)
+        self._action_button_handler_id = self.action_button.connect('clicked', self.on_action_clicked)
         single_actions.append(self.action_button)
         
         # Delete button - now handles multiple selections
@@ -3741,6 +3741,7 @@ class EnhancedLibrarySection:
         is_bulk_download = self.parent._bulk_download_in_progress if hasattr(self, 'parent') else False
         if getattr(self, '_selection_blocked', False) and not is_bulk_download:
             return
+
         
         # ADD THIS BLOCK HERE:
         # Priority 1: Check for single row selection first
@@ -4142,6 +4143,20 @@ class EnhancedLibrarySection:
     
     def on_action_clicked(self, button):
         """Handle main action button (download/launch/cancel) for single or multiple items"""
+
+        # Check if bulk download is in progress first - this takes priority
+        if self.parent._bulk_download_in_progress:
+            # Cancel the bulk download by passing any rom_id
+            # Get the first available rom_id from selected games or download progress
+            rom_id = None
+            if self.selected_game:
+                rom_id = self.selected_game.get('rom_id')
+            if not rom_id and self.parent.download_progress:
+                rom_id = next(iter(self.parent.download_progress.keys()), None)
+
+            if rom_id and hasattr(self.parent, 'cancel_download'):
+                self.parent.cancel_download(rom_id)
+            return
 
         # ADD THIS BLOCK FIRST:
         # Priority: Handle single row selection directly
@@ -5728,8 +5743,9 @@ class RomMClient:
                 with open(download_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         # Check for cancellation
-                        if cancellation_checker and cancellation_checker():
-                            raise DownloadCancelledException(f"Download cancelled: {rom_name}")
+                        if cancellation_checker:
+                            if cancellation_checker():
+                                raise DownloadCancelledException(f"Download cancelled: {rom_name}")
 
                         if chunk:
                             f.write(chunk)
@@ -11127,9 +11143,18 @@ class SyncWindow(Gtk.ApplicationWindow):
             if self._bulk_download_in_progress:
                 # Cancel ALL downloads in the bulk operation
                 self._bulk_download_cancelled = True
-                # Mark all currently downloading games for cancellation
-                for downloading_rom_id in list(self._download_threads.keys()):
+
+                # Mark all queued/downloading games for cancellation
+                # Use _downloading_rom_ids which captures ALL games in the bulk operation
+                if hasattr(self, '_downloading_rom_ids'):
+                    for downloading_rom_id in self._downloading_rom_ids:
+                        self._cancelled_downloads.add(downloading_rom_id)
+
+                # Also mark currently active threads
+                download_threads_keys = list(self._download_threads.keys())
+                for downloading_rom_id in download_threads_keys:
                     self._cancelled_downloads.add(downloading_rom_id)
+
                 self.log_message(f"Cancelling bulk download operation...")
                 return True
             elif rom_id in self._download_threads:
@@ -11579,9 +11604,15 @@ class SyncWindow(Gtk.ApplicationWindow):
                 except:
                     pass
 
-                # Download with throttled progress tracking
+                # Download with throttled progress tracking and cancellation support
+                def is_cancelled():
+                    with self._cancellation_lock:
+                        return rom_id in self._cancelled_downloads
+
                 download_success, message = self.romm_client.download_rom(
-                    rom_id, rom_name, download_path, lambda progress: self.update_download_progress(progress, rom_id)
+                    rom_id, rom_name, download_path,
+                    progress_callback=lambda progress: self.update_download_progress(progress, rom_id),
+                    cancellation_checker=is_cancelled
                 )
 
                 if download_success:
@@ -14479,4 +14510,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    main()s
