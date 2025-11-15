@@ -19,6 +19,7 @@ import base64
 import datetime
 import psutil
 import stat
+import re
 
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -32,14 +33,502 @@ os.environ['REQUESTS_CA_BUNDLE'] = '/etc/ssl/certs/ca-certificates.crt'
 os.environ['SSL_CERT_FILE'] = '/etc/ssl/certs/ca-certificates.crt'
 
 gi.require_version('Gtk', '4.0')
-gi.require_version('Adw', '1')
 
-from gi.repository import Gtk, Adw, GLib, Gio, GObject
+# Try to load Adw, fallback to Gtk if not available (e.g., on Steam Deck)
+try:
+    gi.require_version('Adw', '1')
+    from gi.repository import Gtk, Adw, GLib, Gio, GObject
+    HAS_ADW = True
+except ValueError:
+    # libadwaita not available, use Gtk only
+    from gi.repository import Gtk, GLib, Gio, GObject
+    HAS_ADW = False
+
+    # Create a mock Adw module with Gtk-based fallbacks
+    class MockAdw:
+        class Application(Gtk.Application):
+            pass
+
+        class ApplicationWindow(Gtk.ApplicationWindow):
+            pass
+
+        class PreferencesWindow(Gtk.Window):
+            def __init__(self):
+                super().__init__()
+                self.set_modal(True)
+                self.set_default_size(800, 600)
+
+        class PreferencesPage(Gtk.Box):
+            def __init__(self):
+                super().__init__(orientation=Gtk.Orientation.VERTICAL)
+                self.set_margin_top(12)
+                self.set_margin_bottom(12)
+                self.set_margin_start(12)
+                self.set_margin_end(12)
+                self.set_spacing(12)
+
+            def add(self, child):
+                super().append(child)
+
+        class PreferencesGroup(Gtk.Box):
+            def __init__(self):
+                super().__init__(orientation=Gtk.Orientation.VERTICAL)
+                self.set_spacing(0)
+                self._title_label = None
+
+            def set_title(self, title):
+                if self._title_label is None:
+                    self._title_label = Gtk.Label()
+                    self._title_label.set_halign(Gtk.Align.START)
+                    self._title_label.set_margin_top(12)
+                    self._title_label.set_margin_bottom(6)
+                    self._title_label.set_margin_start(12)
+                    self.prepend(self._title_label)
+                # Handle HTML entities in title - decode and escape for markup
+                import html as html_module
+                decoded_title = html_module.unescape(title)
+                escaped_title = decoded_title.replace('&', '&amp;')
+                try:
+                    self._title_label.set_markup(f"<b>{escaped_title}</b>")
+                except:
+                    # Fallback to plain text if markup fails
+                    self._title_label.set_text(decoded_title)
+
+            def add(self, child):
+                super().append(child)
+
+        class HeaderBar(Gtk.HeaderBar):
+            pass
+
+        class ToolbarView(Gtk.Box):
+            def __init__(self):
+                super().__init__(orientation=Gtk.Orientation.VERTICAL)
+                self._header = None
+                self._content = None
+
+            def add_top_bar(self, header):
+                if self._header is None:
+                    self._header = header
+                    self.prepend(header)
+                else:
+                    # Replace existing header
+                    self.remove(self._header)
+                    self._header = header
+                    self.prepend(header)
+
+            def set_content(self, content):
+                if self._content is not None:
+                    self.remove(self._content)
+                self._content = content
+                self.append(content)
+
+        class ActionRow(Gtk.Box):
+            def __init__(self):
+                super().__init__(orientation=Gtk.Orientation.HORIZONTAL)
+                self.set_spacing(12)
+                self.set_margin_top(6)
+                self.set_margin_bottom(6)
+                self.set_margin_start(12)
+                self.set_margin_end(12)
+                self._title_box = None
+                self._title_label = None
+                self._subtitle_label = None
+
+            def set_title(self, title):
+                if self._title_box is None:
+                    self._title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+                    self._title_box.set_hexpand(True)
+                    self._title_label = Gtk.Label(label=title)
+                    self._title_label.set_halign(Gtk.Align.START)
+                    self._title_box.append(self._title_label)
+                    self.prepend(self._title_box)
+                else:
+                    self._title_label.set_text(title)
+
+            def set_subtitle(self, subtitle):
+                if self._title_box is None:
+                    self.set_title("")  # Initialize title box
+                if self._subtitle_label is None:
+                    self._subtitle_label = Gtk.Label(label=subtitle)
+                    self._subtitle_label.set_halign(Gtk.Align.START)
+                    self._subtitle_label.add_css_class("dim-label")
+                    self._title_box.append(self._subtitle_label)
+                else:
+                    self._subtitle_label.set_text(subtitle)
+
+            def add_suffix(self, widget):
+                self.append(widget)
+
+            def add_prefix(self, widget):
+                if self._title_box is None:
+                    self.set_title("")  # Initialize title box
+                self.prepend(widget)
+
+            def set_child(self, widget):
+                # Simply append the widget - ActionRow with set_child replaces content
+                self.append(widget)
+
+        class SwitchRow(Gtk.Box):
+            def __init__(self):
+                super().__init__(orientation=Gtk.Orientation.HORIZONTAL)
+                self.set_spacing(12)
+                self.set_margin_top(6)
+                self.set_margin_bottom(6)
+                self.set_margin_start(12)
+                self.set_margin_end(12)
+                self._title_box = None
+                self._title_label = None
+                self._subtitle_label = None
+                self.switch = Gtk.Switch()
+                self.switch.set_valign(Gtk.Align.CENTER)
+                self.append(self.switch)
+
+            def set_title(self, title):
+                if self._title_box is None:
+                    self._title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+                    self._title_box.set_hexpand(True)
+                    self._title_label = Gtk.Label(label=title)
+                    self._title_label.set_halign(Gtk.Align.START)
+                    self._title_box.append(self._title_label)
+                    self.prepend(self._title_box)
+                else:
+                    self._title_label.set_text(title)
+
+            def set_subtitle(self, subtitle):
+                if self._title_box is None:
+                    self.set_title("")  # Initialize title box
+                if self._subtitle_label is None:
+                    self._subtitle_label = Gtk.Label(label=subtitle)
+                    self._subtitle_label.set_halign(Gtk.Align.START)
+                    self._subtitle_label.add_css_class("dim-label")
+                    self._title_box.append(self._subtitle_label)
+                else:
+                    self._subtitle_label.set_text(subtitle)
+
+            def get_active(self):
+                return self.switch.get_active()
+
+            def set_active(self, active):
+                self.switch.set_active(active)
+
+        class EntryRow(Gtk.Box):
+            def __init__(self):
+                super().__init__(orientation=Gtk.Orientation.VERTICAL)
+                self.set_spacing(6)
+                self.set_margin_top(6)
+                self.set_margin_bottom(6)
+                self.set_margin_start(12)
+                self.set_margin_end(12)
+                self.entry = Gtk.Entry()
+                self.append(self.entry)
+
+            def set_title(self, title):
+                label = Gtk.Label(label=title)
+                label.set_halign(Gtk.Align.START)
+                self.prepend(label)
+
+            def get_text(self):
+                return self.entry.get_text()
+
+            def set_text(self, text):
+                self.entry.set_text(text)
+
+            def connect(self, signal_name, callback):
+                if signal_name in ('activate', 'entry-activated'):
+                    # Forward to the internal entry widget's 'activate' signal
+                    # (Adw.EntryRow uses 'entry-activated', Gtk.Entry uses 'activate')
+                    return self.entry.connect('activate', callback)
+                else:
+                    return super().connect(signal_name, callback)
+
+        class PasswordEntryRow(EntryRow):
+            def __init__(self):
+                super().__init__()
+                self.entry.set_visibility(False)
+
+        class ExpanderRow(Gtk.Box):
+            def __init__(self):
+                super().__init__(orientation=Gtk.Orientation.VERTICAL)
+                self.set_spacing(0)
+
+                # Header box to hold title, prefix, and suffix
+                self.header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+                self.header_box.set_spacing(6)
+                self.header_box.set_margin_top(6)
+                self.header_box.set_margin_bottom(6)
+                self.header_box.set_margin_start(12)
+                self.header_box.set_margin_end(12)
+
+                # Prefix box (left side)
+                self.prefix_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+                self.prefix_box.set_spacing(6)
+                self.header_box.append(self.prefix_box)
+
+                # Title and subtitle box (center)
+                self.title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+                self.title_box.set_hexpand(True)
+                self.header_box.append(self.title_box)
+
+                # Suffix box (right side)
+                self.suffix_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+                self.suffix_box.set_spacing(6)
+                self.header_box.append(self.suffix_box)
+
+                # Create expander with custom header
+                self.expander = Gtk.Expander()
+                self.expander.set_label_widget(self.header_box)
+                self.append(self.expander)
+
+                # Content box
+                self.content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+                self.expander.set_child(self.content_box)
+
+                self._title_label = None
+                self._subtitle_label = None
+
+            def set_title(self, title):
+                if self._title_label is None:
+                    self._title_label = Gtk.Label()
+                    self._title_label.set_halign(Gtk.Align.START)
+                    self.title_box.append(self._title_label)
+                self._title_label.set_text(title)
+
+            def set_subtitle(self, subtitle):
+                if self._subtitle_label is None:
+                    self._subtitle_label = Gtk.Label()
+                    self._subtitle_label.set_halign(Gtk.Align.START)
+                    self._subtitle_label.add_css_class("dim-label")
+                    self.title_box.append(self._subtitle_label)
+                self._subtitle_label.set_text(subtitle)
+
+            def add_prefix(self, widget):
+                self.prefix_box.append(widget)
+
+            def add_suffix(self, widget):
+                self.suffix_box.append(widget)
+
+            def add_row(self, row):
+                self.content_box.append(row)
+
+        class SpinRow(Gtk.Box):
+            def __init__(self):
+                super().__init__(orientation=Gtk.Orientation.HORIZONTAL)
+                self.set_spacing(12)
+                self.set_margin_top(6)
+                self.set_margin_bottom(6)
+                self.set_margin_start(12)
+                self.set_margin_end(12)
+                self._title_box = None
+                self._title_label = None
+                self._subtitle_label = None
+                self.spin = Gtk.SpinButton()
+                self.spin.set_valign(Gtk.Align.CENTER)
+                self.append(self.spin)
+
+            def set_title(self, title):
+                if self._title_box is None:
+                    self._title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+                    self._title_box.set_hexpand(True)
+                    self._title_label = Gtk.Label(label=title)
+                    self._title_label.set_halign(Gtk.Align.START)
+                    self._title_box.append(self._title_label)
+                    self.prepend(self._title_box)
+                else:
+                    self._title_label.set_text(title)
+
+            def set_subtitle(self, subtitle):
+                if self._title_box is None:
+                    self.set_title("")  # Initialize title box
+                if self._subtitle_label is None:
+                    self._subtitle_label = Gtk.Label(label=subtitle)
+                    self._subtitle_label.set_halign(Gtk.Align.START)
+                    self._subtitle_label.add_css_class("dim-label")
+                    self._title_box.append(self._subtitle_label)
+                else:
+                    self._subtitle_label.set_text(subtitle)
+
+            def get_value(self):
+                return self.spin.get_value()
+
+            def set_value(self, value):
+                self.spin.set_value(value)
+
+            def set_range(self, min_val, max_val):
+                self.spin.set_range(min_val, max_val)
+
+            def set_adjustment(self, adjustment):
+                self.spin.set_adjustment(adjustment)
+
+        class ComboRow(Gtk.Box):
+            def __init__(self):
+                super().__init__(orientation=Gtk.Orientation.HORIZONTAL)
+                self.set_spacing(12)
+                self.set_margin_top(6)
+                self.set_margin_bottom(6)
+                self.set_margin_start(12)
+                self.set_margin_end(12)
+                self._title_box = None
+                self._title_label = None
+                self._subtitle_label = None
+                self.combo = Gtk.ComboBoxText()
+                self.combo.set_valign(Gtk.Align.CENTER)
+                super().append(self.combo)  # Use super().append() to avoid conflict
+
+            def set_title(self, title):
+                if self._title_box is None:
+                    self._title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+                    self._title_box.set_hexpand(True)
+                    self._title_label = Gtk.Label(label=title)
+                    self._title_label.set_halign(Gtk.Align.START)
+                    self._title_box.append(self._title_label)
+                    self.prepend(self._title_box)
+                else:
+                    self._title_label.set_text(title)
+
+            def set_subtitle(self, subtitle):
+                if self._title_box is None:
+                    self.set_title("")  # Initialize title box
+                if self._subtitle_label is None:
+                    self._subtitle_label = Gtk.Label(label=subtitle)
+                    self._subtitle_label.set_halign(Gtk.Align.START)
+                    self._subtitle_label.add_css_class("dim-label")
+                    self._title_box.append(self._subtitle_label)
+                else:
+                    self._subtitle_label.set_text(subtitle)
+
+            def append(self, id, label):
+                # Forward to the combo widget
+                self.combo.append(id, label)
+
+            def get_active_id(self):
+                return self.combo.get_active_id()
+
+            def set_active_id(self, id):
+                self.combo.set_active_id(id)
+
+            def set_model(self, model):
+                # Adw.ComboRow uses set_model with a StringList
+                # We'll convert it to ComboBoxText compatible format
+                # Clear existing items
+                while self.combo.get_active() >= 0 or self.combo.get_has_entry():
+                    try:
+                        self.combo.remove(0)
+                    except:
+                        break
+
+                # Add new items
+                for i in range(model.get_n_items()):
+                    item = model.get_string(i)
+                    self.combo.append(str(i), item)
+
+            def get_selected(self):
+                active = self.combo.get_active()
+                return active if active >= 0 else 0
+
+            def set_selected(self, index):
+                if index >= 0:
+                    self.combo.set_active(index)
+
+        class AlertDialog(Gtk.Dialog):
+            @staticmethod
+            def new(title, message):
+                dialog = AlertDialog()
+                dialog._title = title
+                dialog._message = message
+                dialog.set_title(title)
+
+                # Create content area with message
+                content = dialog.get_content_area()
+                label = Gtk.Label(label=message)
+                label.set_wrap(True)
+                label.set_margin_top(12)
+                label.set_margin_bottom(12)
+                label.set_margin_start(12)
+                label.set_margin_end(12)
+                content.append(label)
+
+                return dialog
+
+            def add_response(self, response_id, label):
+                self.add_button(label, response_id)
+
+            def set_response_appearance(self, response_id, appearance):
+                pass  # Not supported in Gtk-only mode
+
+            def set_close_response(self, response_id):
+                self.set_default_response(response_id)
+
+            def choose(self, parent, cancellable, callback, user_data=None):
+                # Adw.AlertDialog uses async choose(), but Gtk.Dialog uses run()
+                # We need to convert this to the callback pattern
+                self.set_transient_for(parent)
+                self.set_modal(True)
+
+                def on_response(dialog, response):
+                    callback(dialog, None)  # GAsyncResult is None for sync operations
+
+                self.connect('response', on_response)
+                self.present()
+
+        class ResponseAppearance:
+            DESTRUCTIVE = None
+
+        class AboutWindow(Gtk.AboutDialog):
+            def __init__(self, **kwargs):
+                super().__init__()
+                # Map Adw.AboutWindow parameters to Gtk.AboutDialog
+                if 'transient_for' in kwargs:
+                    self.set_transient_for(kwargs['transient_for'])
+                if 'application_name' in kwargs:
+                    self.set_program_name(kwargs['application_name'])
+                if 'application_icon' in kwargs:
+                    self.set_logo_icon_name(kwargs['application_icon'])
+                if 'version' in kwargs:
+                    self.set_version(kwargs['version'])
+                if 'developer_name' in kwargs:
+                    self.set_authors([kwargs['developer_name']])
+                if 'copyright' in kwargs:
+                    self.set_copyright(kwargs['copyright'])
+                if 'license_type' in kwargs:
+                    self.set_license_type(kwargs['license_type'])
+
+            def set_website(self, url):
+                super().set_website(url)
+
+            def set_issue_url(self, url):
+                # Gtk.AboutDialog doesn't have set_issue_url, ignore it
+                pass
+
+    Adw = MockAdw()
 
 # Custom exception for download cancellation
 class DownloadCancelledException(Exception):
     """Raised when a download is cancelled by the user"""
     pass
+
+class PerformanceTimer:
+    """Utility for tracking performance timing"""
+    def __init__(self, label, enabled=True):
+        self.label = label
+        self.enabled = enabled
+        self.start_time = None
+        self.checkpoints = []
+
+    def __enter__(self):
+        if self.enabled:
+            self.start_time = time.time()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.enabled and self.start_time:
+            elapsed = time.time() - self.start_time
+        return False
+
+    def checkpoint(self, label):
+        """Mark a checkpoint with elapsed time"""
+        if self.enabled and self.start_time:
+            elapsed = time.time() - self.start_time
+            self.checkpoints.append((label, elapsed))
 
 class GameDataCache:
     """Cache RomM game data locally for offline use"""
@@ -56,11 +545,12 @@ class GameDataCache:
         
         # Cache expiry (24 hours)
         self.cache_expiry = 24 * 60 * 60
-        
+
         # Load existing cache and metadata
-        self.cached_games = self.load_games_cache()
+        # CRITICAL: Load platform mapping FIRST so it's available when processing cached games
         self.platform_mapping = self.load_platform_mapping()
         self.filename_mapping = self.load_filename_mapping()
+        self.cached_games = self.load_games_cache()
     
     def save_games_data(self, games_data):
         """Non-blocking cache save with memory optimization"""
@@ -85,7 +575,9 @@ class GameDataCache:
                         'is_downloaded': game.get('is_downloaded', False),
                         'local_path': game.get('local_path'),
                         'local_size': game.get('local_size', 0),
-                        'romm_data': game.get('romm_data', {})  # Already cleaned by step 1
+                        'romm_data': game.get('romm_data', {}),  # Already cleaned by step 1
+                        'is_multi_disc': game.get('is_multi_disc', False),  # Preserve multi-disc flag
+                        'discs': game.get('discs', [])  # Preserve disc data for multi-disc games
                     }
                     processed_games.append(clean_game)
                 
@@ -132,8 +624,18 @@ class GameDataCache:
             if time.time() - cache_data.get('timestamp', 0) > self.cache_expiry:
                 print("📅 Games cache expired, will refresh on next connection")
                 return []
-            
+
             games = cache_data.get('games', [])
+
+            # CRITICAL: Always resolve platform names from platform_slug using the mapping
+            # This ensures cached games display proper names even if they were cached with slugs
+            for game in games:
+                if isinstance(game, dict):
+                    platform_slug = game.get('platform_slug')
+                    if platform_slug:
+                        # Use mapping to get proper platform name (fallback mapping always available)
+                        game['platform'] = self.get_platform_name(platform_slug)
+
             print(f"📂 Loaded {len(games)} games from cache")
             return games
             
@@ -228,14 +730,264 @@ class GameDataCache:
             print(f"Failed to save filename mapping: {e}")
     
     def load_platform_mapping(self):
-        """Load platform mapping from file"""
+        """Load platform mapping from file, with fallback to common platforms"""
+        # Start with a hardcoded fallback mapping for common platforms
+        # This ensures proper display even without connecting to RomM
+        fallback_mapping = {
+            # Nintendo platforms
+            'nes': 'Nintendo Entertainment System',
+            'famicom': 'Famicom',
+            'fds': 'Famicom Disk System',
+            'snes': 'Super Nintendo Entertainment System',
+            'sfam': 'Super Famicom',
+            'satellaview': 'Satellaview',
+            'n64': 'Nintendo 64',
+            '64dd': 'Nintendo 64DD',
+            'gc': 'Nintendo GameCube',
+            'ngc': 'Nintendo GameCube',
+            'wii': 'Nintendo Wii',
+            'wiiu': 'Nintendo Wii U',
+            'switch': 'Nintendo Switch',
+            'gb': 'Game Boy',
+            'gbc': 'Game Boy Color',
+            'gba': 'Game Boy Advance',
+            'nds': 'Nintendo DS',
+            'nintendo-dsi': 'Nintendo DSi',
+            '3ds': 'Nintendo 3DS',
+            'n3ds': 'Nintendo 3DS',
+            'virtualboy': 'Virtual Boy',
+            'g-and-w': 'Game & Watch',
+            'poke-mini': 'Pokemon Mini',
+            'pokemon-mini': 'Pokemon Mini',
+            'nintendo-playstation': 'Nintendo PlayStation',
+
+            # Sega platforms
+            'genesis': 'Sega Genesis',
+            'megadrive': 'Sega Mega Drive',
+            'sega-genesis': 'Sega Genesis',
+            'sega-mega-drive': 'Sega Mega Drive',
+            'genesis-slash-megadrive': 'Sega Genesis / Mega Drive',
+            'mastersystem': 'Sega Master System',
+            'sms': 'Sega Master System',
+            'gamegear': 'Sega Game Gear',
+            'segacd': 'Sega CD',
+            'sega-cd': 'Sega CD',
+            'sega32': 'Sega 32X',
+            'saturn': 'Sega Saturn',
+            'dreamcast': 'Sega Dreamcast',
+            'dc': 'Sega Dreamcast',
+            'sg1000': 'SG-1000',
+            'sega-pico': 'Sega Pico',
+
+            # Sony platforms
+            'psx': 'PlayStation',
+            'ps': 'PlayStation',
+            'ps1': 'PlayStation',
+            'ps2': 'PlayStation 2',
+            'ps3': 'PlayStation 3',
+            'ps4--1': 'PlayStation 4',
+            'ps4': 'PlayStation 4',
+            'ps5': 'PlayStation 5',
+            'psp': 'PlayStation Portable',
+            'psvita': 'PlayStation Vita',
+            'pocketstation': 'PocketStation',
+
+            # Arcade platforms
+            'arcade': 'Arcade',
+            'mame': 'MAME',
+            'fbneo': 'FBNeo',
+            'neogeo': 'Neo Geo',
+            'neogeoaes': 'Neo Geo AES',
+            'neogeomvs': 'Neo Geo MVS',
+            'neo-geo-cd': 'Neo Geo CD',
+            'neo-geo-pocket': 'Neo Geo Pocket',
+            'ngp': 'Neo Geo Pocket',
+            'neo-geo-pocket-color': 'Neo Geo Pocket Color',
+            'ngpc': 'Neo Geo Pocket Color',
+            'neo-geo-x': 'Neo Geo X',
+
+            # Atari platforms
+            'atari2600': 'Atari 2600',
+            'atari5200': 'Atari 5200',
+            'atari7800': 'Atari 7800',
+            'atari8bit': 'Atari 8-bit',
+            'lynx': 'Atari Lynx',
+            'atarilynx': 'Atari Lynx',
+            'jaguar': 'Atari Jaguar',
+            'atarijaguar': 'Atari Jaguar',
+            'atari-jaguar-cd': 'Atari Jaguar CD',
+            'atari-st': 'Atari ST',
+            'atari-vcs': 'Atari VCS',
+
+            # NEC platforms
+            'pcengine': 'PC Engine',
+            'turbografx16--1': 'TurboGrafx-16',
+            'turbografx16': 'TurboGrafx-16',
+            'turbografx-16': 'TurboGrafx-16',
+            'turbografx-16-slash-pc-engine-cd': 'TurboGrafx-16 / PC Engine CD',
+            'pcenginecd': 'PC Engine CD',
+            'supergrafx': 'SuperGrafx',
+            'pc-fx': 'PC-FX',
+
+            # SNK platforms
+            'wonderswan': 'WonderSwan',
+            'wonderswancolor': 'WonderSwan Color',
+            'wonderswan-color': 'WonderSwan Color',
+            'swancrystal': 'SwanCrystal',
+
+            # Panasonic / Other consoles
+            '3do': '3DO',
+            'philips-cd-i': 'Philips CD-i',
+            'jaguar': 'Atari Jaguar',
+            'amiga': 'Amiga',
+            'amiga-cd32': 'Amiga CD32',
+            'intellivision': 'Intellivision',
+            'colecovision': 'ColecoVision',
+            'vectrex': 'Vectrex',
+            'odyssey-2-slash-videopac-g7000': 'Odyssey 2 / Videopac G7000',
+            'fairchild-channel-f': 'Fairchild Channel F',
+            'astrocade': 'Astrocade',
+            'supervision': 'Supervision',
+            'casio-loopy': 'Casio Loopy',
+            'casio-pv-1000': 'Casio PV-1000',
+            'creativision': 'CreatiVision',
+            'gamate': 'Gamate',
+            'game-dot-com': 'Game.com',
+            'mega-duck-slash-cougar-boy': 'Mega Duck / Cougar Boy',
+            'microvision--1': 'Microvision',
+            'arcadia-2001': 'Arcadia 2001',
+            'vc-4000': 'VC 4000',
+            'adventure-vision': 'Adventure Vision',
+            'epoch-cassette-vision': 'Epoch Cassette Vision',
+            'epoch-super-cassette-vision': 'Epoch Super Cassette Vision',
+
+            # Computer platforms
+            'dos': 'DOS',
+            'win': 'Windows',
+            'win3x': 'Windows 3.x',
+            'windows-apps': 'Windows Apps',
+            'mac': 'Macintosh',
+            'linux': 'Linux',
+            'c64': 'Commodore 64',
+            'c128': 'Commodore 128',
+            'vic-20': 'Commodore VIC-20',
+            'c-plus-4': 'Commodore Plus/4',
+            'c16': 'Commodore 16',
+            'cpet': 'Commodore PET',
+            'commodore-cdtv': 'Commodore CDTV',
+            'zxspectrum': 'ZX Spectrum',
+            'zxs': 'ZX Spectrum',
+            'sinclair-zx81': 'Sinclair ZX81',
+            'zx80': 'ZX80',
+            'zx-spectrum-next': 'ZX Spectrum Next',
+            'msx': 'MSX',
+            'msx2': 'MSX2',
+            'bbcmicro': 'BBC Micro',
+            'acorn-electron': 'Acorn Electron',
+            'acorn-archimedes': 'Acorn Archimedes',
+            'acpc': 'Amstrad CPC',
+            'amstrad-pcw': 'Amstrad PCW',
+            'appleii': 'Apple II',
+            'apple2gs': 'Apple IIGS',
+            'apple-iigs': 'Apple IIGS',
+            'apple-i': 'Apple I',
+            'sharp-x68000': 'Sharp X68000',
+            'sharp-x1': 'Sharp X1',
+            'x1': 'Sharp X1',
+            'fm-towns': 'FM Towns',
+            'fm-7': 'FM-7',
+            'pc-8800-series': 'PC-8800 Series',
+            'pc-9800-series': 'PC-9800 Series',
+            'pc-6001': 'PC-6001',
+            'pc-8000': 'PC-8000',
+            'oric': 'Oric',
+            'dragon-32-slash-64': 'Dragon 32/64',
+            'trs-80': 'TRS-80',
+            'trs-80-color-computer': 'TRS-80 Color Computer',
+            'ti-99': 'TI-99',
+            'ti-994a': 'TI-99/4A',
+            'thomson-mo5': 'Thomson MO5',
+            'thomson-to': 'Thomson TO',
+            'atom': 'Atom',
+            'sam-coupe': 'SAM Coupé',
+            'sinclair-ql': 'Sinclair QL',
+            'enterprise': 'Enterprise',
+            'spectravideo': 'SpectraVideo',
+            'sord-m5': 'Sord M5',
+            'smc-777': 'SMC-777',
+
+            # Mobile platforms
+            'android': 'Android',
+            'ios': 'iOS',
+            'mobile': 'Mobile',
+            'ngage': 'N-Gage',
+            'ngage2': 'N-Gage 2.0',
+            'gizmondo': 'Gizmondo',
+            'zeebo': 'Zeebo',
+            'ouya': 'OUYA',
+            'leapster': 'Leapster',
+            'leapster-explorer-slash-leadpad-explorer': 'Leapster Explorer / LeadPad Explorer',
+            'didj': 'Didj',
+
+            # Modern platforms
+            'stadia': 'Google Stadia',
+            'xboxcloudgaming': 'Xbox Cloud Gaming',
+            'playstation-now': 'PlayStation Now',
+            'geforce-now': 'GeForce Now',
+
+            # Xbox platforms
+            'xbox': 'Xbox',
+            'xbox360': 'Xbox 360',
+            'xboxone': 'Xbox One',
+            'series-x': 'Xbox Series X/S',
+
+            # Handheld platforms
+            'gp32': 'GP32',
+            'gp2x': 'GP2X',
+            'gp2x-wiz': 'GP2X Wiz',
+            'pandora': 'Pandora',
+            'playdate': 'Playdate',
+            'evercade': 'Evercade',
+            'arduboy': 'Arduboy',
+            'pokitto': 'Pokitto',
+
+            # VR platforms
+            'psvr': 'PlayStation VR',
+            'psvr2': 'PlayStation VR2',
+            'oculus-quest': 'Oculus Quest',
+            'oculus-rift': 'Oculus Rift',
+            'meta-quest-2': 'Meta Quest 2',
+            'meta-quest-3': 'Meta Quest 3',
+
+            # Web/Browser
+            'browser': 'Web Browser',
+
+            # Other
+            'pico': 'PICO-8',
+            'tic-80': 'TIC-80',
+        }
+
         try:
             if self.platform_mapping_file.exists():
                 with open(self.platform_mapping_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    cached_mapping = json.load(f)
+                    # Merge: Start with cached, then add fallback for any missing entries
+                    # This ensures fallback values are used for common platforms
+                    # but cached values add any additional platforms from RomM
+                    merged_mapping = fallback_mapping.copy()
+
+                    # Only add cached entries that provide actual platform names (not just slugs)
+                    for slug, name in cached_mapping.items():
+                        # If cached value looks like a proper platform name (not just the slug)
+                        # or if it's not in fallback, add it
+                        if slug not in fallback_mapping or (name != slug and len(name) > len(slug)):
+                            merged_mapping[slug] = name
+
+                    return merged_mapping
         except Exception as e:
             print(f"Failed to load platform mapping: {e}")
-        return {}
+
+        return fallback_mapping
     
     def load_filename_mapping(self):
         """Load filename mapping from file"""
@@ -247,9 +999,59 @@ class GameDataCache:
             print(f"Failed to load filename mapping: {e}")
         return {}
     
+    def build_platform_mapping_from_api(self, platforms_data):
+        """Build platform mapping from RomM API platforms response"""
+        platform_mapping = {}
+
+        for platform in platforms_data:
+            if not isinstance(platform, dict):
+                continue
+
+            platform_name = platform.get('name', '')
+            platform_slug = platform.get('slug', '')
+
+            if not platform_name or not platform_slug:
+                continue
+
+            # Map slug to name
+            platform_mapping[platform_slug] = platform_name
+
+            # Also map common variations
+            variations = [
+                platform_name,
+                platform_name.replace(' ', '_'),
+                platform_name.replace(' ', ''),
+            ]
+
+            for variation in variations:
+                if variation:
+                    platform_mapping[variation] = platform_name
+
+        # Save and update in-memory mapping
+        self.save_platform_mapping(platform_mapping)
+        self.platform_mapping = platform_mapping
+        print(f"📋 Built platform mapping with {len(platform_mapping)} entries from API")
+
+        return platform_mapping
+
     def get_platform_name(self, directory_name):
-        """Get proper platform name from directory name"""
-        return self.platform_mapping.get(directory_name, directory_name)
+        """Get proper platform name from directory name with case-insensitive fallback"""
+        # Try exact match first
+        if directory_name in self.platform_mapping:
+            return self.platform_mapping[directory_name]
+
+        # Try lowercase match
+        lower_name = directory_name.lower()
+        if lower_name in self.platform_mapping:
+            return self.platform_mapping[lower_name]
+
+        # Try case-insensitive search through all keys
+        for key, value in self.platform_mapping.items():
+            if key.lower() == lower_name:
+                return value
+
+        # No match found, return original
+        return directory_name
     
     def get_game_info(self, filename):
         """Get game info from filename"""
@@ -452,32 +1254,101 @@ class GameItem(GObject.Object):
     def __init__(self, game_data):
         super().__init__()
         self.game_data = game_data
-    
+        # Initialize child store for multi-disc games
+        self.child_store = Gio.ListStore()
+        self.rebuild_children()
+
     def __eq__(self, other):
         """Enable proper equality comparison for GameItem objects"""
         if not isinstance(other, GameItem):
             return False
         return self.game_data.get('rom_id') == other.game_data.get('rom_id')
-    
+
     def __hash__(self):
         """Enable GameItem to be used in sets"""
         return hash(self.game_data.get('rom_id', id(self.game_data)))
 
+    def rebuild_children(self):
+        """Rebuild child items (discs) if this is a multi-disc game"""
+        self.child_store.remove_all()
+        if self.game_data.get('is_multi_disc', False):
+            discs = self.game_data.get('discs', [])
+            for disc in discs:
+                disc_item = DiscItem(disc, parent_game=self.game_data)
+                self.child_store.append(disc_item)
+
     @GObject.Property(type=str, default='Unknown')
     def name(self):
         return self.game_data.get('name', 'Unknown')
-    
+
     @GObject.Property(type=bool, default=False)
     def is_downloaded(self):
         return self.game_data.get('is_downloaded', False)
-    
+
     @GObject.Property(type=str, default='Not downloaded')
     def size_text(self):
         if self.game_data.get('is_downloaded'):
             size = self.game_data.get('local_size', 0)
-            if size > 1024 * 1024:
-                return f"{size / (1024*1024):.1f} MB"
-            return f"{size / 1024:.1f} KB" if size > 1024 else f"{size} bytes"
+            if size > 1024**3:
+                return f"{size / (1024**3):.1f} GB"
+            elif size > 1024**2:
+                return f"{size / (1024**2):.1f} MB"
+            elif size > 1024:
+                return f"{size / 1024:.1f} KB"
+            return f"{size} bytes"
+        return "Not downloaded"
+
+class DiscItem(GObject.Object):
+    """Represents an individual disc in a multi-disc game"""
+    def __init__(self, disc_data, parent_game=None):
+        super().__init__()
+        self.disc_data = disc_data
+        self.parent_game = parent_game  # Reference to parent game data
+
+    @GObject.Property(type=str, default='Unknown')
+    def name(self):
+        full_name = self.disc_data.get('name', 'Unknown')
+        # Remove file extension from disc name for cleaner display
+        if full_name != 'Unknown':
+            from pathlib import Path
+            return Path(full_name).stem
+        return full_name
+
+    @GObject.Property(type=bool, default=False)
+    def is_downloaded(self):
+        return self.disc_data.get('is_downloaded', False)
+
+    @GObject.Property(type=str, default='Not downloaded')
+    def size_text(self):
+        if self.disc_data.get('is_downloaded'):
+            disc_path = self.disc_data.get('path')
+            if disc_path:
+                disc_path_obj = Path(disc_path)
+
+                # Try without extension if path doesn't exist (multi-file disc in folder)
+                if not disc_path_obj.exists():
+                    disc_path_obj = disc_path_obj.parent / disc_path_obj.stem
+
+                if disc_path_obj.exists():
+                    if disc_path_obj.is_dir():
+                        size = sum(f.stat().st_size for f in disc_path_obj.rglob('*') if f.is_file())
+                    else:
+                        base_name = disc_path_obj.stem
+                        parent = disc_path_obj.parent
+                        matching = [f for f in parent.iterdir() if f.is_file() and f.stem == base_name]
+                        size = sum(f.stat().st_size for f in matching) or disc_path_obj.stat().st_size
+                else:
+                    size = self.disc_data.get('size', 0)
+            else:
+                size = self.disc_data.get('size', 0)
+
+            if size > 1024**3:
+                return f"{size / (1024**3):.1f} GB"
+            elif size > 1024**2:
+                return f"{size / (1024**2):.1f} MB"
+            elif size > 1024:
+                return f"{size / 1024:.1f} KB"
+            return f"{size} bytes"
         return "Not downloaded"
 
 class PlatformItem(GObject.Object):
@@ -503,9 +1374,14 @@ class PlatformItem(GObject.Object):
         self.notify('sync-status-text')
     
     def rebuild_children(self):
+        """Optimized: Batch append game items instead of one-by-one"""
         self.child_store.remove_all()
-        for game in self.games:
-            self.child_store.append(GameItem(game))
+
+        # Batch create GameItems for better performance
+        if self.games:
+            game_items = [GameItem(game) for game in self.games]
+            # Use splice for batched insertion (much faster than individual appends)
+            self.child_store.splice(0, 0, game_items)
 
 
     @GObject.Property(type=str, default='Unknown Platform')
@@ -616,8 +1492,21 @@ class LibraryTreeModel:
         self._platforms = {}
         
     def create_child_model(self, item):
+        """Create child model for tree items
+
+        Returns:
+            - For PlatformItem: return child_store containing games
+            - For GameItem (multi-disc): return child_store containing discs
+            - For DiscItem: return None (discs have no children)
+        """
         if isinstance(item, PlatformItem):
             return item.child_store
+        elif isinstance(item, GameItem):
+            # Check if this game has discs (multi-disc game)
+            is_multi = item.game_data.get('is_multi_disc', False)
+            child_count = len(item.child_store)
+            if is_multi and child_count > 0:
+                return item.child_store
         return None
 
     def _get_current_expansion_state(self):
@@ -649,7 +1538,10 @@ class LibraryTreeModel:
         self._restore_expansion_from_state(expansion_state)
 
     def update_library(self, games, group_by='platform', loading=False, sync_status_map=None):
+        overall_start = time.time()
+
         # Save expansion state before update
+        save_exp_start = time.time()
         expansion_state = {}
         for i in range(self.tree_model.get_n_items()):
             item = self.tree_model.get_item(i)
@@ -659,25 +1551,31 @@ class LibraryTreeModel:
                     expansion_state[platform.platform_name] = item.get_expanded()
 
         # Group games
+        group_start = time.time()
         groups = {}
         for game in games:
             key = game.get(group_by, 'Unknown')
             groups.setdefault(key, []).append(game)
 
         # Build a map of existing platform items to reuse them
+        map_start = time.time()
         existing_platforms = {}
         for i in range(self.root_store.get_n_items()):
             platform_item = self.root_store.get_item(i)
             existing_platforms[platform_item.platform_name] = platform_item
 
         # Clear the store and rebuild in sorted order
+        clear_start = time.time()
         self.root_store.remove_all()
 
         # Add platforms in alphabetical order
+        rebuild_start = time.time()
         for name, game_list in sorted(groups.items()):
             # Get sync status for this collection/platform
             sync_status = sync_status_map.get(name) if sync_status_map else None
 
+            # Debug: check for multi-disc games in this group
+            multi_count = sum(1 for g in game_list if g.get('is_multi_disc', False))
             if name in existing_platforms:
                 # Reuse existing platform item (preserves state)
                 platform = existing_platforms[name]
@@ -706,6 +1604,7 @@ class EnhancedLibrarySection:
         self.parent = parent_window
         self.library_model = LibraryTreeModel()
         self.selected_game = None
+        self.selected_disc = None  # Track selected disc for launching
         self.selected_collection = None  # Track selected collection for deletion
         self.selected_checkboxes = set()  # Keep this for compatibility
         self.selected_rom_ids = set()     # Add this new tracking
@@ -739,10 +1638,47 @@ class EnhancedLibrarySection:
         self.selected_collections_for_sync = set()  # UI selection state
         self.actively_syncing_collections = set()   # Auto-sync enabled state (persistent)
         self.currently_downloading_collections = set()  # Currently downloading state (temporary)
+        self.completed_sync_collections = set()  # Collections that have completed sync (shows green immediately)
         self.collection_auto_sync_enabled = False
         self.collection_sync_thread = None
         self.collection_sync_interval = 120
         self.load_selected_collections()
+
+    def is_path_validly_downloaded(self, path):
+        """Check if a path (file or folder) is validly downloaded
+
+        Args:
+            path: Path object or string to check
+
+        Returns:
+            bool: True if path is validly downloaded (folder with content or file with size > 1024)
+        """
+        path = Path(path)
+        if not path.exists():
+            return False
+
+        if path.is_dir():
+            # For folders, check if directory has content
+            try:
+                return any(path.iterdir())
+            except (PermissionError, OSError):
+                return False
+        elif path.is_file():
+            # For files, check if file has reasonable size
+            return path.stat().st_size > 1024
+
+        return False
+
+    def get_actual_file_size(self, path):
+        """Get actual size - sum all files for directories, file size for files"""
+        path = Path(path)
+        if path.is_dir():
+            size = sum(f.stat().st_size for f in path.rglob('*') if f.is_file())
+            return size
+        elif path.is_file():
+            return path.stat().st_size
+        else:
+            return 0
 
     def get_collections_for_autosync(self):
         """Get collections selected for auto-sync (either checked or row-selected)"""
@@ -879,10 +1815,17 @@ class EnhancedLibrarySection:
 
     def update_collection_sync_status(self, collection_name):
         """Update the visual indicator for a collection's sync status"""
+        import time
+        entry_time = time.time()
+        self.parent.log_message(f"[DEBUG] update_collection_sync_status called for {collection_name}")
+
         if not hasattr(self, 'library_model') or not self.library_model.tree_model:
+            self.parent.log_message(f"[DEBUG] No library_model, returning")
             return
 
         def update_ui():
+            update_start = time.time()
+            self.parent.log_message(f"[DEBUG] update_ui callback started ({update_start - entry_time:.3f}s after call)")
             model = self.library_model.tree_model
             for i in range(model.get_n_items() if model else 0):
                 tree_item = model.get_item(i)
@@ -890,8 +1833,11 @@ class EnhancedLibrarySection:
                     item = tree_item.get_item()
                     if isinstance(item, PlatformItem) and item.platform_name == collection_name:
                         # Determine the new sync status
-                        if collection_name in self.currently_downloading_collections:
-                            new_status = 'syncing'  # Orange dot
+                        # First check if collection is marked as completed
+                        if hasattr(self, 'completed_sync_collections') and collection_name in self.completed_sync_collections:
+                            new_status = 'synced'  # Green dot - collection sync complete
+                        elif collection_name in self.currently_downloading_collections:
+                            new_status = 'syncing'  # Orange dot - currently downloading
                         elif collection_name in self.actively_syncing_collections:
                             # Check if all games are downloaded
                             all_downloaded = all(g.get('is_downloaded', False) for g in item.games)
@@ -899,14 +1845,18 @@ class EnhancedLibrarySection:
                         else:
                             new_status = 'disabled'  # Grey dot (not enabled)
 
+                        self.parent.log_message(f"[DEBUG] Setting status to {new_status} for {collection_name}")
                         # Update the sync_status and notify
+                        old_status = item.sync_status
                         item.sync_status = new_status
                         item.notify('sync-status-text')
                         item.notify('name')
+                        self.parent.log_message(f"[DEBUG] Status changed from {old_status} to {new_status} ({time.time() - entry_time:.3f}s total)")
                         break
             return False
 
-        GLib.idle_add(update_ui)
+        # Use HIGH priority to execute ASAP
+        GLib.idle_add(update_ui, priority=GLib.PRIORITY_HIGH)
 
     def download_game_directly(self, game):
         """Download game directly WITH progress tracking"""
@@ -919,18 +1869,13 @@ class EnhancedLibrarySection:
             # Get download directory
             download_dir = Path(self.parent.rom_dir_row.get_text())
 
-            # Use mapped slug for RetroDECK compatibility
-            if self.parent.retroarch.is_retrodeck_installation():
-                mapped_slug = self.parent.map_platform_slug_for_retrodeck(platform_slug)
-            else:
-                mapped_slug = platform_slug
-
-            platform_dir = download_dir / mapped_slug
+            # Use platform slug directly (RomM and RetroDECK now use the same slugs)
+            platform_dir = download_dir / platform_slug
             platform_dir.mkdir(parents=True, exist_ok=True)
             download_path = platform_dir / file_name
 
-            # Skip if already downloaded
-            if download_path.exists() and download_path.stat().st_size > 1024:
+            # Skip if already downloaded (handles both files and folders)
+            if self.parent.is_path_validly_downloaded(download_path):
                 return True
 
             # Initialize progress tracking
@@ -1413,17 +2358,22 @@ class EnhancedLibrarySection:
                             file_name = processed_game.get('file_name', '')
                             download_dir = Path(self.parent.rom_dir_row.get_text())
 
-                            if self.parent.retroarch.is_retrodeck_installation():
-                                mapped_slug = self.parent.map_platform_slug_for_retrodeck(platform_slug)
-                            else:
-                                mapped_slug = platform_slug
+                            # Use platform slug directly (RomM and RetroDECK now use the same slugs)
+                            local_path = download_dir / platform_slug / file_name
 
-                            local_path = download_dir / mapped_slug / file_name
+                            # Check download status (handle both files and folders)
+                            is_valid_download = False
+                            if local_path.is_dir():
+                                # For folders, check if directory exists and has content
+                                is_valid_download = any(local_path.iterdir())
+                            elif local_path.is_file():
+                                # For files, check if file exists and has reasonable size
+                                is_valid_download = local_path.stat().st_size > 1024
 
-                            if local_path.exists() and local_path.stat().st_size > 1024:
+                            if is_valid_download:
                                 processed_game['is_downloaded'] = True
                                 processed_game['local_path'] = str(local_path)
-                                processed_game['local_size'] = local_path.stat().st_size
+                                processed_game['local_size'] = self.parent.get_actual_file_size(local_path)
 
                             # Update available_games
                             for i, game in enumerate(self.parent.available_games):
@@ -1665,10 +2615,15 @@ class EnhancedLibrarySection:
 
     def on_toggle_collection_auto_sync(self, toggle_button):
         """Toggle collection auto-sync on/off"""
+        import time
+        start_time = time.time()
+        self.parent.log_message(f"[DEBUG] Toggle activated at {start_time}")
+
         if toggle_button.get_active():
             # Check both checkbox selections AND row selection
             selected_collections = self.selected_collections_for_sync.copy()
-            
+            self.parent.log_message(f"[DEBUG] Got selected collections ({time.time() - start_time:.3f}s)")
+
             # Add currently selected row if in collections view
             if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
                 selection_model = self.column_view.get_model()
@@ -1678,19 +2633,25 @@ class EnhancedLibrarySection:
                         item = tree_item.get_item()
                         if isinstance(item, PlatformItem):
                             selected_collections.add(item.platform_name)
-            
+            self.parent.log_message(f"[DEBUG] Checked row selection ({time.time() - start_time:.3f}s)")
+
             if selected_collections:
                 self.actively_syncing_collections = selected_collections
+                self.parent.log_message(f"[DEBUG] Set actively_syncing_collections ({time.time() - start_time:.3f}s)")
+
+                # Update collection labels to show sync status BEFORE starting sync thread
+                for collection_name in selected_collections:
+                    # Add to currently_downloading_collections to show orange status immediately
+                    self.currently_downloading_collections.add(collection_name)
+                    self.parent.log_message(f"[DEBUG] Added {collection_name} to currently_downloading ({time.time() - start_time:.3f}s)")
+                    self.update_collection_sync_status(collection_name)
+                    self.parent.log_message(f"[DEBUG] Updated status for {collection_name} ({time.time() - start_time:.3f}s)")
+
                 self.start_collection_auto_sync()
+                self.parent.log_message(f"[DEBUG] Started auto sync ({time.time() - start_time:.3f}s)")
                 toggle_button.set_label("Auto-Sync: ON")
                 self.parent.log_message(f"🟡 Collection auto-sync enabled for {len(selected_collections)} collections")
-
-                # Update collection labels to show sync status with a delay to ensure data is loaded
-                def update_statuses():
-                    for collection_name in selected_collections:
-                        self.update_collection_sync_status(collection_name)
-                    return False
-                GLib.timeout_add(500, update_statuses)
+                self.parent.log_message(f"[DEBUG] TOTAL TIME: {time.time() - start_time:.3f}s")
 
                 # Clear UI selections after enabling
                 self.selected_collections_for_sync.clear()
@@ -1817,8 +2778,11 @@ class EnhancedLibrarySection:
 
     def apply_filters(self, games):
         """Apply both platform and search filters to games list"""
+        # Debug: count multi-disc games before filtering
+        multi_before = sum(1 for g in games if g.get('is_multi_disc', False))
+
         filtered_games = games
-        
+
         # Apply platform filter
         selected_index = self.platform_filter.get_selected()
         if selected_index != Gtk.INVALID_LIST_POSITION:
@@ -1826,18 +2790,21 @@ class EnhancedLibrarySection:
             if string_list:
                 selected_platform = string_list.get_string(selected_index)
                 if selected_platform != "All Platforms":
-                    filtered_games = [game for game in filtered_games 
+                    filtered_games = [game for game in filtered_games
                                     if game.get('platform', 'Unknown') == selected_platform]
-        
+
         # Apply search filter
         if self.search_text:
-            filtered_games = [game for game in filtered_games 
-                            if self.search_text in game.get('name', '').lower() or 
+            filtered_games = [game for game in filtered_games
+                            if self.search_text in game.get('name', '').lower() or
                                 self.search_text in game.get('platform', '').lower()]
-        
-        # Apply downloaded filter   
+
+        # Apply downloaded filter
         if self.show_downloaded_only:
             filtered_games = [game for game in filtered_games if game.get('is_downloaded', False)]
+
+        # Debug: count multi-disc games after filtering
+        multi_after = sum(1 for g in filtered_games if g.get('is_multi_disc', False))
 
         return filtered_games
 
@@ -2080,12 +3047,12 @@ class EnhancedLibrarySection:
                                 file_name = game.get('file_name')
                                 if file_name:
                                     local_path = download_dir / platform_slug / file_name
-                                    is_downloaded = local_path.exists() and local_path.stat().st_size > 1024
+                                    is_downloaded = self.is_path_validly_downloaded(local_path)
                                     game['is_downloaded'] = is_downloaded
                                     game['local_path'] = str(local_path) if is_downloaded else None
                                     # Update size from local file if downloaded
                                     if is_downloaded:
-                                        game['local_size'] = local_path.stat().st_size
+                                        game['local_size'] = self.get_actual_file_size(local_path)
                                         downloaded_count += 1
                                     elif 'local_size' not in game:
                                         game['local_size'] = 0
@@ -2152,12 +3119,12 @@ class EnhancedLibrarySection:
                         platform_slug = rom.get('platform_slug') or rom.get('platform_name', 'Unknown')
                         file_name = rom.get('fs_name')
                         local_path = download_dir / platform_slug / file_name if file_name else None
-                        is_downloaded = local_path and local_path.exists() and local_path.stat().st_size > 1024
+                        is_downloaded = local_path and self.is_path_validly_downloaded(local_path)
 
                         # Get file size from local file if downloaded, otherwise from ROM metadata
                         local_size = 0
                         if is_downloaded and local_path:
-                            local_size = local_path.stat().st_size
+                            local_size = self.get_actual_file_size(local_path)
                         elif rom.get('fs_size_bytes'):
                             local_size = rom.get('fs_size_bytes')
 
@@ -2285,50 +3252,52 @@ class EnhancedLibrarySection:
         """Lightning-fast sorting with key pre-computation"""
         if not games:
             return games
-        
-        # Check if we should sort by download status first  
+
+        # Check if we should sort by download status first
         sort_downloaded_first = getattr(self, 'sort_downloaded_first', False)
-        
+
         game_count = len(games)
-        
+
         # For small lists, use simple sorting
         if game_count < 200:
+            start_time = time.time()
             if sort_downloaded_first:
-                return sorted(games, key=lambda game: (
+                result = sorted(games, key=lambda game: (
                     game.get('platform', 'ZZZ_Unknown'),
                     not game.get('is_downloaded', False),  # Downloaded first (False sorts before True)
                     game.get('name', '').lower()
                 ))
             else:
-                return sorted(games, key=lambda game: (
+                result = sorted(games, key=lambda game: (
                     game.get('platform', 'ZZZ_Unknown'),
                     game.get('name', '').lower()
                 ))
-        
+            return result
+
         # For large lists, use optimized sorting with download status
         print(f"⚡ Fast-sorting {game_count:,} games...")
         start_time = time.time()
-        
+
         keyed_games = []
         for game in games:
             platform = game.get('platform', 'ZZZ_Unknown')
             name = game.get('name', '')
             name_lower = name.lower() if name else ''
-            
+
             if sort_downloaded_first:
                 is_downloaded = game.get('is_downloaded', False)
                 sort_key = (platform, not is_downloaded, name_lower)  # Downloaded first
             else:
                 sort_key = (platform, name_lower)
-            
+
             keyed_games.append((sort_key, game))
-        
+
         # Sort using pre-computed keys
         keyed_games.sort(key=lambda x: x[0])
         sorted_games = [game for sort_key, game in keyed_games]
-        
+
         elapsed = time.time() - start_time
-        
+
         return sorted_games
 
     def update_game_progress(self, rom_id, progress_info):
@@ -2387,6 +3356,54 @@ class EnhancedLibrarySection:
                             item.notify('size-text')
                             item.notify('name')
 
+            return False
+
+        GLib.idle_add(update_cells)
+
+    def update_disc_progress(self, rom_id, disc_name, progress_info):
+        """Update progress for a specific disc in a multi-disc game"""
+        disc_key = f"{rom_id}:{disc_name}"
+
+        if progress_info:
+            # Store disc progress separately
+            if not hasattr(self, 'disc_progress'):
+                self.disc_progress = {}
+            self.disc_progress[disc_key] = progress_info
+        elif hasattr(self, 'disc_progress') and disc_key in self.disc_progress:
+            del self.disc_progress[disc_key]
+
+        # Find and update the specific disc item
+        self._update_disc_status_display(rom_id, disc_name)
+
+    def _update_disc_status_display(self, rom_id, disc_name):
+        """Update disc status display by directly updating cells"""
+        def update_cells():
+            model = self.library_model.tree_model
+
+            # Find the game item first
+            for i in range(model.get_n_items() if model else 0):
+                tree_item = model.get_item(i)
+                if tree_item and tree_item.get_depth() == 0:  # Platform level
+                    platform_item = tree_item.get_item()
+                    if isinstance(platform_item, PlatformItem):
+                        # Look through child items (games)
+                        for j in range(platform_item.child_store.get_n_items()):
+                            game_item = platform_item.child_store.get_item(j)
+                            if isinstance(game_item, GameItem) and game_item.game_data.get('rom_id') == rom_id:
+                                # Found the game, now look through its discs
+                                if hasattr(game_item, 'child_store') and game_item.child_store:
+                                    for k in range(game_item.child_store.get_n_items()):
+                                        disc_item = game_item.child_store.get_item(k)
+                                        if isinstance(disc_item, DiscItem) and disc_item.disc_data.get('name') == disc_name:
+                                            # Trigger property notifications to update UI
+                                            # This will call the update functions in bind_size_cell and bind_status_cell
+                                            disc_item.notify('is-downloaded')
+                                            disc_item.notify('size-text')
+
+                                            # Also queue a redraw to ensure visual updates
+                                            if hasattr(self, 'column_view'):
+                                                self.column_view.queue_draw()
+                                            return False
             return False
 
         GLib.idle_add(update_cells)
@@ -2478,57 +3495,75 @@ class EnhancedLibrarySection:
 
     def update_games_library(self, games):
         """Update the tree view with enhanced stable expansion preservation"""
-        if getattr(self.parent, '_dialog_open', False):
-            return
-        
-        current_mode = getattr(self, 'current_view_mode', 'platform')
-        
-        # Apply current filters (platform + search)
-        games = self.apply_filters(games)
-        self.filtered_games = games
-        
-        # Apply current platform filter
-        selected_index = self.platform_filter.get_selected()
-        if selected_index != Gtk.INVALID_LIST_POSITION:
-            string_list = self.platform_filter.get_model()
-            if string_list:
-                selected_platform = string_list.get_string(selected_index)
-                if selected_platform != "All Platforms":
-                    games = [game for game in games if game.get('platform', 'Unknown') == selected_platform]
-        
-        self.filtered_games = games
-        
-        # Save scroll position
-        scroll_position = 0
-        if hasattr(self, 'column_view'):
-            scrolled_window = self.column_view.get_parent()
-            if scrolled_window:
-                vadj = scrolled_window.get_vadjustment()
-                if vadj:
-                    scroll_position = vadj.get_value()
-        
-        def do_update():
-            self.library_model.update_library(games)
-            self.update_group_filter(games)  # Use filtered games, not all games
-            
-            if games:
-                downloaded_count = sum(1 for g in games if g.get('is_downloaded'))
-                total_count = len(games)
-        
-        # Update with selection preservation
-        self.preserve_selections_during_update(do_update)
-        
-        # Restore scroll position
-        def restore_scroll():
+        multi_count = sum(1 for g in games if g.get('is_multi_disc', False))
+
+        # Debug: show stack trace to see who's calling this
+        if len(games) < 20 or multi_count == 0:
+            import traceback
+            for line in traceback.format_stack()[-5:-1]:
+                pass
+
+        with PerformanceTimer(f"update_games_library called with {len(games)} games") as timer:
+            if getattr(self.parent, '_dialog_open', False):
+                return
+
+            current_mode = getattr(self, 'current_view_mode', 'platform')
+
+            # Apply current filters (platform + search)
+            filter_start = time.time()
+            games = self.apply_filters(games)
+            timer.checkpoint(f"apply_filters: {time.time() - filter_start:.2f}s")
+            self.filtered_games = games
+
+            # Apply current platform filter
+            plat_filter_start = time.time()
+            selected_index = self.platform_filter.get_selected()
+            if selected_index != Gtk.INVALID_LIST_POSITION:
+                string_list = self.platform_filter.get_model()
+                if string_list:
+                    selected_platform = string_list.get_string(selected_index)
+                    if selected_platform != "All Platforms":
+                        games = [game for game in games if game.get('platform', 'Unknown') == selected_platform]
+            timer.checkpoint(f"platform filter: {time.time() - plat_filter_start:.2f}s")
+
+            self.filtered_games = games
+
+            # Save scroll position
+            scroll_position = 0
             if hasattr(self, 'column_view'):
                 scrolled_window = self.column_view.get_parent()
                 if scrolled_window:
                     vadj = scrolled_window.get_vadjustment()
                     if vadj:
-                        vadj.set_value(scroll_position)
-            return False
-        
-        GLib.timeout_add(400, restore_scroll)
+                        scroll_position = vadj.get_value()
+
+            def do_update():
+                update_start = time.time()
+                self.library_model.update_library(games)
+
+                group_filter_start = time.time()
+                self.update_group_filter(games)  # Use filtered games, not all games
+
+                if games:
+                    downloaded_count = sum(1 for g in games if g.get('is_downloaded'))
+                    total_count = len(games)
+
+            # Update with selection preservation
+            preserve_start = time.time()
+            self.preserve_selections_during_update(do_update)
+            timer.checkpoint(f"preserve_selections_during_update: {time.time() - preserve_start:.2f}s")
+
+            # Restore scroll position
+            def restore_scroll():
+                if hasattr(self, 'column_view'):
+                    scrolled_window = self.column_view.get_parent()
+                    if scrolled_window:
+                        vadj = scrolled_window.get_vadjustment()
+                        if vadj:
+                            vadj.set_value(scroll_position)
+                return False
+
+            GLib.timeout_add(400, restore_scroll)
 
     def refresh_all_platform_checkboxes(self):
         """Force refresh all platform checkbox states to match current selections"""
@@ -2570,7 +3605,7 @@ class EnhancedLibrarySection:
     def get_selected_games(self):
         selected_games = []
         selection_model = self.column_view.get_model()
-        
+
         # Get row selections
         for i in range(selection_model.get_n_items()):
             if selection_model.is_selected(i):
@@ -2579,15 +3614,39 @@ class EnhancedLibrarySection:
                     item = tree_item.get_item()
                     if isinstance(item, GameItem):
                         selected_games.append(item.game_data)
-        
+
         # Add checkbox selections
         for rom_id in self.selected_rom_ids:
             for game in self.parent.available_games:
                 if game.get('rom_id') == rom_id and game not in selected_games:
                     selected_games.append(game)
                     break
-        
+
         return selected_games
+
+    def get_selected_discs(self):
+        """Get selected discs from multi-disc games"""
+        selected_discs = []
+        for key in self.selected_game_keys:
+            if key.startswith('disc:'):
+                # Parse disc key: disc:{rom_id}:{disc_name}
+                parts = key.split(':', 2)
+                if len(parts) == 3:
+                    rom_id = int(parts[1])
+                    disc_name = parts[2]
+
+                    # Find the game and disc
+                    for game in self.parent.available_games:
+                        if game.get('rom_id') == rom_id and game.get('is_multi_disc'):
+                            for disc in game.get('discs', []):
+                                if disc.get('name') == disc_name:
+                                    selected_discs.append({
+                                        'game': game,
+                                        'disc': disc
+                                    })
+                                    break
+                            break
+        return selected_discs
 
     def get_game_identifier(self, game_data):
         """Get unique identifier for a game (ROM ID if available, otherwise name+platform)"""
@@ -3348,7 +4407,7 @@ class EnhancedLibrarySection:
                             file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
                             platform_dir = download_dir / platform_slug
                             local_path = platform_dir / file_name
-                            if local_path.exists() and local_path.stat().st_size > 1024:
+                            if self.parent.is_path_validly_downloaded(local_path):
                                 downloaded_count += 1
 
                         if downloaded_count == len(collection_roms) and len(collection_roms) > 0:
@@ -3440,22 +4499,34 @@ class EnhancedLibrarySection:
             else:
                 # For platforms view, use simple binding
                 item.bind_property('name', label, 'label', GObject.BindingFlags.SYNC_CREATE)
+        elif isinstance(item, DiscItem):
+            # For disc items, show media-optical icon
+            icon.set_from_icon_name("media-optical-symbolic")
+
+            def update_disc_label(*args):
+                label.set_text(item.name)
+
+            item.connect('notify::name', update_disc_label)
+            update_disc_label()
         else:
-            # For games, set up dynamic icon updates
+            # For games (GameItem), set up dynamic icon updates
             def update_icon_and_name(*args):
-                # Update icon based on download status
-                if item.game_data.get('is_downloaded', False):
+                # Update icon based on download status or multi-disc
+                if item.game_data.get('is_multi_disc', False):
+                    # Multi-disc game - show optical disc icon
+                    icon.set_from_icon_name("media-optical-symbolic")
+                elif item.game_data.get('is_downloaded', False):
                     icon.set_from_icon_name("object-select-symbolic")
                 else:
                     icon.set_from_icon_name("folder-download-symbolic")
-                
+
                 # Update label
                 label.set_text(item.name)
-            
+
             # Connect to property changes that might affect the icon
             item.connect('notify::name', update_icon_and_name)
             item.connect('notify::is-downloaded', update_icon_and_name)
-            
+
             # Initial update
             update_icon_and_name()
 
@@ -3474,6 +4545,38 @@ class EnhancedLibrarySection:
             drawing_area.set_visible(False)
             label.set_visible(True)
             item.bind_property('status-text', label, 'label', GObject.BindingFlags.SYNC_CREATE)
+        elif isinstance(item, DiscItem):
+            # For discs, show download status with progress support
+            label.set_visible(False)
+            drawing_area.set_visible(True)
+
+            def update_disc_status(*args):
+                # Check for disc download progress
+                rom_id = item.parent_game.get('rom_id') if item.parent_game else None
+                disc_name = item.disc_data.get('name')
+                disc_key = f"{rom_id}:{disc_name}" if rom_id and disc_name else None
+
+                progress_info = None
+                if disc_key and hasattr(self, 'disc_progress'):
+                    progress_info = self.disc_progress.get(disc_key)
+
+                if progress_info and progress_info.get('downloading'):
+                    # Show percentage using Cairo (orange)
+                    progress = progress_info.get('progress', 0.0)
+                    self.parent.draw_download_status_icon(drawing_area, 'downloading', progress)
+                elif progress_info and progress_info.get('completed'):
+                    # Show green checkmark icon
+                    self.parent.draw_download_status_icon(drawing_area, 'completed')
+                elif item.is_downloaded:
+                    # Downloaded disc
+                    self.parent.draw_download_status_icon(drawing_area, 'downloaded')
+                else:
+                    # Not downloaded
+                    self.parent.draw_download_status_icon(drawing_area, 'not_downloaded')
+
+            # Connect to property changes
+            item.connect('notify::is-downloaded', update_disc_status)
+            update_disc_status()
         elif isinstance(item, GameItem):
             # Connect to name property changes to update status
             def update_status(*args):
@@ -3510,6 +4613,49 @@ class EnhancedLibrarySection:
         
         if isinstance(item, PlatformItem):
             item.bind_property('size-text', label, 'label', GObject.BindingFlags.SYNC_CREATE)
+        elif isinstance(item, DiscItem):
+            # For discs, show size with progress support
+            def update_disc_size(*args):
+                rom_id = item.parent_game.get('rom_id') if item.parent_game else None
+                disc_name = item.disc_data.get('name')
+                disc_key = f"{rom_id}:{disc_name}" if rom_id and disc_name else None
+
+                progress_info = None
+                if disc_key and hasattr(self, 'disc_progress'):
+                    progress_info = self.disc_progress.get(disc_key)
+
+                if progress_info and progress_info.get('downloading'):
+                    downloaded = progress_info.get('downloaded', 0)
+                    total = progress_info.get('total', 0)
+                    speed = progress_info.get('speed', 0)
+
+                    def format_size_compact(bytes_val):
+                        if bytes_val >= 1024**3:
+                            return f"{bytes_val / (1024**3):.1f}G"
+                        elif bytes_val >= 1024**2:
+                            return f"{bytes_val / (1024**2):.0f}M"
+                        else:
+                            return f"{bytes_val / 1024:.0f}K"
+
+                    if total > 0:
+                        size_text = f"{format_size_compact(downloaded)}/{format_size_compact(total)}"
+                    else:
+                        size_text = format_size_compact(downloaded)
+
+                    if speed > 0:
+                        speed_str = format_size_compact(speed)
+                        final_text = f"{size_text} @{speed_str}/s"
+                    else:
+                        final_text = f"{size_text} ..."
+
+                    label.set_text(final_text)
+                else:
+                    size_text = item.size_text
+                    label.set_text(size_text)
+
+            item.connect('notify::size-text', update_disc_size)
+            item.connect('notify::is-downloaded', update_disc_size)
+            update_disc_size()  # Initial update
         elif isinstance(item, GameItem):
             def update_size(*args):
                 rom_id = item.game_data.get('rom_id')
@@ -3742,10 +4888,61 @@ class EnhancedLibrarySection:
         if getattr(self, '_selection_blocked', False) and not is_bulk_download:
             return
 
-        
+        # Priority 0: Check for selected discs first
+        selected_discs = self.get_selected_discs()
+        if selected_discs:
+            # Check if any disc is not downloaded
+            not_downloaded_discs = [d for d in selected_discs if not d['disc'].get('is_downloaded', False)]
+            is_connected = self.parent.romm_client and self.parent.romm_client.authenticated
+
+            # Clear all button style classes first
+            self.action_button.remove_css_class('warning')
+            self.action_button.remove_css_class('suggested-action')
+            self.action_button.remove_css_class('destructive-action')
+
+            if not_downloaded_discs and is_connected:
+                self.action_button.set_label(f"Download ({len(not_downloaded_discs)})")
+                self.action_button.add_css_class('warning')
+                self.action_button.set_sensitive(True)
+            else:
+                self.action_button.set_label("Download")
+                self.action_button.set_sensitive(False)
+
+            # Enable delete if any disc is downloaded
+            downloaded_discs = [d for d in selected_discs if d['disc'].get('is_downloaded', False)]
+            self.delete_button.set_sensitive(len(downloaded_discs) > 0)
+            self.open_in_romm_button.set_sensitive(False)
+            return  # Exit early
+
         # ADD THIS BLOCK HERE:
         # Priority 1: Check for single row selection first
         if self.selected_game:
+            # Check if a specific disc is selected
+            if self.selected_disc:
+                # Individual disc selected - show Launch button if downloaded
+                is_disc_downloaded = self.selected_disc.get('is_downloaded', False)
+                is_connected = self.parent.romm_client and self.parent.romm_client.authenticated
+
+                # Clear all button style classes first
+                self.action_button.remove_css_class('warning')
+                self.action_button.remove_css_class('suggested-action')
+                self.action_button.remove_css_class('destructive-action')
+
+                if is_disc_downloaded:
+                    self.action_button.set_label("Launch")
+                    self.action_button.add_css_class('suggested-action')
+                    self.action_button.set_sensitive(True)
+                else:
+                    # Disc not downloaded - disable action button (cannot download individual discs)
+                    self.action_button.set_label("Download")
+                    self.action_button.set_sensitive(False)
+
+                # Disable delete and open for individual discs
+                self.delete_button.set_sensitive(False)
+                self.open_in_romm_button.set_sensitive(False)
+                return  # Exit early
+
+            # Game selected (not a disc)
             is_downloaded = self.selected_game.get('is_downloaded', False)
             is_connected = self.parent.romm_client and self.parent.romm_client.authenticated
             rom_id = self.selected_game.get('rom_id')
@@ -3820,7 +5017,7 @@ class EnhancedLibrarySection:
             not_downloaded_games = [g for g in selected_games
                                    if not g.get('is_downloaded', False)
                                    and g.get('rom_id') not in downloading_rom_ids]
-            
+
             if len(selected_games) == 1:
                 # Single checkbox selection
                 game = selected_games[0]
@@ -3938,8 +5135,12 @@ class EnhancedLibrarySection:
                     self.open_in_romm_button.set_sensitive(is_connected)
                     self.selected_collection = None
                     return
-        
+
         # No selections - disable all buttons
+        # Clear all button style classes first
+        self.action_button.remove_css_class('warning')
+        self.action_button.remove_css_class('suggested-action')
+        self.action_button.remove_css_class('destructive-action')
         self.action_button.set_sensitive(False)
         self.action_button.set_label("Download")
         self.delete_button.set_sensitive(False)
@@ -3949,19 +5150,33 @@ class EnhancedLibrarySection:
         """Update filter dropdown for platforms or collections"""
         groups = set()
         group_key = 'collection' if group_by == 'collection' else 'platform'
-        
+
         for game in games:
             groups.add(game.get(group_key, 'Unknown'))
-        
+
         prefix = "All Collections" if group_by == 'collection' else "All Platforms"
         group_list = [prefix] + sorted(groups)
-        
+
         string_list = Gtk.StringList()
         for group in group_list:
             string_list.append(group)
-        
-        self.platform_filter.set_model(string_list)
-        self.platform_filter.set_selected(0)
+
+        # Block the notify::selected-item signal while updating to prevent duplicate update_library calls
+        try:
+            # Use a flag to prevent recursive calls
+            if not hasattr(self, '_updating_filter'):
+                self._updating_filter = False
+
+            if self._updating_filter:
+                return  # Already updating, skip
+
+            self._updating_filter = True
+            self.platform_filter.set_model(string_list)
+            self.platform_filter.set_selected(0)
+            self._updating_filter = False
+        except Exception as e:
+            self._updating_filter = False
+            print(f"Error updating group filter: {e}")
     
     def on_selection_changed(self, selection_model, position, n_items):
         """Handle selection changes for both single and multi-selection"""
@@ -3970,14 +5185,27 @@ class EnhancedLibrarySection:
         for i in range(selection_model.get_n_items()):
             if selection_model.is_selected(i):
                 selected_positions.append(i)
-        
+
         if len(selected_positions) == 1:
             # Single item selected
             tree_item = selection_model.get_item(selected_positions[0])
             item = tree_item.get_item()
-            
+
             if isinstance(item, GameItem):
                 self.selected_game = item.game_data
+                self.selected_disc = None  # Clear disc selection
+                self.selected_collection = None  # Clear collection selection
+                # Clear checkbox selections without full refresh
+                if self.selected_checkboxes or self.selected_rom_ids or self.selected_game_keys:
+                    self.selected_checkboxes.clear()
+                    self.selected_rom_ids.clear()
+                    self.selected_game_keys.clear()
+                    GLib.idle_add(self.force_checkbox_sync)
+                    GLib.idle_add(self.refresh_all_platform_checkboxes)
+            elif isinstance(item, DiscItem):
+                # Disc selected - store both the disc and its parent game
+                self.selected_disc = item.disc_data
+                self.selected_game = item.parent_game  # Store parent game for context
                 self.selected_collection = None  # Clear collection selection
                 # Clear checkbox selections without full refresh
                 if self.selected_checkboxes or self.selected_rom_ids or self.selected_game_keys:
@@ -3988,16 +5216,18 @@ class EnhancedLibrarySection:
                     GLib.idle_add(self.refresh_all_platform_checkboxes)
             elif isinstance(item, PlatformItem):
                 self.selected_game = None
+                self.selected_disc = None  # Clear disc selection
                 # Note: selected_collection is set in update_action_buttons for collection rows
             # Update button states for both game and platform selections
             self.update_action_buttons()
         else:
             # Multiple or no row selection
             self.selected_game = None
+            self.selected_disc = None  # Clear disc selection
             self.selected_collection = None  # Clear collection selection
             # Update button states
             self.update_action_buttons()
-        
+
         # Update selection label
         self.update_selection_label()
 
@@ -4007,19 +5237,22 @@ class EnhancedLibrarySection:
 
     def update_selection_label(self):
         """Update the selection label text"""
-        # SKIP UPDATES DURING DIALOG  
+        # SKIP UPDATES DURING DIALOG
         if getattr(self, '_selection_blocked', False):
             return
 
+        # Count selected discs
+        disc_count = len(self.get_selected_discs())
+
         # Count selected games using the same logic as action buttons
         selected_count = 0
-        
+
         # FIX: Use correct games source based on view mode
         if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
             games_to_check = getattr(self, 'collections_games', [])
         else:
             games_to_check = self.parent.available_games
-        
+
         for game in games_to_check:  # CHANGED: was self.parent.available_games
             # Handle collection mode differently
             if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
@@ -4036,9 +5269,16 @@ class EnhancedLibrarySection:
                     selected_count += 1
                 elif identifier_type == 'game_key' and identifier_value in self.selected_game_keys:
                     selected_count += 1
-        
+
         # Rest of the method unchanged...
-        if self.selected_game and selected_count == 0:
+        if disc_count > 0:
+            self.selection_label.set_text(f"{disc_count} disc{'s' if disc_count != 1 else ''} checked")
+        elif self.selected_disc:
+            # Show disc name when a disc is selected
+            game_name = self.selected_game.get('name', 'Unknown')
+            disc_name = self.selected_disc.get('name', 'Unknown Disc')
+            self.selection_label.set_text(f"{game_name} - {disc_name}")
+        elif self.selected_game and selected_count == 0:
             game_name = self.selected_game.get('name', 'Unknown')
             self.selection_label.set_text(f"{game_name}")
         elif selected_count > 0:
@@ -4063,12 +5303,16 @@ class EnhancedLibrarySection:
     
     def on_platform_filter_changed(self, dropdown, pspec):
         """Handle platform/collection filter changes"""
+        # Skip if we're programmatically updating the filter
+        if getattr(self, '_updating_filter', False):
+            return
+
         # Apply combined filters
         filtered_games = self.apply_filters(self.parent.available_games)
-        
+
         # Determine current view mode
         group_by = 'collection' if hasattr(self, 'view_mode_toggle') and self.view_mode_toggle.get_active() else 'platform'
-        
+
         self.library_model.update_library(filtered_games, group_by=group_by)
         self.filtered_games = filtered_games
         
@@ -4158,11 +5402,35 @@ class EnhancedLibrarySection:
                 self.parent.cancel_download(rom_id)
             return
 
+        # Check for selected discs first
+        selected_discs = self.get_selected_discs()
+        if selected_discs:
+            # Individual disc downloads are disabled due to RomM API limitations
+            # RomM always downloads all discs when requesting any disc from a multi-disc game
+            game_name = selected_discs[0]['game'].get('name', 'this game')
+            self.parent.log_message(
+                f"⚠️ Cannot download individual discs. Please select and download '{game_name}' "
+                f"to get all discs at once. (RomM API limitation)"
+            )
+            # Clear selections
+            GLib.timeout_add(100, self.clear_checkbox_selections_smooth)
+            return
+
         # ADD THIS BLOCK FIRST:
         # Priority: Handle single row selection directly
         if self.selected_game:
             game = self.selected_game
             rom_id = game.get('rom_id')
+
+            # Check if a specific disc is selected
+            if self.selected_disc:
+                # Launch the specific disc
+                if self.selected_disc.get('is_downloaded', False):
+                    if hasattr(self.parent, 'launch_disc'):
+                        self.parent.launch_disc(game, self.selected_disc)
+                    else:
+                        self.parent.log_message("⚠️ Disc launching not implemented")
+                return  # Exit early
 
             # Check if download is in progress - if so, cancel it
             is_downloading = (rom_id and rom_id in self.parent.download_progress and
@@ -4269,6 +5537,16 @@ class EnhancedLibrarySection:
         if hasattr(self, 'selected_collection') and self.selected_collection:
             # Collection deletion
             self.delete_collection(self.selected_collection)
+            return
+
+        # Check for selected discs first
+        selected_discs = self.get_selected_discs()
+        if selected_discs:
+            # Delete selected discs
+            for item in selected_discs:
+                self.parent.delete_disc(item['game'], item['disc'])
+            # Clear selections
+            GLib.timeout_add(500, self.clear_checkbox_selection)
             return
 
         selected_games = []
@@ -4468,14 +5746,15 @@ class EnhancedLibrarySection:
 
     def update_single_game(self, updated_game_data, skip_platform_update=False):
         """Update a single game in the tree without rebuilding - preserves expansion state"""
+        rom_id = updated_game_data.get('rom_id')
+
         # Update master list
         for i, game in enumerate(self.parent.available_games):
-            if game.get('rom_id') == updated_game_data.get('rom_id'):
+            if game.get('rom_id') == rom_id:
                 self.parent.available_games[i] = updated_game_data
                 break
 
         # Try to update in-place first, avoiding full rebuild
-        rom_id = updated_game_data.get('rom_id')
         updated = False
 
         # In collection view, also update the collections_games cache
@@ -4508,13 +5787,17 @@ class EnhancedLibrarySection:
                             for k in range(platform_item.child_store.get_n_items()):
                                 game_item = platform_item.child_store.get_item(k)
                                 if isinstance(game_item, GameItem) and game_item.game_data.get('rom_id') == rom_id:
-                                    # Update the game_data reference
+                                    # Deep copy game data to avoid reference issues with disc arrays
+                                    import copy
                                     if self.current_view_mode == 'collection':
-                                        updated_game_with_collection = updated_game_data.copy()
+                                        updated_game_with_collection = copy.deepcopy(updated_game_data)
                                         updated_game_with_collection['collection'] = game_item.game_data.get('collection')
                                         game_item.game_data = updated_game_with_collection
                                     else:
-                                        game_item.game_data = updated_game_data
+                                        game_item.game_data = copy.deepcopy(updated_game_data)
+                                    # Rebuild children for multi-disc games to update disc status
+                                    if game_item.game_data.get('is_multi_disc', False):
+                                        game_item.rebuild_children()
                                     # Trigger property notifications to refresh UI
                                     game_item.notify('name')
                                     game_item.notify('is-downloaded')
@@ -4556,7 +5839,28 @@ class EnhancedLibrarySection:
         while box.get_first_child():
             box.remove(box.get_first_child())
 
-        if isinstance(item, GameItem):
+        if isinstance(item, DiscItem):
+            # For individual discs, use checkboxes (disabled - for visual consistency only)
+            checkbox = Gtk.CheckButton()
+            checkbox.connect('toggled', self.on_checkbox_toggled)
+            box.append(checkbox)
+
+            checkbox.set_visible(True)
+            checkbox.disc_item = item
+            checkbox.tree_item = tree_item
+            checkbox.is_disc = True
+
+            # Disable disc checkboxes - users cannot check individual discs
+            # but can still select the row for launching
+            checkbox.set_sensitive(False)
+            checkbox.set_tooltip_text("Individual discs cannot be selected. Select the parent game instead.")
+
+            # Check if this disc is selected
+            disc_key = f"disc:{item.parent_game.get('rom_id')}:{item.disc_data.get('name')}"
+            should_be_active = disc_key in self.selected_game_keys
+            checkbox.set_active(should_be_active)
+
+        elif isinstance(item, GameItem):
             # For games, use checkboxes
             checkbox = Gtk.CheckButton()
             checkbox.connect('toggled', self.on_checkbox_toggled)
@@ -4701,7 +6005,21 @@ class EnhancedLibrarySection:
 
     def on_checkbox_toggled(self, checkbox):
         """Handle checkbox toggle with debugging"""
-        if hasattr(checkbox, 'is_platform') and checkbox.is_platform:
+        if hasattr(checkbox, 'is_disc') and checkbox.is_disc:
+            # Disc checkbox toggled
+            disc_item = checkbox.disc_item
+            disc_key = f"disc:{disc_item.parent_game.get('rom_id')}:{disc_item.disc_data.get('name')}"
+
+            if checkbox.get_active():
+                self.selected_game_keys.add(disc_key)
+            else:
+                self.selected_game_keys.discard(disc_key)
+
+            # Update UI
+            self.update_action_buttons()
+            self.update_selection_label()
+
+        elif hasattr(checkbox, 'is_platform') and checkbox.is_platform:
             platform_name = checkbox.platform_item.platform_name
             platform_item = checkbox.platform_item
 
@@ -4834,14 +6152,25 @@ class EnhancedLibrarySection:
 
     def on_switch_toggled(self, switch, collection_name):
         """Handle switch toggle for collection auto-sync"""
+        import time
+        toggle_start = time.time()
+        self.parent.log_message(f"[DEBUG] on_switch_toggled called for {collection_name}, active={switch.get_active()}")
+
         if switch.get_active():
             # ENABLE: Add collection to sync
             self.selected_collections_for_sync.add(collection_name)
             self.actively_syncing_collections.add(collection_name)
+            # Add to currently_downloading to show orange immediately
+            self.currently_downloading_collections.add(collection_name)
+            # Remove from completed (if it was there) so it shows orange, not green
+            if hasattr(self, 'completed_sync_collections'):
+                self.completed_sync_collections.discard(collection_name)
+            self.parent.log_message(f"[DEBUG] Added to collections ({time.time() - toggle_start:.3f}s)")
 
             # Download missing games for this collection immediately
             self.download_single_collection_games(collection_name)
             self.parent.log_message(f"📥 Enabling auto-sync for '{collection_name}'")
+            self.parent.log_message(f"[DEBUG] Download queued ({time.time() - toggle_start:.3f}s)")
 
             # Initialize collection cache
             def init_collection_cache():
@@ -4863,14 +6192,20 @@ class EnhancedLibrarySection:
                 self.start_collection_auto_sync()
             else:
                 self.collection_auto_sync_enabled = True
+            self.parent.log_message(f"[DEBUG] Sync started ({time.time() - toggle_start:.3f}s)")
 
-            # Update status indicator
-            GLib.timeout_add(1000, lambda: self.update_collection_sync_status(collection_name) or False)
+            # Update status indicator IMMEDIATELY (no delay)
+            self.update_collection_sync_status(collection_name)
+            self.parent.log_message(f"[DEBUG] Status updated ({time.time() - toggle_start:.3f}s)")
+            self.parent.log_message(f"[DEBUG] TOTAL on_switch_toggled time: {time.time() - toggle_start:.3f}s")
 
         else:
             # DISABLE: Remove collection from sync
             self.selected_collections_for_sync.discard(collection_name)
             self.actively_syncing_collections.discard(collection_name)
+            # Also remove from completed collections
+            if hasattr(self, 'completed_sync_collections'):
+                self.completed_sync_collections.discard(collection_name)
 
             # Stop global sync if no collections left
             if not self.actively_syncing_collections:
@@ -5000,7 +6335,7 @@ class EnhancedLibrarySection:
         # If we couldn't find checkboxes (maybe they're not created yet), 
         # force them to be updated when they are created
         if updated_count == 0:
-            print("DEBUG: No checkboxes found, will update on next bind")
+            pass
 
     def force_checkbox_sync(self):
         """Force all visible checkboxes to match current selection state"""
@@ -5444,7 +6779,7 @@ class RomMClient:
                     params={
                         'limit': limit,
                         'offset': offset,
-                        'fields': 'id,name,fs_name,platform_name,platform_slug'
+                        'fields': 'id,name,fs_name,platform_name,platform_slug,files,multi'
                     },
                     timeout=60
                 )
@@ -5479,6 +6814,22 @@ class RomMClient:
             print(f"Error fetching collections: {e}")
         return []
 
+    def get_platforms(self):
+        """Get list of all platforms from RomM"""
+        try:
+            response = self.session.get(
+                urljoin(self.base_url, '/api/platforms'),
+                timeout=10
+            )
+            if response.status_code == 200:
+                return response.json()
+            else:
+                print(f"Failed to get platforms: {response.status_code}")
+                return []
+        except Exception as e:
+            print(f"Error fetching platforms: {e}")
+        return []
+
     def get_collection_roms(self, collection_id):
         """Get ROMs in a specific collection"""
         try:
@@ -5486,10 +6837,16 @@ class RomMClient:
                 urljoin(self.base_url, f'/api/roms?collection_id={collection_id}'),
                 timeout=30
             )
-            
+
             if response.status_code == 200:
                 data = response.json()
-                return data.get('items', [])
+                items = data.get('items', [])
+
+                # Debug: Check for Final Fantasy in collections
+                for rom in items:
+                    rom_name = rom.get('name', '') or rom.get('fs_name', '')
+
+                return items
             else:
                 print(f"Failed to get collection ROMs: {response.status_code}")
                 return []
@@ -5501,32 +6858,53 @@ class RomMClient:
     def _fetch_all_games_chunked(self, progress_callback):
         """Fetch all games using parallel requests"""
         try:
-            # First, get total count
-            response = self.session.get(
-                urljoin(self.base_url, '/api/roms'),
-                params={'limit': 1, 'offset': 0, 'fields': 'id'},
-                timeout=30
-            )
-            
-            if response.status_code != 200:
-                return [], 0
-                
-            data = response.json()
-            total_games = data.get('total', 0)
-            
-            if total_games == 0:
-                return [], 0
-                
-            chunk_size = 500
-            total_chunks = (total_games + chunk_size - 1) // chunk_size
-            
-            print(f"📚 Fetching {total_games:,} games in {total_chunks} chunks of {chunk_size:,} (parallel)...")
-            
-            # Use existing parallel fetching
-            all_games = self._fetch_pages_parallel(total_games, chunk_size, total_chunks, progress_callback)
-            
-            return all_games, len(all_games)
-            
+            with PerformanceTimer("API fetch - full sync") as timer:
+                # First, get total count (optimized with shorter timeout and caching)
+                count_start = time.time()
+
+                # Try to use cached count if available and recent (within 30 seconds)
+                cached_count = getattr(self, '_cached_game_count', None)
+                cache_time = getattr(self, '_cached_game_count_time', 0)
+                current_time = time.time()
+
+                if cached_count and (current_time - cache_time) < 30:
+                    total_games = cached_count
+                    timer.checkpoint(f"Initial count request: {time.time() - count_start:.2f}s (from cache)")
+                else:
+                    # Fetch count with optimized timeout
+                    response = self.session.get(
+                        urljoin(self.base_url, '/api/roms'),
+                        params={'limit': 1, 'offset': 0, 'fields': 'id'},
+                        timeout=10  # Reduced from 30s to 10s
+                    )
+                    timer.checkpoint(f"Initial count request: {time.time() - count_start:.2f}s")
+
+                    if response.status_code != 200:
+                        return [], 0
+
+                    data = response.json()
+                    total_games = data.get('total', 0)
+
+                    # Cache the count for future requests
+                    self._cached_game_count = total_games
+                    self._cached_game_count_time = current_time
+
+                if total_games == 0:
+                    return [], 0
+
+                chunk_size = 500
+                total_chunks = (total_games + chunk_size - 1) // chunk_size
+
+                print(f"📚 Fetching {total_games:,} games in {total_chunks} chunks of {chunk_size:,} (parallel)...")
+
+                # Use existing parallel fetching
+                fetch_start = time.time()
+                all_games = self._fetch_pages_parallel(total_games, chunk_size, total_chunks, progress_callback)
+                timer.checkpoint(f"Parallel fetch complete: {time.time() - fetch_start:.2f}s")
+                timer.checkpoint(f"Total fetch time: {time.time() - count_start:.2f}s")
+
+                return all_games, len(all_games)
+
         except Exception as e:
             print(f"❌ Parallel fetch error: {e}")
             return [], 0
@@ -5556,7 +6934,7 @@ class RomMClient:
                     params={
                         'limit': page_size,
                         'offset': offset,
-                        'fields': 'id,name,fs_name,platform_name,platform_slug'
+                        'fields': 'id,name,fs_name,platform_name,platform_slug,files,multi'
                     },
                     timeout=60
                 )
@@ -5579,7 +6957,7 @@ class RomMClient:
             
             # Add clear batch progress message
             if progress_callback:
-                progress_callback('page', f'🔄 Batch {batch_start}-{batch_end-1} of {pages_needed} pages')
+                progress_callback('page', f'⟳ Batch {batch_start}-{batch_end-1} of {pages_needed} pages')
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(batch_size, max_workers)) as executor:
                 future_to_page = {executor.submit(fetch_single_page, page): page for page in batch_pages}
@@ -5592,8 +6970,11 @@ class RomMClient:
                     
                     # Process games immediately instead of accumulating
                     for rom in page_roms:
+                        # Debug: Check for Final Fantasy
+                        rom_name = rom.get('name', '') or rom.get('fs_name', '')
+
                         current_chunk.append(rom)
-                        
+
                         if len(current_chunk) >= chunk_size:
                             final_games.extend(current_chunk)
                             current_chunk = []
@@ -5602,19 +6983,19 @@ class RomMClient:
                         completed_pages += 1
                         # Restore clear progress messages
                         if progress_callback:
-                            progress_callback('page', f'🔄 Completed {completed_pages}/{pages_needed} pages ({len(final_games)} games loaded)')
+                            progress_callback('page', f'⟳ Completed {completed_pages}/{pages_needed} pages ({len(final_games)} games loaded)')
             
             # Add batch completion message
             if progress_callback:
                 progress_callback('batch', {
                     'items': [],  # Don't send items for UI updates during fetch
                     'total': total_items,
-                    'accumulated_games': final_games[-100:],  # Just recent games for UI
+                    'accumulated_games': final_games[:],  # Send all accumulated games for progressive UI
                     'batch_completed': batch_start,
                     'total_batches': (pages_needed + batch_size - 1) // batch_size
                 })
             
-            print(f"✅ Batch {batch_start}-{batch_end-1} complete: {batch_games_count} games in this batch")
+            print(f"✓ Batch {batch_start}-{batch_end-1} complete: {batch_games_count} games in this batch")
             
             import gc
             gc.collect()
@@ -5623,7 +7004,7 @@ class RomMClient:
         if current_chunk:
             final_games.extend(current_chunk)
         
-        print(f"🎉 Fetch complete: {len(final_games):,} games loaded with optimized memory usage")
+        print(f"✓ Fetch complete: {len(final_games):,} games loaded with optimized memory usage")
         
         return final_games
         
@@ -5729,16 +7110,38 @@ class RomMClient:
                 if cancellation_checker and cancellation_checker():
                     raise DownloadCancelledException(f"Download cancelled: {rom_name}")
 
-                # Read all content first
-                content = response.content
-                actual_downloaded = len(content)
+                # Download with progress tracking
+                content_chunks = []
+                for chunk in response.iter_content(chunk_size=8192):
+                    # Check for cancellation
+                    if cancellation_checker and cancellation_checker():
+                        raise DownloadCancelledException(f"Download cancelled: {rom_name}")
+
+                    if chunk:
+                        content_chunks.append(chunk)
+                        actual_downloaded += len(chunk)
+
+                        # Update progress
+                        if progress_callback and total_size > 0:
+                            progress_info = progress.update(len(chunk))
+                            progress_callback(progress_info)
+
+                # Combine chunks
+                content = b''.join(content_chunks)
 
                 # Check for cancellation before extraction
                 if cancellation_checker and cancellation_checker():
                     raise DownloadCancelledException(f"Download cancelled: {rom_name}")
 
                 with zipfile.ZipFile(io.BytesIO(content)) as zip_ref:
-                    zip_ref.extractall(download_path)
+                    # Filter out .m3u files (playlist files that don't exist in RomM)
+                    # and other non-ROM files that might cause download errors
+                    excluded_extensions = {'.m3u', '.m3u8'}
+
+                    for member in zip_ref.namelist():
+                        # Skip files with excluded extensions
+                        if not any(member.lower().endswith(ext) for ext in excluded_extensions):
+                            zip_ref.extract(member, download_path)
             else:
                 with open(download_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
@@ -6832,8 +8235,11 @@ class RetroArchInterface:
         self.settings = SettingsManager()
         self.save_dirs = self.find_retroarch_dirs()
 
-        self.bios_manager = None 
+        self.bios_manager = None
         self._init_bios_manager()
+
+        # Cache for RetroDECK detection
+        self._is_retrodeck_cache = None
 
         # Check for custom path override first
         custom_path = self.settings.get('RetroArch', 'custom_path', '').strip()
@@ -7392,50 +8798,58 @@ class RetroArchInterface:
         return None
 
     def is_retrodeck_installation(self):
-        """Enhanced RetroDECK detection using multiple methods"""
+        """Enhanced RetroDECK detection using multiple methods (cached)"""
+        # Return cached result if available
+        if self._is_retrodeck_cache is not None:
+            return self._is_retrodeck_cache
+
         # Method 1: Check executable command
         if self.retroarch_executable and 'retrodeck' in str(self.retroarch_executable).lower():
+            self._is_retrodeck_cache = True
             return True
-        
+
         # Method 2: Check if RetroDECK directories exist
         retrodeck_paths = [
             Path.home() / 'retrodeck',
             Path.home() / '.var/app/net.retrodeck.retrodeck'
         ]
-        
+
         for path in retrodeck_paths:
             if path.exists():
+                self._is_retrodeck_cache = True
                 return True
 
         # Method 3: Check save directories for RetroDECK structure
         for save_type, directory in self.save_dirs.items():
             if 'retrodeck' in str(directory).lower():
+                self._is_retrodeck_cache = True
                 return True
-        
+
         # Method 4: Check Flatpak list
         try:
             import subprocess
             result = subprocess.run(['flatpak', 'list'], capture_output=True, text=True, timeout=5)
             if 'net.retrodeck.retrodeck' in result.stdout:
                 print("🔍 RetroDECK detected via Flatpak list")
+                self._is_retrodeck_cache = True
                 return True
         except:
             pass
-        
+
+        # Cache negative result
+        self._is_retrodeck_cache = False
         return False
 
     def get_core_from_platform_slug(self, platform_slug):
-        """Map RetroDECK platform slugs to likely cores"""
-        retrodeck_core_map = {
+        """Map RomM platform slugs to RetroArch cores"""
+        platform_to_core_map = {
             'snes': 'snes9x',
-            'nes': 'nestopia', 
+            'nes': 'nestopia',
             'gba': 'mgba',
             'gbc': 'sameboy',
             'gb': 'sameboy',
             'psx': 'beetle_psx_hw',
-            'ps1': 'beetle_psx_hw',
             'genesis': 'genesis_plus_gx',
-            'megadrive': 'genesis_plus_gx',
             'n64': 'mupen64plus_next',
             'saturn': 'beetle_saturn',
             'arcade': 'mame',
@@ -7443,7 +8857,7 @@ class RetroArchInterface:
             'fbneo': 'fbneo',
             'atari2600': 'stella',
         }
-        return retrodeck_core_map.get(platform_slug.lower(), platform_slug)
+        return platform_to_core_map.get(platform_slug.lower(), platform_slug)
 
     def detect_save_folder_structure(self):
         """Detect if saves use core names or platform slugs by examining actual folders"""
@@ -7501,11 +8915,11 @@ class RetroArchInterface:
         is_retrodeck = self.is_retrodeck_installation()
         
         if folder_structure == 'platform_slugs':
-            # Using platform slugs (RetroDECK default)
+            # Using RomM platform slugs
             retroarch_emulator = directory_name
             romm_emulator = self.get_core_from_platform_slug(directory_name)
         else:
-            # Using core names (standard RetroArch or RetroDECK with core names enabled)
+            # Using RetroArch core names
             retroarch_emulator = directory_name
             romm_emulator = self.get_romm_emulator_name(directory_name)
         
@@ -7910,10 +9324,10 @@ class RetroArchInterface:
 
 class SyncWindow(Gtk.ApplicationWindow):
     """Main application window"""
-    
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        
+
         # Set window icon directly
         import os
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -8263,207 +9677,36 @@ class SyncWindow(Gtk.ApplicationWindow):
     def handle_offline_mode(self):
         """Handle when not connected to RomM - show only downloaded games"""
         download_dir = Path(self.rom_dir_row.get_text())
-        
+
         if self.game_cache.is_cache_valid():
             # Use cached data but FILTER to only show downloaded games
             cached_games = list(self.game_cache.cached_games)
             local_games = self.filter_to_downloaded_games_only(cached_games, download_dir)
-            
+
             def update_ui():
                 self.available_games = local_games
                 if hasattr(self, 'library_section'):
                     self.library_section.update_games_library(local_games)
                 self.update_connection_ui("disconnected")
-                
+
                 if local_games:
                     self.log_message(f"📂 Offline mode: {len(local_games)} downloaded games (from cache)")
                 else:
                     self.log_message(f"📂 Offline mode: No downloaded games found")
-            
+
             GLib.idle_add(update_ui)
         else:
-            # No cache - scan local files only
+            # No cache - scan local files (platform mapping will be fetched inside scan_local_games_only)
             local_games = self.scan_local_games_only(download_dir)
-            
+
             def update_ui():
                 self.available_games = local_games
                 if hasattr(self, 'library_section'):
                     self.library_section.update_games_library(local_games)
                 self.update_connection_ui("disconnected")
                 self.log_message(f"📂 Offline mode: {len(local_games)} local games found")
-            
-            GLib.idle_add(update_ui)
 
-    def map_platform_slug_for_retrodeck(self, platform_slug):
-        """Map RomM platform slugs to RetroArch/RetroDECK-compatible names"""
-        slug_mapping = {
-            'turbografx16--1': 'pcengine',
-            'turbografx-16-pc-engine-cd': 'pcenginecd',
-            '3ds': 'n3ds',
-            'ngc': 'gc',
-            'sega-cd': 'segacd',
-            'sms': 'mastersystem',
-            'neogeoaes': 'neogeo',
-            'nintendo-entertainment-system': 'nes',
-            'famicom': 'famicom',
-            'famicom-disk-system': 'fds',
-            'super-nintendo-entertainment-system': 'snes',
-            'super-famicom': 'sfc',
-            'nintendo-64': 'n64',
-            'nintendo-gamecube': 'gc',
-            'nintendo-wii': 'wii',
-            'nintendo-wii-u': 'wiiu',
-            'nintendo-switch': 'switch',
-            'nintendo-3ds': 'n3ds',
-            'nintendo-ds': 'nds',
-            'game-boy': 'gb',
-            'game-boy-color': 'gbc',
-            'game-boy-advance': 'gba',
-            'virtual-boy': 'virtualboy',
-            'game-and-watch': 'gameandwatch',
-            'pokemon-mini': 'pokemini',
-            'sega-genesis': 'genesis',
-            'sega-mega-drive': 'megadrive',
-            'sega-master-system': 'mastersystem',
-            'sega-game-gear': 'gamegear',
-            'sega-saturn': 'saturn',
-            'sega-dreamcast': 'dc',
-            'sega-32x': 'sega32x',
-            'sg-1000': 'sg-1000',
-            'mega-cd': 'megacd',
-            'playstation': 'psx',
-            'playstation-2': 'ps2',
-            'playstation-3': 'ps3',
-            'playstation-portable': 'psp',
-            'playstation-vita': 'psvita',
-            'ps': 'psx',
-            'ps1': 'psx',
-            'sony-playstation': 'psx',
-            'sony-ps1': 'psx',
-            'pc-engine': 'pcengine',
-            'pc-engine-cd': 'pcenginecd',
-            'turbografx-16': 'tg16',
-            'turbografx-cd': 'tg-cd',
-            'supergrafx': 'supergrafx',
-            'pc-fx': 'pcfx',
-            'neo-geo': 'neogeo',
-            'neo-geo-cd': 'neogeocd',
-            'neo-geo-pocket': 'ngp',
-            'neo-geo-pocket-color': 'ngpc',
-            'atari-2600': 'atari2600',
-            'atari-5200': 'atari5200',
-            'atari-7800': 'atari7800',
-            'atari-800': 'atari800',
-            'atari-xe': 'atarixe',
-            'atari-jaguar': 'atarijaguar',
-            'atari-jaguar-cd': 'atarijaguarcd',
-            'atari-lynx': 'atarilynx',
-            'atari-st': 'atarist',
-            'commodore-64': 'c64',
-            'vic-20': 'vic20',
-            'amiga': 'amiga',
-            'amiga-600': 'amiga600',
-            'amiga-1200': 'amiga1200',
-            'amiga-cd32': 'amigacd32',
-            'amstrad-cpc': 'amstradcpc',
-            'msx': 'msx',
-            'msx1': 'msx1',
-            'msx2': 'msx2',
-            'msx-turbo-r': 'msxturbor',
-            'zx-spectrum': 'zxspectrum',
-            'zx81': 'zx81',
-            'apple-ii': 'apple2',
-            'apple-iigs': 'apple2gs',
-            'pc-88': 'pc88',
-            'pc-98': 'pc98',
-            'x1': 'x1',
-            'x68000': 'x68000',
-            'wonderswan': 'wonderswan',
-            'wonderswan-color': 'wonderswancolor',
-            'colecovision': 'coleco',
-            'intellivision': 'intellivision',
-            '3do': '3do',
-            'dos': 'dos',
-            'scummvm': 'scummvm',
-            'mame': 'mame',
-            'arcade': 'arcade',
-            'final-burn-neo': 'fbneo',
-            'final-burn-alpha': 'fba',
-            'cave-story': 'cavestory',
-            'doom': 'doom',
-            'openbor': 'openbor',
-            'pico-8': 'pico8',
-            'tic-80': 'tic80',
-            'solarus': 'solarus',
-            'lutro': 'lutro',
-            'ps': 'psx',
-            'ps1': 'psx',
-            'cpc': 'acpc',
-            'apple-i': 'apple',
-            'apple2': 'appleii', 
-            'apple2gs': 'apple-iigs',
-            'apple3': 'appleiii',
-            'mattel-aquarius': 'aquarius',
-            'atari-2600': 'atari2600',
-            'atari-5200': 'atari5200', 
-            'atari-7800': 'atari7800',
-            'atari-8-bit': 'atari8bit',
-            'bally-astrocade': 'astrocade',
-            'bbc-micro': 'bbcmicro',
-            'cd-i': 'philips-cd-i',
-            'cdtv': 'commodore-cdtv',
-            'channel-f': 'fairchild-channel-f',
-            'commodore-16-plus4': 'c-plus-4',
-            'dragon-3264': 'dragon-32-slash-64',
-            'dreamcast': 'dc',
-            'edsac--1': 'edsac',
-            'electron': 'acorn-electron',
-            'elektor-tv-games-computer': 'elektor',
-            'fmtowns': 'fm-towns',
-            'game-com': 'game-dot-com',
-            'gameboy': 'gb',
-            'gameboy-color': 'gbc', 
-            'gameboy-advance': 'gba',
-            'game-gear': 'gamegear',
-            'gamecube': 'ngc',
-            'genesis-slash-megadrive': 'genesis',
-            'macintosh': 'mac',
-            'microcomputer--1': 'microcomputer',
-            'microvision--1': 'microvision',
-            'neo-geo': 'neogeoaes',
-            'odyssey--1': 'odyssey',
-            'nintendo-ds': 'nds',
-            'palmos': 'palm-os',
-            'pc88': 'pc-8800-series',
-            'pc98': 'pc-9800-series',
-            'pet': 'cpet',
-            'pdp-7--1': 'pdp-7',
-            'pdp-8--1': 'pdp-8',
-            'playstation': 'psx',
-            'ps': 'psx',
-            'ps4--1': 'ps4',
-            'playstation-4': 'ps4',
-            'playstation-5': 'ps5',
-            'ps-vita': 'psvita',
-            'sega-32x': 'sega32',
-            'sega-cd': 'segacd',
-            'sega-cd-32x': 'segacd32',
-            'sega-master-system': 'sms',
-            'sega-saturn': 'saturn',
-            'sharp-x1': 'x1',
-            'sinclair-zx81': 'zx81',
-            'sg-1000': 'sg1000',
-            'switch2': 'switch-2',
-            'thomson-mo': 'thomson-mo5',
-            'trs-80-coco': 'trs-80-color-computer',
-            'turbografx-16-slash-pc-engine-cd': 'turbografx-cd',
-            'turbo-grafx': 'tg16',
-            'turbografx16--1': 'tg16',
-            'watara-slash-quickshot-supervision': 'supervision',
-            'windows': 'win',
-            'zx-spectrum': 'zxs'            
-        }
-        return slug_mapping.get(platform_slug.lower(), platform_slug)
+            GLib.idle_add(update_ui)
 
     def on_autostart_changed(self, switch_row, pspec):
         """Handle autostart setting change"""
@@ -8657,28 +9900,40 @@ class SyncWindow(Gtk.ApplicationWindow):
     def filter_to_downloaded_games_only(self, cached_games, download_dir):
         """Filter cached games to only show those that are actually downloaded"""
         downloaded_games = []
-        
+
         for game in cached_games:
             # Use platform_slug instead of platform for directory name
             platform_slug = game.get('platform_slug') or game.get('platform', 'Unknown')
-            file_name = game.get('file_name', '')
-            
-            if not file_name:
-                continue
-                
-            # Build expected local path using platform_slug
-            platform_dir = download_dir / platform_slug  # Use slug, not full name
-            local_path = platform_dir / file_name
-            
-            # Check if file exists and is not empty
-            if local_path.exists() and local_path.stat().st_size > 1024:
+
+            # Use cached local_path if available (already correct for multi-disc), otherwise construct from file_name
+            cached_path = game.get('local_path')
+            if cached_path:
+                local_path = Path(cached_path)
+            else:
+                file_name = game.get('file_name', '')
+                if not file_name:
+                    continue
+                platform_dir = download_dir / platform_slug
+                local_path = platform_dir / file_name
+
+            # Check if file/folder exists and is valid (handles both files and folders)
+            if self.is_path_validly_downloaded(local_path):
                 # Update game data with current local info
                 game_copy = game.copy()
+                # Update platform display name from mapping if available
+                if platform_slug and self.game_cache.platform_mapping:
+                    game_copy['platform'] = self.game_cache.get_platform_name(platform_slug)
                 game_copy['is_downloaded'] = True
                 game_copy['local_path'] = str(local_path)
                 game_copy['local_size'] = self.get_actual_file_size(local_path)
+
+                # Update disc status for multi-disc games
+                if game_copy.get('is_multi_disc') and game_copy.get('discs'):
+                    for disc in game_copy['discs']:
+                        disc['is_downloaded'] = True
+
                 downloaded_games.append(game_copy)
-        
+
         return self.library_section.sort_games_consistently(downloaded_games)
 
     def scan_and_merge_local_changes(self, cached_games):
@@ -8711,41 +9966,273 @@ class SyncWindow(Gtk.ApplicationWindow):
             self.log_message("⚠️ No valid cache available")
             self.handle_offline_mode()
 
+    def is_path_validly_downloaded(self, path):
+        """Check if a path (file or folder) is validly downloaded
+
+        Args:
+            path: Path object or string to check
+
+        Returns:
+            bool: True if path is validly downloaded (folder with content or file with size > 1024)
+        """
+        path = Path(path)
+        if not path.exists():
+            return False
+
+        if path.is_dir():
+            # For folders, check if directory has content
+            try:
+                return any(path.iterdir())
+            except (PermissionError, OSError):
+                return False
+        elif path.is_file():
+            # For files, check if file has reasonable size
+            return path.stat().st_size > 1024
+
+        return False
+
     def get_actual_file_size(self, path):
         """Get actual size - sum all files for directories, file size for files"""
         path = Path(path)
         if path.is_dir():
             size = sum(f.stat().st_size for f in path.rglob('*') if f.is_file())
-            print(f"DEBUG: Directory {path} has {size} bytes")
             return size
         elif path.is_file():
             return path.stat().st_size
         else:
             return 0
 
+    def get_disc_total_size(self, disc_path, parent_folder):
+        """
+        Calculate total size of all files related to a disc.
+        For multi-file discs, this handles two cases:
+        1. Disc is a folder (e.g., "Disc 1/") - sum all files in that folder
+        2. Disc is a file (e.g., "Game (Disc 1).cue") - sum all files with same base name
+
+        Args:
+            disc_path: Path to disc (either a folder or primary disc file)
+            parent_folder: Path to the parent folder
+
+        Returns:
+            Total size in bytes of all related files
+        """
+        disc_path = Path(disc_path)
+        parent_folder = Path(parent_folder)
+
+        if not disc_path.exists():
+            return 0
+
+        # Case 1: Disc is a folder (multi-file disc in its own folder)
+        if disc_path.is_dir():
+            files_in_folder = list(disc_path.rglob('*'))
+            total_size = sum(f.stat().st_size for f in files_in_folder if f.is_file())
+            return total_size
+
+        # Case 2: Disc is a file (e.g., .cue or .bin file)
+        # Find all files with the same base name
+        base_name = disc_path.stem
+
+        total_size = 0
+        try:
+            all_files = list(parent_folder.iterdir())
+            for file in all_files:
+                if file.is_file():
+                    matches = file.stem == base_name
+                    if matches:
+                        file_size = file.stat().st_size
+                        total_size += file_size
+        except (PermissionError, OSError) as e:
+            return disc_path.stat().st_size if disc_path.is_file() else 0
+
+        fallback_size = disc_path.stat().st_size
+        final_size = total_size if total_size > 0 else fallback_size
+        return final_size
+
+    def get_disc_size_from_api(self, disc_file_name, all_api_files):
+        """
+        Calculate total size of all API files related to a disc.
+        For multi-file discs (e.g., BIN/CUE), this sums all files with the same base name.
+
+        Args:
+            disc_file_name: Name of the primary disc file (e.g., "Game (Disc 1).bin")
+            all_api_files: List of all API file objects for the game
+
+        Returns:
+            Total size in bytes of all related files
+        """
+        # Get the base name without extension (e.g., "Game (Disc 1)" from "Game (Disc 1).bin")
+        base_name = Path(disc_file_name).stem
+
+        # Find all API files with the same base name and sum their sizes
+        total_size = 0
+        for api_file in all_api_files:
+            api_file_name = api_file.get('file_name', '')
+            api_stem = Path(api_file_name).stem
+            matches = api_stem == base_name
+            file_size = api_file.get('file_size_bytes', 0)
+            if matches:
+                total_size += file_size
+
+        return total_size
+
     def process_single_rom(self, rom, download_dir):
         """Process a single ROM with short directory names but full display names"""
         rom_id = rom.get('id')
         platform_display_name = rom.get('platform_name', 'Unknown')  # Full name for tree view
         platform_slug = rom.get('platform_slug', platform_display_name)  # Short name for directories
+
+        # If platform_name is missing but we have platform_slug, look it up in the platform mapping
+        if platform_display_name == 'Unknown' and platform_slug and platform_slug != 'Unknown':
+            if hasattr(self, 'game_cache') and self.game_cache.platform_mapping:
+                platform_display_name = self.game_cache.get_platform_name(platform_slug)
         # Clean up platform slug - prefer "megadrive" over "genesis"
         if 'genesis' in platform_slug.lower() and 'megadrive' in platform_slug.lower():
             platform_slug = 'megadrive'
         elif '-slash-' in platform_slug:
             platform_slug = platform_slug.replace('-slash-', '-')
         file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
-        
-        # Use short platform slug for local directory structure (mapped for RetroDECK compatibility)
-        if self.retroarch.is_retrodeck_installation():
-            mapped_slug = self.map_platform_slug_for_retrodeck(platform_slug)
-        else:
-            mapped_slug = platform_slug  # Use original slug for regular RetroArch
-        platform_dir = download_dir / mapped_slug
+
+        # Use platform slug for local directory structure (RomM and RetroDECK now use the same slugs)
+        platform_dir = download_dir / platform_slug
         local_path = platform_dir / file_name
-        is_downloaded = local_path.exists() and local_path.stat().st_size > 1024
-        
+
+        # Check download status (handles both files and folders)
+        is_downloaded = self.is_path_validly_downloaded(local_path)
+
         display_name = Path(file_name).stem if file_name else rom.get('name', 'Unknown')
-        
+
+        # Check for multi-disc games from API data OR local filesystem
+        discs = []
+
+        # First, check API data for multi-file games (works for both downloaded and non-downloaded)
+        api_files = rom.get('files', [])
+        has_multiple_files = rom.get('has_multiple_files', False) or rom.get('multi', False) or len(api_files) > 1
+
+        if has_multiple_files and len(api_files) > 1:
+            # Multi-disc game detected from API
+            disc_extensions = {'.chd', '.bin', '.cue', '.iso', '.img', '.pbp'}
+
+            # Filter for actual disc files (skip metadata files, manuals, etc.)
+            api_disc_files = [f for f in api_files if Path(f.get('file_name', '')).suffix.lower() in disc_extensions]
+
+            if len(api_disc_files) > 1:
+                # Collect disc files, filtering out .cue files paired with .bin files
+                filtered_disc_files = []
+                for api_file in sorted(api_disc_files, key=lambda x: x.get('file_name', '')):
+                    file_name = api_file.get('file_name', 'unknown')
+                    # Skip .cue files if there's a corresponding .bin file
+                    if file_name.lower().endswith('.cue'):
+                        bin_name = file_name[:-4] + '.bin'
+                        if any(f.get('file_name') == bin_name for f in api_disc_files):
+                            continue
+                    filtered_disc_files.append(api_file)
+
+                # Only treat as multi-disc if we have actual separate disc indicators
+                # Check for disc naming patterns: (Disc N), (Disk N), (CD N), etc.
+                # Exclude Track patterns as they're part of a single disc
+                disc_pattern = re.compile(r'(\(|\[|_|-|\s)(disc|disk|cd|dvd)(\s|_|-)?(\d+)(\)|\]|_|-|\s)', re.IGNORECASE)
+                track_pattern = re.compile(r'(track|tr)(\s|_|-)?(\d+)', re.IGNORECASE)
+
+                # Extract disc numbers from filenames (only count files, not tracks)
+                disc_numbers = set()
+                for api_file in filtered_disc_files:
+                    file_name = api_file.get('file_name', 'unknown')
+                    # Skip if this is a track indicator (not a disc)
+                    if track_pattern.search(file_name):
+                        continue
+                    # Check if this file has a disc indicator
+                    match = disc_pattern.search(file_name)
+                    if match:
+                        disc_num = match.group(4)  # The disc number
+                        disc_numbers.add(disc_num)
+
+                # Only treat as multi-disc if we have multiple different disc numbers
+                actual_discs = []
+                if len(disc_numbers) > 1:
+                    for api_file in filtered_disc_files:
+                        file_name = api_file.get('file_name', 'unknown')
+                        if track_pattern.search(file_name):
+                            continue
+                        if disc_pattern.search(file_name):
+                            actual_discs.append(api_file)
+
+                # Only add to discs list if we found multiple actual disc files
+                if len(actual_discs) > 1:
+                    for api_file in actual_discs:
+                        file_name = api_file.get('file_name', 'unknown')
+                        # For downloaded games, use local path; for non-downloaded, use None
+                        disc_path = str(local_path / file_name) if is_downloaded and local_path.is_dir() else None
+
+                        # Calculate total size including all related files (e.g., .bin + .cue)
+                        total_size = self.get_disc_size_from_api(file_name, api_disc_files)
+
+                        discs.append({
+                            'name': file_name,
+                            'path': disc_path,
+                            'is_downloaded': is_downloaded and local_path.is_dir(),
+                            'size': total_size,
+                            'file_id': api_file.get('id'),  # Store file ID for direct download
+                            'full_path': api_file.get('full_path')  # Store full path from API
+                        })
+
+        # Fallback: For downloaded games without API file data, scan local filesystem
+        elif is_downloaded and local_path.is_dir() and not api_files:
+            disc_extensions = {'.chd', '.bin', '.cue', '.iso', '.img', '.pbp'}
+            disc_files = []
+
+            try:
+                for file in sorted(local_path.iterdir()):
+                    if file.is_file() and file.suffix.lower() in disc_extensions:
+                        # Skip .cue files if there are .bin files (they're paired)
+                        if file.suffix.lower() == '.cue':
+                            bin_file = file.with_suffix('.bin')
+                            if bin_file.exists():
+                                continue
+                        disc_files.append(file)
+
+                # Check for actual multi-disc patterns in filenames
+                if len(disc_files) > 1:
+                    disc_pattern = re.compile(r'(\(|\[|_|-|\s)(disc|disk|cd|dvd)(\s|_|-)?(\d+)(\)|\]|_|-|\s)', re.IGNORECASE)
+                    track_pattern = re.compile(r'(track|tr)(\s|_|-)?(\d+)', re.IGNORECASE)
+
+                    # Extract disc numbers (only from files, not tracks)
+                    disc_numbers = set()
+                    for f in disc_files:
+                        if track_pattern.search(f.name):
+                            continue
+                        match = disc_pattern.search(f.name)
+                        if match:
+                            disc_num = match.group(4)
+                            disc_numbers.add(disc_num)
+
+                    # Only treat as multi-disc if we have multiple different disc numbers
+                    actual_disc_files = []
+                    if len(disc_numbers) > 1:
+                        for f in disc_files:
+                            if track_pattern.search(f.name):
+                                continue
+                            if disc_pattern.search(f.name):
+                                actual_disc_files.append(f)
+
+                    if len(actual_disc_files) > 1:
+                        for disc_file in actual_disc_files:
+                            # Calculate total size including all related files (e.g., .bin + .cue)
+                            total_size = self.get_disc_total_size(disc_file, local_path)
+                            discs.append({
+                                'name': disc_file.name,
+                                'path': str(disc_file),
+                                'is_downloaded': True,
+                                'size': total_size
+                            })
+            except (PermissionError, OSError) as e:
+                print(f"Warning: Could not scan directory {local_path}: {e}")
+
+        # For multi-disc games, update local_path to point to folder instead of disc file
+        if discs and len(discs) > 1:
+            # Multi-disc games are stored in folders named after the game
+            local_path = platform_dir / display_name
+            is_downloaded = self.is_path_validly_downloaded(local_path)
+
         # Extract only essential data from romm_data to save memory
         essential_romm_data = {
             'fs_name': rom.get('fs_name'),
@@ -8755,7 +10242,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             'platform_slug': rom.get('platform_slug')
         }
 
-        return {
+        game_data = {
             'name': display_name,
             'rom_id': rom_id,
             'platform': platform_display_name,
@@ -8766,6 +10253,15 @@ class SyncWindow(Gtk.ApplicationWindow):
             'local_size': self.get_actual_file_size(local_path) if is_downloaded else 0,
             'romm_data': essential_romm_data  # Much smaller object
         }
+
+        # Add discs if this is a multi-disc game (only if there are multiple discs)
+        if len(discs) > 1:
+            game_data['discs'] = discs
+            game_data['is_multi_disc'] = True
+        else:
+            game_data['is_multi_disc'] = False
+
+        return game_data
 
     def on_auto_connect_changed(self, switch_row, pspec):
         """Handle auto-connect setting change"""
@@ -8956,23 +10452,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             """Set up the user interface with actually working wider layout"""
             self.set_title("RomM - RetroArch Sync")
             self.set_default_size(800, 900)  # Increased width
-            
-            # Header bar with menu button
-            header = Adw.HeaderBar()
-            self.set_titlebar(header)
 
-            # Add menu button to header bar
-            menu_button = Gtk.MenuButton()
-            menu_button.set_icon_name("open-menu-symbolic")
-            menu_button.set_tooltip_text("Menu")
-
-            # Create simple menu
-            menu = Gio.Menu()
-            menu.append("Logs / Advanced", "win.logs")  # ADD THIS LINE
-            menu.append("About", "win.about")
-            menu_button.set_menu_model(menu)
-            header.pack_end(menu_button)
-            
             # Add custom CSS - using very specific targeting
             css_provider = Gtk.CssProvider()
             css_provider.load_from_data(b"""
@@ -9041,7 +10521,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                 background: alpha(@accent_bg_color, 0.3);
                 color: @window_fg_color;
             }
-                                        
+
             .numeric {
                 font-family: -gtk-system-font;
                 font-size: 1em;
@@ -9067,18 +10547,34 @@ class SyncWindow(Gtk.ApplicationWindow):
                 css_provider,
                 Gtk.STYLE_PROVIDER_PRIORITY_USER  # Higher priority than APPLICATION
             )
-            
+
             # Use Adw.PreferencesPage for scrollable layout
             self.preferences_page = Adw.PreferencesPage()
-            
+
             # Main scrolled content
             scrolled_window = Gtk.ScrolledWindow()
             scrolled_window.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
             scrolled_window.set_child(self.preferences_page)
-            
+
+            # Header bar with menu button
+            header = Adw.HeaderBar()
+            self.set_titlebar(header)
+
+            # Add menu button to header bar
+            menu_button = Gtk.MenuButton()
+            menu_button.set_icon_name("open-menu-symbolic")
+            menu_button.set_tooltip_text("Menu")
+
+            # Create simple menu
+            menu = Gio.Menu()
+            menu.append("Logs / Advanced", "win.logs")
+            menu.append("About", "win.about")
+            menu_button.set_menu_model(menu)
+            header.pack_end(menu_button)
+
             # Set as main content
             self.set_child(scrolled_window)
-            
+
             # Hook to force width after the widget is realized
             def on_preferences_realize(widget):
                 # Get the clamp widget and force it wider
@@ -9510,6 +11006,18 @@ class SyncWindow(Gtk.ApplicationWindow):
                 if self.romm_client.authenticated:
                     self.log_message(f"✅ Authentication successful in {auth_time:.2f}s")
 
+                    # CRITICAL: Fetch platform mapping immediately after authentication
+                    # This ensures platform names are available for all operations
+                    try:
+                        platforms_start = time.time()
+                        platforms = self.romm_client.get_platforms()
+                        if platforms:
+                            self.game_cache.build_platform_mapping_from_api(platforms)
+                            platforms_time = time.time() - platforms_start
+                            self.log_message(f"📋 Loaded {len(platforms)} platform names in {platforms_time:.2f}s")
+                    except Exception as e:
+                        self.log_message(f"⚠️ Could not fetch platform names: {e}")
+
                     # Move this right after authentication success, before other operations
                     def preload_collections_smart():
                         if hasattr(self, 'library_section'):
@@ -9518,7 +11026,7 @@ class SyncWindow(Gtk.ApplicationWindow):
 
                     # Call immediately, not as thread
                     GLib.timeout_add(100, lambda: (threading.Thread(target=preload_collections_smart, daemon=True).start(), False)[1])
-                    
+
                     # STEP 3: Test basic API access
                     api_test_start = time.time()
                     try:
@@ -9542,21 +11050,40 @@ class SyncWindow(Gtk.ApplicationWindow):
                         # Show cached games immediately first
                         download_dir = Path(self.rom_dir_row.get_text())
                         all_cached_games = []
-                        
+
                         for game in list(self.game_cache.cached_games):
                             platform_slug = game.get('platform_slug') or game.get('platform', 'Unknown')
-                            file_name = game.get('file_name', '')
-                            
-                            if file_name:
+                            is_multi = game.get('is_multi_disc', False)
+
+                            # Use cached local_path if available, otherwise construct from file_name
+                            cached_path = game.get('local_path')
+                            if cached_path:
+                                local_path = Path(cached_path)
+                            else:
+                                file_name = game.get('file_name', '')
+                                if not file_name:
+                                    continue
                                 platform_dir = download_dir / platform_slug
                                 local_path = platform_dir / file_name
-                                is_downloaded = local_path.exists() and local_path.stat().st_size > 1024
-                                
-                                game_copy = game.copy()
-                                game_copy['is_downloaded'] = is_downloaded
-                                game_copy['local_path'] = str(local_path) if is_downloaded else None
-                                game_copy['local_size'] = self.get_actual_file_size(local_path) if is_downloaded else 0
-                                all_cached_games.append(game_copy)
+
+                            is_downloaded = self.is_path_validly_downloaded(local_path)
+
+                            game_copy = game.copy()
+                            # Platform name already resolved by cache.load_games_cache() at line 172
+                            # Just update download status
+                            game_copy['is_downloaded'] = is_downloaded
+                            game_copy['local_path'] = str(local_path) if is_downloaded else None
+                            game_copy['local_size'] = self.get_actual_file_size(local_path) if is_downloaded else 0
+
+                            # Update disc status for multi-disc games
+                            if game_copy.get('is_multi_disc') and game_copy.get('discs'):
+                                for disc in game_copy['discs']:
+                                    disc['is_downloaded'] = is_downloaded
+
+                            all_cached_games.append(game_copy)
+
+                            if is_multi:
+                                print(f"  -> Added to all_cached_games with is_downloaded={game_copy['is_downloaded']}")
                         
                         # Update UI immediately with cached games
                         def update_games_ui():
@@ -9578,7 +11105,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                                         auto_refresh_enabled = self.settings.get('RomM', 'auto_refresh') == 'true'
                                         if auto_refresh_enabled:
                                             def auto_refresh():
-                                                self.update_connection_ui_with_message(f"🔄 Cache outdated ({count_diff} games difference) - auto-refreshing...")
+                                                self.update_connection_ui_with_message(f"⟳ Cache outdated ({count_diff} games difference) - auto-refreshing...")
                                                 self.log_message(f"📊 Auto-refreshing: {count_diff} games difference detected")
                                                 self.refresh_games_list()
                                             GLib.idle_add(auto_refresh)
@@ -9620,7 +11147,6 @@ class SyncWindow(Gtk.ApplicationWindow):
                         
                     else:
                         # Always fetch on first startup (no cached games)
-                        print("🔍 DEBUG: No cached games - auto-fetching for first time")
                         self.update_connection_ui("loading")
                         self.log_message("🔄 Connected! Loading games list for first time...")
                         self.refresh_games_list()
@@ -9754,7 +11280,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                                     file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
                                     platform_dir = download_dir / platform_slug
                                     local_path = platform_dir / file_name
-                                    if local_path.exists() and local_path.stat().st_size > 1024:
+                                    if self.is_path_validly_downloaded(local_path):
                                         downloaded_roms += 1
 
                                 # Determine state
@@ -10545,8 +12071,20 @@ class SyncWindow(Gtk.ApplicationWindow):
     def perform_full_sync(self, download_dir, server_url):
         """Perform full sync with live updates"""
         try:
-            start_time = time.time()
-            
+            sync_start = time.time()
+
+            # Preserve existing local games to keep them visible during fetch
+            existing_local_games = []
+            if hasattr(self, 'available_games') and self.available_games:
+                # Keep all existing games for now (they'll be updated/merged with server data)
+                existing_local_games = list(self.available_games)
+                self.log_message(f"🔍 DEBUG: Preserving {len(existing_local_games)} existing games during fetch")
+
+            # Debouncing: Track last UI update time to prevent excessive updates
+            last_ui_update = [0]  # Use list to allow modification in nested function
+            min_update_interval = 0.5  # Minimum 500ms between UI updates
+            pending_update_source = [None]  # Track pending GLib timeout
+
             def progress_handler(stage, data):
                 if stage in ['chunk', 'page']:
                     # Update connection status with chunk progress
@@ -10556,61 +12094,113 @@ class SyncWindow(Gtk.ApplicationWindow):
                     chunk_games = data.get('accumulated_games', [])
                     chunk_num = data.get('chunk_number', 0)
                     total_chunks = data.get('total_chunks', 0)
-                    
+
                     if chunk_games:
                         # Process games
+                        process_start = time.time()
                         processed_games = []
                         for rom in chunk_games:
                             processed_game = self.process_single_rom(rom, download_dir)
                             processed_games.append(processed_game)
-                        
+
+                        # Merge with existing local games to keep them visible
+                        # Create a map to identify duplicates (use rom_id if available, otherwise use file path)
+                        fetched_identifiers = set()
+                        for g in processed_games:
+                            rom_id = g.get('rom_id')
+                            if rom_id:
+                                fetched_identifiers.add(('rom_id', rom_id))
+                            # Also track by file path for games without rom_id
+                            local_path = g.get('local_path')
+                            if local_path:
+                                fetched_identifiers.add(('path', local_path))
+
+                        # Add local games that aren't in the fetched data yet
+                        added_count = 0
+                        for local_game in existing_local_games:
+                            local_rom_id = local_game.get('rom_id')
+                            local_path = local_game.get('local_path')
+
+                            # Check if this game is already in the fetched data
+                            is_duplicate = False
+                            if local_rom_id and ('rom_id', local_rom_id) in fetched_identifiers:
+                                is_duplicate = True
+                            elif local_path and ('path', local_path) in fetched_identifiers:
+                                is_duplicate = True
+
+                            if not is_duplicate:
+                                processed_games.append(local_game)
+                                added_count += 1
+
                         # Sort games
                         processed_games = self.library_section.sort_games_consistently(processed_games)
-                        
-                        # Update UI with current progress
-                        def update_ui():
+
+                        # Debounced UI update
+                        current_time = time.time()
+                        time_since_last_update = current_time - last_ui_update[0]
+
+                        def do_ui_update():
+                            ui_start = time.time()
+                            # Update with merged games (fetched + remaining local)
                             self.available_games = processed_games
                             if hasattr(self, 'library_section'):
                                 self.library_section.update_games_library(processed_games)
-                        
-                        GLib.idle_add(update_ui)
-            
+                            last_ui_update[0] = time.time()
+                            pending_update_source[0] = None
+                            return False  # Don't repeat
+
+                        # If enough time has passed, update immediately
+                        if time_since_last_update >= min_update_interval:
+                            # Cancel any pending update
+                            if pending_update_source[0]:
+                                GLib.source_remove(pending_update_source[0])
+                                pending_update_source[0] = None
+                            GLib.idle_add(do_ui_update)
+                        else:
+                            # Schedule update for later (debounce)
+                            if not pending_update_source[0]:  # Only schedule if not already pending
+                                delay_ms = int((min_update_interval - time_since_last_update) * 1000)
+                                pending_update_source[0] = GLib.timeout_add(delay_ms, do_ui_update)
+
             # Fetch with progress handler
+            fetch_start = time.time()
             romm_result = self.romm_client.get_roms(progress_callback=progress_handler)
-            
+
             if not romm_result or len(romm_result) != 2:
                 self.log_message("Failed to fetch games from RomM")
                 return
-                
+
             final_games, total_count = romm_result
 
             # Final processing and UI update
+            final_process_start = time.time()
             games = []
             for rom in final_games:
                 processed_game = self.process_single_rom(rom, download_dir)
                 games.append(processed_game)
-            
+
             games = self.library_section.sort_games_consistently(games)
-            
+
             def final_update():
+                final_ui_start = time.time()
                 self.available_games = games
                 if hasattr(self, 'library_section'):
                     self.library_section.update_games_library(games)
-                
-                elapsed = time.time() - start_time
-                
+
+                total_elapsed = time.time() - sync_start
+
                 # Show completion message first
-                completion_msg = f"✅ Full sync complete: {len(games):,} games in {elapsed:.2f}s"
+                completion_msg = f"✓ Full sync complete: {len(games):,} games in {total_elapsed:.2f}s"
                 self.update_connection_ui_with_message(completion_msg)
                 self.log_message(completion_msg)
-                
+
                 # After 3 seconds, show connected status
                 def show_connected():
                     self.update_connection_ui("connected")
                     return False  # Don't repeat
-                
+
                 GLib.timeout_add(5000, show_connected)  # 3 second delay
-            
+
             GLib.idle_add(final_update)
             
             # Save cache in background
@@ -10627,21 +12217,32 @@ class SyncWindow(Gtk.ApplicationWindow):
     def scan_local_games_only(self, download_dir):
         """Enhanced local game scanning that handles both slug and full platform names"""
         games = []
-        
+
         self.log_message(f"🔍 DEBUG: Scanning {download_dir}")
         self.log_message(f"🔍 DEBUG: Directory exists: {download_dir.exists()}")
-        
+
         if not download_dir.exists():
             return games
-        
+
+        # Ensure platform mapping is populated before scanning
+        if not self.game_cache.platform_mapping and self.romm_client and self.romm_client.authenticated:
+            try:
+                self.log_message("📋 Fetching platform names from RomM...")
+                platforms = self.romm_client.get_platforms()
+                if platforms:
+                    self.game_cache.build_platform_mapping_from_api(platforms)
+                    self.log_message(f"✅ Loaded {len(platforms)} platform names")
+            except Exception as e:
+                self.log_message(f"⚠️ Could not fetch platform names: {e}")
+
         rom_extensions = {'.zip', '.7z', '.rar', '.bin', '.cue', '.iso', '.chd', '.sfc', '.smc', '.nes', '.gba', '.gb', '.gbc', '.md', '.gen', '.n64', '.z64'}
-        
+
         for file_path in download_dir.rglob('*'):
             if file_path.is_file() and file_path.suffix.lower() in rom_extensions:
                 directory_name = file_path.parent.name if file_path.parent != download_dir else "Unknown"
-                
+
                 game_name = file_path.stem
-                
+
                 # Use cache to get proper platform name (handles both slug and full names)
                 platform_display_name = self.game_cache.get_platform_name(directory_name)
                 
@@ -10759,7 +12360,7 @@ class SyncWindow(Gtk.ApplicationWindow):
         # Start all downloads (semaphore controls actual concurrency)
         for game in not_downloaded:
             threading.Thread(target=controlled_download, args=(game,), daemon=True).start()
-        
+
         # Check for completion periodically
         def check_completion():
             if hasattr(self, '_bulk_download_remaining') and self._bulk_download_remaining <= 0:
@@ -10771,10 +12372,15 @@ class SyncWindow(Gtk.ApplicationWindow):
                         for rom_id in self._downloading_rom_ids:
                             self.library_section.selected_rom_ids.discard(rom_id)
                         self.library_section.sync_selected_checkboxes()
-                        self.library_section.update_action_buttons()
                         self.library_section.update_selection_label()
                         self.library_section.refresh_all_platform_checkboxes()
+                        # Update visual checkbox states to match cleared selections
+                        GLib.idle_add(self.library_section.force_checkbox_sync)
                         delattr(self, '_downloading_rom_ids')
+
+                    # Update action buttons after bulk operation completes - always call this
+                    # to ensure button state is refreshed (e.g., from "Cancel All" back to "Download")
+                    self.library_section.update_action_buttons()
 
                 # Check if this was a cancellation
                 was_cancelled = self._bulk_download_cancelled
@@ -10794,7 +12400,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                 delattr(self, '_bulk_download_remaining')
                 return False
             return True
-        
+
         GLib.timeout_add(500, check_completion)
 
     def download_multiple_games_with_collection_tracking(self, games, collections_data):
@@ -10884,6 +12490,17 @@ class SyncWindow(Gtk.ApplicationWindow):
                         )
                         self.log_message(f"✅ Collection '{collection_name}' sync complete: {downloaded}/{total} ROMs")
 
+                        # Mark collection as completed (synced) instead of just removing from downloading
+                        if hasattr(self, 'library_section'):
+                            # Add to a new set tracking completed collections
+                            if not hasattr(self.library_section, 'completed_sync_collections'):
+                                self.library_section.completed_sync_collections = set()
+                            self.library_section.completed_sync_collections.add(collection_name)
+                            # Remove from downloading to transition orange -> green
+                            self.library_section.currently_downloading_collections.discard(collection_name)
+                            # Update status immediately
+                            self.library_section.update_collection_sync_status(collection_name)
+
         # Start all downloads (semaphore controls actual concurrency)
         for game in not_downloaded:
             threading.Thread(target=controlled_download, args=(game,), daemon=True).start()
@@ -10899,10 +12516,15 @@ class SyncWindow(Gtk.ApplicationWindow):
                         for rom_id in self._downloading_rom_ids:
                             self.library_section.selected_rom_ids.discard(rom_id)
                         self.library_section.sync_selected_checkboxes()
-                        self.library_section.update_action_buttons()
                         self.library_section.update_selection_label()
                         self.library_section.refresh_all_platform_checkboxes()
+                        # Update visual checkbox states to match cleared selections
+                        GLib.idle_add(self.library_section.force_checkbox_sync)
                         delattr(self, '_downloading_rom_ids')
+
+                    # Update action buttons after bulk operation completes - always call this
+                    # to ensure button state is refreshed (e.g., from "Cancel All" back to "Download")
+                    self.library_section.update_action_buttons()
 
                 # Check if this was a cancellation
                 was_cancelled = self._bulk_download_cancelled
@@ -10995,23 +12617,48 @@ class SyncWindow(Gtk.ApplicationWindow):
                 # Get game name early for logging
                 game_name = game.get('name', 'Unknown Game')
                 local_path = game.get('local_path')
-                
+
                 if not local_path:
-                    GLib.idle_add(lambda n=game_name: 
+                    GLib.idle_add(lambda n=game_name:
                                 self.log_message(f"No local path for {n}"))
                     return
-                    
+
                 game_path = Path(local_path)
-                
-                GLib.idle_add(lambda n=game_name: 
+
+                # For multi-disc or multi-file games, ensure we're deleting the folder
+                # local_path can point to either a file (when scanned from filesystem) or folder (when freshly downloaded)
+                if game.get('is_multi_disc'):
+                    if game_path.is_file():
+                        # If it points to a file, delete the parent folder
+                        game_path = game_path.parent
+                elif not game_path.exists() and game_path.suffix:
+                    # If path doesn't exist and looks like a file (has extension), try the parent folder
+                    # This handles multi-file games where local_path might point to a non-existent file
+                    parent_folder = game_path.parent
+                    if parent_folder.exists() and parent_folder.is_dir():
+                        game_path = parent_folder
+
+                GLib.idle_add(lambda n=game_name:
                             self.log_message(f"Deleting {n}..."))
-                
+
                 # After deletion, replace complex update with:
                 if game_path.exists():
-                    game_path.unlink()
+                    # Handle both files and directories (for multi-disc/multi-file games)
+                    if game_path.is_dir():
+                        import shutil
+                        shutil.rmtree(game_path)
+                    else:
+                        game_path.unlink()
+
                     game['is_downloaded'] = False
                     game['local_path'] = None
                     game['local_size'] = 0
+
+                    # Update all discs in multi-disc games to reflect deletion
+                    if game.get('is_multi_disc') and game.get('discs'):
+                        for disc in game['discs']:
+                            disc['is_downloaded'] = False
+                            disc['size'] = 0
                     
                     def refresh_ui():
                         for i, g in enumerate(self.available_games):
@@ -11069,7 +12716,251 @@ class SyncWindow(Gtk.ApplicationWindow):
                             self.log_message(f"Error deleting {n}: {err}"))
         
         threading.Thread(target=delete, daemon=True).start()
-    
+
+    def download_disc(self, game, disc):
+        """Download a single disc from a multi-disc game
+
+        DISABLED: Due to RomM API limitations, individual disc downloads don't work.
+        The API always returns all discs regardless of which one is requested.
+        Users should download the entire game instead to get all discs properly.
+        """
+        self.log_message(
+            f"⚠️ Individual disc downloads are not supported. "
+            f"Please download the entire game to get all discs."
+        )
+        return
+
+        def download():
+            try:
+                rom_id = game['rom_id']
+                rom_name = game['name']
+                disc_name = disc['name']
+                platform_slug = game.get('platform_slug', game.get('platform', 'Unknown'))
+
+                # Initialize progress tracking for this disc download
+                # Use a unique key combining rom_id and disc_name
+                disc_progress_key = f"{rom_id}:{disc_name}"
+                self.download_progress[disc_progress_key] = {
+                    'progress': 0.0,
+                    'downloading': True,
+                    'filename': disc_name,
+                    'speed': 0,
+                    'downloaded': 0,
+                    'total': 0
+                }
+                self._last_progress_update[disc_progress_key] = 0
+
+                # Store reference to which disc is being downloaded for this game
+                if not hasattr(self, '_disc_downloads'):
+                    self._disc_downloads = {}
+                self._disc_downloads[rom_id] = disc_name
+
+                # Update UI to show download starting
+                GLib.idle_add(lambda: self.library_section.update_disc_progress(rom_id, disc_name, self.download_progress[disc_progress_key])
+                            if hasattr(self, 'library_section') else None)
+
+                # Get download directory
+                download_dir = Path(self.rom_dir_row.get_text())
+                platform_dir = download_dir / platform_slug
+                game_folder = platform_dir / rom_name
+                game_folder.mkdir(parents=True, exist_ok=True)
+
+                disc_path = game_folder / disc_name
+
+                GLib.idle_add(lambda: self.log_message(f"Downloading {disc_name} from {rom_name}..."))
+
+                # Download the disc file from RomM
+                # For multi-disc games, try to use the file's full_path from API if available
+                from urllib.parse import quote
+
+                file_id = disc.get('file_id')
+                full_path = disc.get('full_path')
+
+                # Try different API endpoints in order of preference:
+                # 1. If we have file_id, try /api/assets/{file_id}
+                # 2. If we have full_path, try /assets/{full_path}
+                # 3. Fall back to /api/roms/{rom_id}/content/{filename}
+
+                if file_id:
+                    url = f"{self.romm_client.base_url}/api/assets/{file_id}"
+                elif full_path:
+                    url = f"{self.romm_client.base_url}/assets/{full_path}"
+                else:
+                    encoded_disc_name = quote(disc_name)
+                    url = f"{self.romm_client.base_url}/api/roms/{rom_id}/content/{encoded_disc_name}"
+
+                response = self.romm_client.session.get(url, stream=True)
+
+                # If first attempt failed, try fallback endpoints
+                if response.status_code != 200 and file_id:
+                    if full_path:
+                        url = f"{self.romm_client.base_url}/assets/{full_path}"
+                        response = self.romm_client.session.get(url, stream=True)
+
+                if response.status_code != 200 and (file_id or full_path):
+                    encoded_disc_name = quote(disc_name)
+                    url = f"{self.romm_client.base_url}/api/roms/{rom_id}/content/{encoded_disc_name}"
+                    response = self.romm_client.session.get(url, stream=True)
+
+                if response.status_code == 200:
+                    # Get expected size from disc metadata (more accurate for multi-disc games)
+                    # The content-length header may report the entire game folder size
+                    expected_size = disc.get('size', 0)
+                    header_size = int(response.headers.get('content-length', 0))
+
+                    # Use expected size from disc metadata if available, otherwise fall back to header
+                    total_size = expected_size if expected_size > 0 else header_size
+
+                    downloaded = 0
+                    start_time = time.time()
+
+                    with open(disc_path, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                                downloaded += len(chunk)
+
+                                # Update progress
+                                if total_size > 0:
+                                    progress = downloaded / total_size
+                                    elapsed = time.time() - start_time
+                                    speed = downloaded / elapsed if elapsed > 0 else 0
+
+                                    self.download_progress[disc_progress_key].update({
+                                        'progress': progress,
+                                        'downloaded': downloaded,
+                                        'total': total_size,
+                                        'speed': speed
+                                    })
+
+                                    # Throttle UI updates (every 100ms)
+                                    current_time = time.time()
+                                    if current_time - self._last_progress_update.get(disc_progress_key, 0) > 0.1:
+                                        self._last_progress_update[disc_progress_key] = current_time
+                                        GLib.idle_add(lambda: self.library_section.update_disc_progress(rom_id, disc_name, self.download_progress[disc_progress_key])
+                                                    if hasattr(self, 'library_section') else None)
+
+                    file_size = disc_path.stat().st_size
+
+                    # Mark download complete in progress tracker
+                    self.download_progress[disc_progress_key] = {
+                        'progress': 1.0,
+                        'downloading': False,
+                        'completed': True,
+                        'filename': disc_name,
+                        'downloaded': file_size,
+                        'total': file_size
+                    }
+
+                    # Final progress update
+                    GLib.idle_add(lambda: self.library_section.update_disc_progress(rom_id, disc_name, self.download_progress[disc_progress_key])
+                                if hasattr(self, 'library_section') else None)
+
+                    # Find and update the actual game in available_games
+                    updated_game = None
+                    for i, existing_game in enumerate(self.available_games):
+                        if existing_game.get('rom_id') == rom_id:
+                            # Update the disc status in the actual game object
+                            for disc_obj in existing_game.get('discs', []):
+                                if disc_obj.get('name') == disc_name:
+                                    disc_obj['is_downloaded'] = True
+                                    # Calculate total size including all related files (e.g., .bin + .cue)
+                                    disc_obj['size'] = self.get_disc_total_size(disc_path, game_folder)
+                                    disc_obj['path'] = str(disc_path)
+                                    break
+
+                            # Update game status
+                            existing_game['local_path'] = str(game_folder)
+                            existing_game['is_downloaded'] = all(d.get('is_downloaded', False) for d in existing_game.get('discs', []))
+
+                            updated_game = existing_game
+                            break
+
+                    # Save cache to persist download status across app restarts
+                    if hasattr(self, 'game_cache'):
+                        threading.Thread(target=lambda: self.game_cache.save_games_data(self.available_games), daemon=True).start()
+
+                    GLib.idle_add(lambda: self.log_message(f"✓ Downloaded {disc_name}"))
+
+                    # Update UI with the updated game data
+                    def update_ui():
+                        if updated_game and hasattr(self, 'library_section'):
+                            # Create a copy to ensure GObject sees it as a new value
+                            game_copy = updated_game.copy()
+                            game_copy['discs'] = [d.copy() for d in updated_game.get('discs', [])]
+                            self.library_section.update_single_game(game_copy)
+                        return False
+
+                    GLib.idle_add(update_ui)
+
+                    # Clean up progress after a short delay
+                    time.sleep(2)
+                    if disc_progress_key in self.download_progress:
+                        del self.download_progress[disc_progress_key]
+                    if hasattr(self, '_disc_downloads') and rom_id in self._disc_downloads:
+                        del self._disc_downloads[rom_id]
+                else:
+                    GLib.idle_add(lambda: self.log_message(f"✗ Failed to download {disc_name} (status {response.status_code})"))
+
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                GLib.idle_add(lambda: self.log_message(f"Error downloading {disc_name}: {e}"))
+
+        threading.Thread(target=download, daemon=True).start()
+
+    def delete_disc(self, game, disc):
+        """Delete a single disc from a multi-disc game"""
+        def delete():
+            try:
+                disc_name = disc['name']
+                platform_slug = game.get('platform_slug', game.get('platform', 'Unknown'))
+
+                # Get game folder path
+                download_dir = Path(self.rom_dir_row.get_text())
+                platform_dir = download_dir / platform_slug
+                game_folder = platform_dir / game['name']
+                disc_path = game_folder / disc_name
+
+                if disc_path.exists():
+                    disc_path.unlink()
+                    disc['is_downloaded'] = False
+                    disc['size'] = 0
+
+                    # Update game status - game is not fully downloaded if any disc is missing
+                    game['is_downloaded'] = all(d.get('is_downloaded', False) for d in game.get('discs', []))
+
+                    # Update available_games list to persist the changes
+                    rom_id = game.get('rom_id')
+                    for i, existing_game in enumerate(self.available_games):
+                        if existing_game.get('rom_id') == rom_id:
+                            self.available_games[i] = game
+                            break
+
+                    # Save cache to persist deletion status across app restarts
+                    if hasattr(self, 'game_cache'):
+                        threading.Thread(target=lambda: self.game_cache.save_games_data(self.available_games), daemon=True).start()
+
+                    GLib.idle_add(lambda: self.log_message(f"✓ Deleted {disc_name}"))
+
+                    # Update UI with a copy of the game data to trigger property notifications
+                    def update_ui():
+                        if hasattr(self, 'library_section'):
+                            # Create a copy to ensure GObject sees it as a new value
+                            game_copy = game.copy()
+                            game_copy['discs'] = [d.copy() for d in game.get('discs', [])]
+                            self.library_section.update_single_game(game_copy)
+                        return False
+
+                    GLib.idle_add(update_ui)
+                else:
+                    GLib.idle_add(lambda: self.log_message(f"Disc not found: {disc_name}"))
+
+            except Exception as e:
+                GLib.idle_add(lambda: self.log_message(f"Error deleting {disc_name}: {e}"))
+
+        threading.Thread(target=delete, daemon=True).start()
+
     def on_game_action_clicked(self, button):
         """Handle download or launch action based on game status"""
         selected_game = self.get_selected_game()
@@ -11089,7 +12980,7 @@ class SyncWindow(Gtk.ApplicationWindow):
         if not game.get('is_downloaded'):
             self.log_message("Game is not downloaded")
             return
-        
+
         # Auto-download missing BIOS if manager is available
         if self.retroarch.bios_manager:
             platform = game.get('platform')
@@ -11097,7 +12988,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                 normalized = self.retroarch.bios_manager.normalize_platform_name(platform)
                 present, missing = self.retroarch.bios_manager.check_platform_bios(normalized)
                 required_missing = [b for b in missing if not b.get('optional', False)]
-                
+
                 if required_missing:
                     # Set RomM client and download silently
                     self.retroarch.bios_manager.romm_client = self.romm_client
@@ -11108,20 +12999,91 @@ class SyncWindow(Gtk.ApplicationWindow):
         if not local_path or not Path(local_path).exists():
             self.log_message("Game file not found")
             return
-        
+
         platform_name = game.get('platform')
         rom_path = Path(local_path)
-        
+
         # Let RetroArch interface handle the actual launching
         success, message = self.retroarch.launch_game(rom_path, platform_name)
-        
+
         if success:
             self.log_message(f"🚀 {message}")
             # Send notification to RetroArch if possible
             self.retroarch.send_notification(f"Launching {game.get('name', 'Unknown')}")
         else:
             self.log_message(f"❌ Launch failed: {message}")
- 
+            # Show user-friendly dialog for missing core
+            if "No suitable core found" in message:
+                self._show_missing_core_dialog(game.get('name', 'Unknown'), platform_name)
+            elif "Core not found" in message:
+                self._show_missing_core_dialog(game.get('name', 'Unknown'), platform_name)
+
+    def launch_disc(self, game, disc):
+        """Launch a specific disc from a multi-disc game using RetroArch"""
+        if not disc.get('is_downloaded', False):
+            self.log_message("Disc is not downloaded")
+            return
+
+        # Auto-download missing BIOS if manager is available (same as launch_game)
+        if self.retroarch.bios_manager:
+            platform = game.get('platform')
+            if platform:
+                normalized = self.retroarch.bios_manager.normalize_platform_name(platform)
+                present, missing = self.retroarch.bios_manager.check_platform_bios(normalized)
+                required_missing = [b for b in missing if not b.get('optional', False)]
+
+                if required_missing:
+                    # Set RomM client and download silently
+                    self.retroarch.bios_manager.romm_client = self.romm_client
+                    self.retroarch.bios_manager.auto_download_missing_bios(normalized)
+
+        # Build path to the specific disc file
+        game_local_path = game.get('local_path')
+        if not game_local_path:
+            self.log_message("Game path not found")
+            return
+
+        # For multi-disc games, local_path points to the folder containing all discs
+        game_folder = Path(game_local_path)
+        disc_name = disc.get('name')
+        disc_path = game_folder / disc_name
+
+        if not disc_path.exists():
+            self.log_message(f"Disc file not found: {disc_name}")
+            return
+
+        platform_name = game.get('platform')
+
+        # Let RetroArch interface handle the actual launching
+        success, message = self.retroarch.launch_game(disc_path, platform_name)
+
+        if success:
+            self.log_message(f"🚀 {message}")
+            # Send notification to RetroArch if possible
+            game_name = game.get('name', 'Unknown')
+            self.retroarch.send_notification(f"Launching {game_name} - {disc_name}")
+        else:
+            self.log_message(f"❌ Launch failed: {message}")
+            # Show user-friendly dialog for missing core
+            if "No suitable core found" in message:
+                self._show_missing_core_dialog(f"{game.get('name', 'Unknown')} - {disc_name}", platform_name)
+            elif "Core not found" in message:
+                self._show_missing_core_dialog(f"{game.get('name', 'Unknown')} - {disc_name}", platform_name)
+
+    def _show_missing_core_dialog(self, game_name, platform_name):
+        """Show a dialog informing the user that no RetroArch core is installed for the platform"""
+        platform_display = platform_name if platform_name else "this platform"
+
+        dialog = Adw.AlertDialog.new(
+            "RetroArch Core Not Found",
+            f"Cannot launch '{game_name}' because no RetroArch core is installed for {platform_display}.\n\n"
+            f"Please install a compatible RetroArch core for {platform_display} and try again."
+        )
+        dialog.add_response("ok", "OK")
+        dialog.set_default_response("ok")
+        dialog.set_close_response("ok")
+        dialog.present(self)
+
     def on_window_close_request(self, _window):
         """Overrides the default window close action.
         
@@ -11251,12 +13213,8 @@ class SyncWindow(Gtk.ApplicationWindow):
                 
                 # Get download directory and create platform directory
                 download_dir = Path(self.rom_dir_row.get_text())
-                # Use mapped slug for RetroDECK compatibility
-                if self.retroarch.is_retrodeck_installation():
-                    mapped_slug = self.map_platform_slug_for_retrodeck(platform_slug)
-                else:
-                    mapped_slug = platform_slug
-                platform_dir = download_dir / mapped_slug
+                # Use platform slug directly (RomM and RetroDECK now use the same slugs)
+                platform_dir = download_dir / platform_slug
                 platform_dir.mkdir(parents=True, exist_ok=True)
                 download_path = platform_dir / file_name
 
@@ -11278,7 +13236,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                     progress_callback=lambda progress: self.update_download_progress(progress, rom_id),
                     cancellation_checker=is_cancelled
                 )
-                
+
                 if success:
                     # Mark download complete
                     current_progress = self.download_progress.get(rom_id, {})
@@ -11309,15 +13267,39 @@ class SyncWindow(Gtk.ApplicationWindow):
                                     if hasattr(self, 'library_section') else None)
                     
                     # Rest of success handling...
-                    if download_path.exists():
+                    # Always update game status after successful download
+                    if True:  # Changed from download_path.exists() to handle multi-disc folders
                         size_str = f"{file_size / (1024*1024*1024):.1f} GB" if file_size > 1024*1024*1024 else f"{file_size / (1024*1024):.1f} MB" if file_size > 1024*1024 else f"{file_size / 1024:.1f} KB"
                         
-                        GLib.idle_add(lambda n=rom_name, s=size_str: 
+                        GLib.idle_add(lambda n=rom_name, s=size_str:
                                     self.log_message(f"✓ Downloaded {n} ({s})"))
-                        
+
                         # Update game data
                         game['is_downloaded'] = True
-                        game['local_path'] = str(download_path)
+
+                        # Check if download created a folder (multi-file game)
+                        actual_folder = platform_dir / rom_name
+
+                        # Update disc status for multi-disc games
+                        if game.get('is_multi_disc') and game.get('discs'):
+                            # For multi-disc, RomM client creates folder with game name
+                            game['local_path'] = str(actual_folder)
+                            for disc in game['discs']:
+                                disc['is_downloaded'] = True
+                                disc_path = actual_folder / disc.get('name', '')
+                                if disc_path.exists():
+                                    # Calculate total size including all related files (e.g., .bin + .cue)
+                                    disc['size'] = self.get_disc_total_size(disc_path, actual_folder)
+                        elif actual_folder.exists() and actual_folder.is_dir():
+                            # Multi-file game (folder exists with game name)
+                            game['local_path'] = str(actual_folder)
+                        elif download_path.exists():
+                            # Single file download
+                            game['local_path'] = str(download_path)
+                        else:
+                            # Fallback - use folder path if download_path doesn't exist
+                            game['local_path'] = str(actual_folder)
+
                         game['local_size'] = file_size
 
                         # Update UI - update both the underlying games list AND current view
@@ -11471,6 +13453,10 @@ class SyncWindow(Gtk.ApplicationWindow):
                             GLib.idle_add(lambda: self.library_section.update_action_buttons()
                                         if hasattr(self, 'library_section') else None)
 
+                        # Decrement bulk download counter for cancelled downloads too
+                        if is_bulk_operation and hasattr(self, '_bulk_download_remaining'):
+                            self._bulk_download_remaining -= 1
+
                         GLib.idle_add(lambda n=rom_name:
                                     self.log_message(f"⊗ Cancelled download: {n}"))
                     else:
@@ -11522,10 +13508,8 @@ class SyncWindow(Gtk.ApplicationWindow):
                     gc.collect()
 
                 threading.Thread(target=cleanup_progress, daemon=True).start()
-                
+
             except Exception as e:
-                print(f"DEBUG DOWNLOAD ERROR: {e}")
-                print(f"DEBUG ERROR TYPE: {type(e)}")
                 import traceback
                 traceback.print_exc()
                 # Handle error state
@@ -11587,12 +13571,8 @@ class SyncWindow(Gtk.ApplicationWindow):
 
                 # Get download directory and create platform directory
                 download_dir = Path(self.rom_dir_row.get_text())
-                # Use mapped slug for RetroDECK compatibility
-                if self.retroarch.is_retrodeck_installation():
-                    mapped_slug = self.map_platform_slug_for_retrodeck(platform_slug)
-                else:
-                    mapped_slug = platform_slug
-                platform_dir = download_dir / mapped_slug
+                # Use platform slug directly (RomM and RetroDECK now use the same slugs)
+                platform_dir = download_dir / platform_slug
                 platform_dir.mkdir(parents=True, exist_ok=True)
                 download_path = platform_dir / file_name
 
@@ -11646,15 +13626,30 @@ class SyncWindow(Gtk.ApplicationWindow):
                                     if hasattr(self, 'library_section') else None)
                     
                     # Rest of success handling...
-                    if download_path.exists():
+                    # Always update game status after successful download
+                    if True:  # Changed from download_path.exists() to handle multi-disc folders
                         size_str = f"{file_size / (1024*1024*1024):.1f} GB" if file_size > 1024*1024*1024 else f"{file_size / (1024*1024):.1f} MB" if file_size > 1024*1024 else f"{file_size / 1024:.1f} KB"
                         
-                        GLib.idle_add(lambda n=rom_name, s=size_str: 
+                        GLib.idle_add(lambda n=rom_name, s=size_str:
                                     self.log_message(f"✓ Downloaded {n} ({s})"))
-                        
+
                         # Update game data
                         game['is_downloaded'] = True
-                        game['local_path'] = str(download_path)
+
+                        # Update disc status for multi-disc games
+                        if game.get('is_multi_disc') and game.get('discs'):
+                            # For multi-disc, RomM client creates folder with game name
+                            actual_folder = platform_dir / rom_name
+                            game['local_path'] = str(actual_folder)
+                            for disc in game['discs']:
+                                disc['is_downloaded'] = True
+                                disc_path = actual_folder / disc.get('name', '')
+                                if disc_path.exists():
+                                    # Calculate total size including all related files (e.g., .bin + .cue)
+                                    disc['size'] = self.get_disc_total_size(disc_path, actual_folder)
+                        else:
+                            game['local_path'] = str(download_path)
+
                         game['local_size'] = file_size
 
                         # Update UI
@@ -11821,6 +13816,10 @@ class SyncWindow(Gtk.ApplicationWindow):
                         if not is_bulk_operation:
                             GLib.idle_add(lambda: self.library_section.update_action_buttons()
                                         if hasattr(self, 'library_section') else None)
+
+                        # Decrement bulk download counter for cancelled downloads too
+                        if is_bulk_operation and hasattr(self, '_bulk_download_remaining'):
+                            self._bulk_download_remaining -= 1
 
                         GLib.idle_add(lambda n=rom_name:
                                     self.log_message(f"⊗ Cancelled download: {n}"))
@@ -13085,7 +15084,7 @@ class AutoSyncManager:
         self.log(f"📤 Checking for saves to upload for {game_name}")
     
     def get_platform_slug_from_emulator(self, romm_emulator):
-        """Reverse map core names to platform slugs for RetroDECK"""
+        """Reverse map RetroArch core names to RomM platform slugs"""
         core_to_platform = {
             'snes9x': 'snes',
             'nestopia': 'nes',
@@ -13343,11 +15342,11 @@ class AutoSyncManager:
                         folder_structure = self.retroarch.detect_save_folder_structure()
                         
                         if folder_structure == 'platform_slugs':
-                            # Use platform slug (RetroDECK default)
+                            # Use RomM platform slug
                             platform_slug = self.get_platform_slug_from_emulator(romm_emulator)
                             emulator_save_dir = save_base_dir / platform_slug
                         else:
-                            # Use core name (standard RetroArch)
+                            # Use RetroArch core name
                             retroarch_emulator_dir = self.retroarch.get_retroarch_directory_name(romm_emulator)
                             emulator_save_dir = save_base_dir / retroarch_emulator_dir
                         
@@ -13410,11 +15409,11 @@ class AutoSyncManager:
                         folder_structure = self.retroarch.detect_save_folder_structure()
                         
                         if folder_structure == 'platform_slugs':
-                            # Use platform slug (RetroDECK default)
+                            # Use RomM platform slug
                             platform_slug = self.get_platform_slug_from_emulator(romm_emulator)
                             emulator_state_dir = state_base_dir / platform_slug
                         else:
-                            # Use core name (standard RetroArch)
+                            # Use RetroArch core name
                             retroarch_emulator_dir = self.retroarch.get_retroarch_directory_name(romm_emulator)
                             emulator_state_dir = state_base_dir / retroarch_emulator_dir
                         
@@ -13602,11 +15601,11 @@ def run_daemon_mode():
     )
 
     print("🤖 Daemon mode: Initializing...")
-    
+
     # Initialize core components
     settings = SettingsManager()
     retroarch = RetroArchInterface()
-    
+
     # State variables
     romm_client = None
     available_games = []
@@ -13615,6 +15614,29 @@ def run_daemon_mode():
 
     # Initialize collection auto-sync for daemon
     collection_auto_sync = None
+
+    def is_path_validly_downloaded(path):
+        """Check if a path (file or folder) is validly downloaded"""
+        path = Path(path)
+        if not path.exists():
+            return False
+        if path.is_dir():
+            try:
+                return any(path.iterdir())
+            except (PermissionError, OSError):
+                return False
+        elif path.is_file():
+            return path.stat().st_size > 1024
+        return False
+
+    def get_actual_file_size(path):
+        """Get actual size - sum all files for directories, file size for files"""
+        path = Path(path)
+        if path.is_dir():
+            return sum(f.stat().st_size for f in path.rglob('*') if f.is_file())
+        elif path.is_file():
+            return path.stat().st_size
+        return 0
 
     def init_collection_sync():
         """Initialize collection auto-sync for daemon mode"""
@@ -13728,12 +15750,12 @@ def run_daemon_mode():
                         file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
                         platform_dir = download_dir / platform_slug
                         local_path = platform_dir / file_name
-                        is_downloaded = local_path.exists() and local_path.stat().st_size > 1024
-                        
+                        is_downloaded = is_path_validly_downloaded(local_path)
+
                         # Get local file size if downloaded
                         local_size = 0
                         if is_downloaded and local_path.exists():
-                            local_size = local_path.stat().st_size
+                            local_size = get_actual_file_size(local_path)
 
                         available_games.append({
                             'name': Path(file_name).stem if file_name else rom.get('name', 'Unknown'),
@@ -13967,12 +15989,11 @@ def run_daemon_mode():
                                                         collection_roms = romm_client.get_collection_roms(collection_id)
                                                         total_roms = len(collection_roms)
                                                         downloaded_roms = 0
-                                                        MIN_ROM_SIZE = 100 * 1024
                                                         for rom in collection_roms:
                                                             platform_slug = rom.get('platform_slug', 'Unknown')
                                                             file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
                                                             local_path = download_dir / platform_slug / file_name
-                                                            if local_path.exists() and local_path.stat().st_size > MIN_ROM_SIZE:
+                                                            if is_path_validly_downloaded(local_path):
                                                                 downloaded_roms += 1
                                                         if downloaded_roms == total_roms:
                                                             sync_state = 'synced'
@@ -13982,12 +16003,11 @@ def run_daemon_mode():
                                                     collection_roms = romm_client.get_collection_roms(collection_id)
                                                     total_roms = len(collection_roms)
                                                     downloaded_roms = 0
-                                                    MIN_ROM_SIZE = 100 * 1024
                                                     for rom in collection_roms:
                                                         platform_slug = rom.get('platform_slug', 'Unknown')
                                                         file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
                                                         local_path = download_dir / platform_slug / file_name
-                                                        if local_path.exists() and local_path.stat().st_size > MIN_ROM_SIZE:
+                                                        if is_path_validly_downloaded(local_path):
                                                             downloaded_roms += 1
 
                                                     if total_roms == 0:
@@ -14013,12 +16033,11 @@ def run_daemon_mode():
                                         collection_roms = romm_client.get_collection_roms(collection_id)
                                         total_roms = len(collection_roms)
                                         downloaded_roms = 0
-                                        MIN_ROM_SIZE = 100 * 1024
                                         for rom in collection_roms:
                                             platform_slug = rom.get('platform_slug', 'Unknown')
                                             file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
                                             local_path = download_dir / platform_slug / file_name
-                                            if local_path.exists() and local_path.stat().st_size > MIN_ROM_SIZE:
+                                            if is_path_validly_downloaded(local_path):
                                                 downloaded_roms += 1
 
                                         if total_roms == 0:
@@ -14332,7 +16351,6 @@ class DaemonCollectionSync:
 
         download_dir = Path(self.settings.get('Download', 'rom_directory'))
         downloaded_count = 0
-        MIN_ROM_SIZE = 100 * 1024
 
         # First pass: count ROMs that actually need downloading AND count existing ROMs
         roms_to_download = []
@@ -14346,7 +16364,7 @@ class DaemonCollectionSync:
                 platform_slug = rom.get('platform_slug', 'Unknown')
                 file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
                 local_path = download_dir / platform_slug / file_name
-                if local_path.exists() and local_path.stat().st_size > MIN_ROM_SIZE:
+                if is_path_validly_downloaded(local_path):
                     existing_roms_count += 1
                 continue
 
@@ -14354,7 +16372,7 @@ class DaemonCollectionSync:
             platform_slug = rom.get('platform_slug', 'Unknown')
             file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
             local_path = download_dir / platform_slug / file_name
-            if local_path.exists() and local_path.stat().st_size > MIN_ROM_SIZE:
+            if is_path_validly_downloaded(local_path):
                 existing_roms_count += 1
             else:
                 roms_to_download.append(rom)
@@ -14510,4 +16528,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()s
+    main()

@@ -105,16 +105,16 @@ pip3 install --target="$APPDIR/usr/lib/python3/dist-packages" \
 
 echo "✅ Dependencies installed with conflict avoidance"
 
-# Bundle libadwaita and GI typelibs for Steam Deck compatibility
-echo "📦 Bundling libadwaita and GI typelibs for Steam Deck..."
+# Bundle GI typelibs for Steam Deck compatibility (but NOT libadwaita libraries)
+echo "📦 Bundling GI typelibs for Steam Deck..."
 
 # Create directories for GObject introspection
 mkdir -p "$APPDIR/usr/lib/girepository-1.0"
 mkdir -p "$APPDIR/usr/lib/x86_64-linux-gnu"
 
-# Copy GI typelib files if available
-for typelib in Gtk-4.0.typelib GObject-2.0.typelib Gio-2.0.typelib Adw-1.typelib; do
-    for path in /usr/lib/girepository-1.0 /usr/lib/x86_64-linux-gnu/girepository-1.0; do
+# Copy GI typelib files if available (EXCLUDING Adw-1.typelib to use system version)
+for typelib in Gtk-4.0.typelib GObject-2.0.typelib Gio-2.0.typelib; do
+    for path in /usr/lib/girepository-1.0 /usr/lib/x86_64-linux-gnu/girepository-1.0 /usr/lib64/girepository-1.0; do
         if [ -f "$path/$typelib" ]; then
             cp "$path/$typelib" "$APPDIR/usr/lib/girepository-1.0/" 2>/dev/null || true
             echo "✅ Copied $typelib"
@@ -123,17 +123,10 @@ for typelib in Gtk-4.0.typelib GObject-2.0.typelib Gio-2.0.typelib Adw-1.typelib
     done
 done
 
-# Copy libadwaita shared libraries if available
-echo "📦 Bundling only essential libraries..."
-for lib in libadwaita-1.so*; do
-    for libpath in /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib; do
-        if ls "$libpath"/$lib 1> /dev/null 2>&1; then
-            cp "$libpath"/$lib "$APPDIR/usr/lib/x86_64-linux-gnu/" 2>/dev/null || true
-            echo "✅ Copied $lib"
-            break
-        fi
-    done
-done
+# NOTE: We intentionally do NOT bundle libadwaita (typelib or .so files)
+# This allows the app to use the system's native libadwaita version which
+# is properly configured for the system's compositor and theme
+echo "⚠️  Not bundling libadwaita - will use system version to avoid rendering issues"
 
 echo "✅ Dependencies bundled without PyGObject rebuild"
 
