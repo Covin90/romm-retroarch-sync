@@ -2,13 +2,15 @@
 
 ## [1.3] - 2025-11-04
 
-### Added
+### Tweaked
 
-- Settings page in Decky plugin with toggle to enable/disable debug logging
+- Status display and tree view improvements
 
 ### Fixed
 
-- TBD
+- Bulk cancel operation behavior
+- Size calculation and sync bugs
+
 
 ## [1.2.1] - 2025-10-19
 
