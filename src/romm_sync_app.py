@@ -15120,8 +15120,6 @@ class AutoSyncManager:
 
     def download_saves_for_specific_game(self, game):
         """Download only the LATEST saves/states for a specific game from RomM with smart overwrite protection"""
-        from gi.repository import GLib, Adw
-        
         try:
             from urllib.parse import urljoin
             import datetime
