@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.3.1] - 2026-01-08
+
+### Fixed
+
+- Fixed core matching algorithm
+
 ## [1.3] - 2025-11-16
 
 ### Tweaked

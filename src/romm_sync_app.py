@@ -6656,7 +6656,7 @@ class RomMClient:
         self.session.headers.update({
             'Accept-Encoding': 'gzip, deflate',
             'Accept': 'application/json',
-            'User-Agent': 'RomM-RetroArch-Sync/1.3',
+            'User-Agent': 'RomM-RetroArch-Sync/1.3.1',
             'Connection': 'keep-alive',
             'Keep-Alive': 'timeout=30, max=100'
         })
@@ -8606,20 +8606,56 @@ class RetroArchInterface:
     def suggest_core_for_platform(self, platform_name):
         """Suggest best core for a platform"""
         available_cores = self.get_available_cores()
+
+        print(f"🎮 Looking for core for platform: '{platform_name}'")
+
+        # Try exact match first
         suggested_cores = self.platform_core_map.get(platform_name, [])
-        
+
         # Find first available suggested core
         for core in suggested_cores:
             if core in available_cores:
+                print(f"✅ Found exact match core: {core}")
                 return core, available_cores[core]
-        
-        # If no suggested core found, return any available core that might work
+
+        # Try fuzzy matching if exact match fails
         platform_lower = platform_name.lower()
-        for core_name in available_cores:
-            if any(keyword in core_name.lower() for keyword in ['snes', 'nes', 'psx', 'genesis', 'gameboy', 'gba']):
-                if any(keyword in platform_lower for keyword in ['nintendo', 'snes', 'nes', 'playstation', 'psx', 'sega', 'game boy', 'gba']):
-                    return core_name, available_cores[core_name]
-        
+
+        # Enhanced keyword mapping for better platform detection
+        platform_keywords = {
+            'n64': ['mupen64plus_next', 'parallel_n64'],
+            'nintendo 64': ['mupen64plus_next', 'parallel_n64'],
+            'snes': ['snes9x', 'bsnes', 'mesen-s'],
+            'super nintendo': ['snes9x', 'bsnes', 'mesen-s'],
+            'nes': ['nestopia', 'fceumm', 'mesen'],
+            'nintendo entertainment': ['nestopia', 'fceumm', 'mesen'],
+            'game boy advance': ['mgba', 'vba_next', 'vbam'],
+            'gba': ['mgba', 'vba_next', 'vbam'],
+            'game boy color': ['gambatte', 'sameboy', 'tgbdual'],
+            'gbc': ['gambatte', 'sameboy', 'tgbdual'],
+            'game boy': ['gambatte', 'sameboy', 'tgbdual'],
+            'gb': ['gambatte', 'sameboy', 'tgbdual'],
+            'playstation 2': ['pcsx2', 'play'],
+            'ps2': ['pcsx2', 'play'],
+            'playstation': ['beetle_psx', 'beetle_psx_hw', 'pcsx_rearmed', 'swanstation'],
+            'psx': ['beetle_psx', 'beetle_psx_hw', 'pcsx_rearmed', 'swanstation'],
+            'ps1': ['beetle_psx', 'beetle_psx_hw', 'pcsx_rearmed', 'swanstation'],
+            'genesis': ['genesis_plus_gx', 'blastem', 'picodrive'],
+            'mega drive': ['genesis_plus_gx', 'blastem', 'picodrive'],
+            'nintendo ds': ['desmume', 'melonds'],
+            'nds': ['desmume', 'melonds'],
+        }
+
+        # Try keyword matching
+        for keyword, cores in platform_keywords.items():
+            if keyword in platform_lower:
+                for core in cores:
+                    if core in available_cores:
+                        print(f"✅ Found fuzzy match core: {core} (matched keyword: {keyword})")
+                        return core, available_cores[core]
+
+        print(f"❌ No suitable core found for platform: {platform_name}")
+        print(f"Available cores: {list(available_cores.keys())}")
         return None, None
 
     def launch_game(self, rom_path, platform_name=None, core_name=None):
@@ -8659,22 +8695,39 @@ class RetroArchInterface:
                 cmd = [self.retroarch_executable, '-L', core_path, str(rom_path)]
             
             print(f"🚀 Launching: {' '.join(cmd)}")
-            
-            # Launch RetroArch with debugging
-            result = subprocess.Popen(cmd, 
-                                    stdout=subprocess.PIPE, 
+            print(f"📁 ROM path exists: {os.path.exists(rom_path)}")
+            print(f"📁 Core path exists: {os.path.exists(core_path)}")
+            print(f"📁 RetroArch executable: {self.retroarch_executable}")
+
+            # Launch RetroArch with debugging (don't capture output to see what happens)
+            result = subprocess.Popen(cmd,
+                                    stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE,
                                     text=True)
-            
+
             # Wait a moment to see if it fails immediately
             import time
             time.sleep(2)
-            
+
             if result.poll() is not None:
                 # Process has already exited
                 stdout, stderr = result.communicate()
-                return False, f"Launch failed immediately. STDOUT: {stdout[:200]} STDERR: {stderr[:200]}"
-            
+                error_msg = f"Launch failed immediately.\n"
+                error_msg += f"Exit code: {result.returncode}\n"
+                error_msg += f"Command: {' '.join(cmd)}\n"
+                if stdout:
+                    error_msg += f"STDOUT: {stdout[:500]}\n"
+                if stderr:
+                    error_msg += f"STDERR: {stderr[:500]}\n"
+                if not stdout and not stderr:
+                    error_msg += "No output from process. This could mean:\n"
+                    error_msg += "1. RetroArch/core path is incorrect\n"
+                    error_msg += "2. Missing library dependencies\n"
+                    error_msg += "3. Permission issues\n"
+                    error_msg += f"Try running manually: {' '.join(cmd)}"
+                print(error_msg)
+                return False, error_msg
+
             return True, f"Launched {rom_path.name} with {core_name} core"
             
         except Exception as e:
@@ -10277,7 +10330,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             transient_for=self,
             application_name="RomM - RetroArch Sync",
             application_icon="com.romm.retroarch.sync",
-            version="1.3",
+            version="1.3.1",
             developer_name='Hector Eduardo "Covin" Silveri',
             copyright="© 2025 Hector Eduardo Silveri",
             license_type=Gtk.License.GPL_3_0
@@ -11394,7 +11447,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             # Create package.json
             package_json = {
                 "name": "romm-sync-status",
-                "version": "1.3",
+                "version": "1.3.1",
                 "description": "RomM Sync Status Display",
                 "main": "main.py",
                 "scripts": {},
@@ -13002,6 +13055,10 @@ class SyncWindow(Gtk.ApplicationWindow):
 
         platform_name = game.get('platform')
         rom_path = Path(local_path)
+
+        print(f"🎮 Launching game: {game.get('name')}")
+        print(f"📁 ROM path: {rom_path}")
+        print(f"🎯 Platform: {platform_name}")
 
         # Let RetroArch interface handle the actual launching
         success, message = self.retroarch.launch_game(rom_path, platform_name)
