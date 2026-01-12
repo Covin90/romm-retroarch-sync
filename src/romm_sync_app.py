@@ -211,6 +211,13 @@ except ValueError:
             def set_active(self, active):
                 self.switch.set_active(active)
 
+            def connect(self, signal_name, callback):
+                if signal_name in ('notify::active'):
+                    # Forward to the internal switch widget's signal
+                    return self.switch.connect(signal_name, callback)
+                else:
+                    return super().connect(signal_name, callback)
+
         class EntryRow(Gtk.Box):
             def __init__(self):
                 super().__init__(orientation=Gtk.Orientation.VERTICAL)
