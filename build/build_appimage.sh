@@ -10,7 +10,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 echo "📁 Project root: $PROJECT_ROOT"
 
 # Add version variable at the top
-VERSION="1.3.1"
+VERSION="1.3.2"
 APPIMAGE_NAME="RomM-RetroArch-Sync-v${VERSION}.AppImage"
 
 # Define paths
@@ -113,7 +113,7 @@ mkdir -p "$APPDIR/usr/lib/girepository-1.0"
 mkdir -p "$APPDIR/usr/lib/x86_64-linux-gnu"
 
 # Copy GI typelib files if available (EXCLUDING Adw-1.typelib to use system version)
-for typelib in Gtk-4.0.typelib GObject-2.0.typelib Gio-2.0.typelib; do
+for typelib in Gtk-4.0.typelib GObject-2.0.typelib Gio-2.0.typelib AppIndicator3-0.1.typelib; do
     for path in /usr/lib/girepository-1.0 /usr/lib/x86_64-linux-gnu/girepository-1.0 /usr/lib64/girepository-1.0; do
         if [ -f "$path/$typelib" ]; then
             cp "$path/$typelib" "$APPDIR/usr/lib/girepository-1.0/" 2>/dev/null || true
@@ -127,6 +127,16 @@ done
 # This allows the app to use the system's native libadwaita version which
 # is properly configured for the system's compositor and theme
 echo "⚠️  Not bundling libadwaita - will use system version to avoid rendering issues"
+
+# Bundle AppIndicator3 library for tray icon support
+echo "📦 Bundling AppIndicator3 library..."
+for libpath in /usr/lib /usr/lib64 /usr/lib/x86_64-linux-gnu; do
+    if [ -f "$libpath/libappindicator3.so.1" ]; then
+        cp "$libpath/libappindicator3.so.1" "$APPDIR/usr/lib/" 2>/dev/null || true
+        echo "✅ Copied libappindicator3.so.1"
+        break
+    fi
+done
 
 echo "✅ Dependencies bundled without PyGObject rebuild"
 
@@ -206,7 +216,7 @@ HERE="$(dirname "$(readlink -f "${0}")")"
 export PYTHONPATH="${HERE}/usr/lib/python3/dist-packages:${PYTHONPATH}"
 export PATH="${HERE}/usr/bin:${PATH}"
 export GI_TYPELIB_PATH="${HERE}/usr/lib/girepository-1.0:${GI_TYPELIB_PATH}"
-export LD_LIBRARY_PATH="${HERE}/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="${HERE}/usr/lib:${HERE}/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
 
 cd "${HERE}/usr/bin"
 exec /usr/bin/python3 "${HERE}/usr/bin/romm_sync_app.py" "$@"

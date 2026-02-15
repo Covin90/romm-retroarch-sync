@@ -6656,7 +6656,7 @@ class RomMClient:
         self.session.headers.update({
             'Accept-Encoding': 'gzip, deflate',
             'Accept': 'application/json',
-            'User-Agent': 'RomM-RetroArch-Sync/1.3.1',
+            'User-Agent': 'RomM-RetroArch-Sync/1.3.2',
             'Connection': 'keep-alive',
             'Keep-Alive': 'timeout=30, max=100'
         })
@@ -8637,9 +8637,9 @@ class RetroArchInterface:
             'gb': ['gambatte', 'sameboy', 'tgbdual'],
             'playstation 2': ['pcsx2', 'play'],
             'ps2': ['pcsx2', 'play'],
-            'playstation': ['beetle_psx', 'beetle_psx_hw', 'pcsx_rearmed', 'swanstation'],
-            'psx': ['beetle_psx', 'beetle_psx_hw', 'pcsx_rearmed', 'swanstation'],
-            'ps1': ['beetle_psx', 'beetle_psx_hw', 'pcsx_rearmed', 'swanstation'],
+            'playstation': ['beetle_psx', 'beetle_psx_hw', 'mednafen_psx_hw', 'mednafen_psx', 'pcsx_rearmed', 'swanstation'],
+            'psx': ['beetle_psx', 'beetle_psx_hw', 'mednafen_psx_hw', 'mednafen_psx', 'pcsx_rearmed', 'swanstation'],
+            'ps1': ['beetle_psx', 'beetle_psx_hw', 'mednafen_psx_hw', 'mednafen_psx', 'pcsx_rearmed', 'swanstation'],
             'genesis': ['genesis_plus_gx', 'blastem', 'picodrive'],
             'mega drive': ['genesis_plus_gx', 'blastem', 'picodrive'],
             'nintendo ds': ['desmume', 'melonds'],
@@ -9337,7 +9337,6 @@ class RetroArchInterface:
                 # Debug: Show first few failed attempts
                 pass
         
-        print(f"❌ No thumbnail found for {state_path.name}")
         return None
 
     def check_network_commands_config(self):
@@ -9454,6 +9453,11 @@ class SyncWindow(Gtk.ApplicationWindow):
         logs_action = Gio.SimpleAction.new("logs", None)
         logs_action.connect("activate", lambda action, param: self.on_show_logs_dialog(None))
         self.add_action(logs_action)
+
+        # Add quit action
+        quit_action = Gio.SimpleAction.new("quit", None)
+        quit_action.connect("activate", lambda action, param: self.get_application().quit())
+        self.add_action(quit_action)
 
         self.tray = TrayIcon(self.get_application(), self)
 
@@ -10330,7 +10334,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             transient_for=self,
             application_name="RomM - RetroArch Sync",
             application_icon="com.romm.retroarch.sync",
-            version="1.3.1",
+            version="1.3.2",
             developer_name='Hector Eduardo "Covin" Silveri',
             copyright="© 2025 Hector Eduardo Silveri",
             license_type=Gtk.License.GPL_3_0
@@ -10622,6 +10626,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             menu = Gio.Menu()
             menu.append("Logs / Advanced", "win.logs")
             menu.append("About", "win.about")
+            menu.append("Quit", "win.quit")
             menu_button.set_menu_model(menu)
             header.pack_end(menu_button)
 
@@ -11447,7 +11452,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             # Create package.json
             package_json = {
                 "name": "romm-sync-status",
-                "version": "1.3.1",
+                "version": "1.3.2",
                 "description": "RomM Sync Status Display",
                 "main": "main.py",
                 "scripts": {},
@@ -13060,6 +13065,14 @@ class SyncWindow(Gtk.ApplicationWindow):
         print(f"📁 ROM path: {rom_path}")
         print(f"🎯 Platform: {platform_name}")
 
+        # Download saves before launching
+        rom_id = game.get('rom_id')
+        if rom_id:
+            try:
+                self.download_saves_for_game(game)
+            except Exception as e:
+                print(f"⚠️ Save download error: {e}")
+
         # Let RetroArch interface handle the actual launching
         success, message = self.retroarch.launch_game(rom_path, platform_name)
 
@@ -14018,10 +14031,15 @@ class SyncWindow(Gtk.ApplicationWindow):
             if 'saves' in self.retroarch.save_dirs:
                 save_base_dir = self.retroarch.save_dirs['saves']
                 user_saves = rom_details.get('user_saves', [])
-                
+
+                # Only use the latest save file
                 if user_saves:
-                    GLib.idle_add(lambda: self.log_message(f"Found {len(user_saves)} save file(s)"))
-                    
+                    latest_save = max(user_saves, key=lambda x: x.get('updated_at', ''), default=None)
+                    user_saves = [latest_save] if latest_save else []
+
+                if user_saves:
+                    GLib.idle_add(lambda: self.log_message(f"Downloading latest save file"))
+
                     for save_file in user_saves:
                         if isinstance(save_file, dict):
                             original_filename = save_file.get('file_name', '')
@@ -14076,10 +14094,15 @@ class SyncWindow(Gtk.ApplicationWindow):
             if 'states' in self.retroarch.save_dirs:
                 state_base_dir = self.retroarch.save_dirs['states']
                 user_states = rom_details.get('user_states', [])
-                
+
+                # Only use the latest save state
                 if user_states:
-                    GLib.idle_add(lambda: self.log_message(f"Found {len(user_states)} save state(s)"))
-                    
+                    latest_state = max(user_states, key=lambda x: x.get('updated_at', ''), default=None)
+                    user_states = [latest_state] if latest_state else []
+
+                if user_states:
+                    GLib.idle_add(lambda: self.log_message(f"Downloading latest save state"))
+
                     for state_file in user_states:
                         if isinstance(state_file, dict):
                             original_filename = state_file.get('file_name', '')
@@ -14122,10 +14145,64 @@ class SyncWindow(Gtk.ApplicationWindow):
                                                 temp_path.rename(final_path)
                                                 
                                             final_relative_path = final_path.relative_to(state_base_dir)
-                                            GLib.idle_add(lambda p=str(final_relative_path): 
+                                            GLib.idle_add(lambda p=str(final_relative_path):
                                                         self.log_message(f"✓ Save state ready: {p}"))
+
+                                            # Download thumbnail/screenshot for the save state
+                                            try:
+                                                # Extract user_id and platform slug from download_path
+                                                download_path = state_file.get('download_path', '')
+                                                print(f"🔍 DEBUG: Download path: {download_path}")
+                                                user_id = None
+                                                platform_slug = 'snes'  # fallback
+
+                                                if '/users/' in download_path and '/states/' in download_path:
+                                                    # Extract user_id: /users/{user_id}/
+                                                    parts = download_path.split('/users/')
+                                                    print(f"🔍 DEBUG: Split parts: {parts}")
+                                                    if len(parts) > 1:
+                                                        user_id = parts[1].split('/')[0]
+                                                        print(f"🔍 DEBUG: Extracted user_id: {user_id}")
+                                                        # Extract platform slug: /states/{platform}/
+                                                        remaining = parts[1][len(user_id)+1:]
+                                                        print(f"🔍 DEBUG: Remaining after user_id: {remaining}")
+                                                        if 'states/' in remaining:
+                                                            slug_part = remaining.split('states/')[1].split('/')[0]
+                                                            print(f"🔍 DEBUG: Extracted slug_part: {slug_part}")
+                                                            if slug_part:
+                                                                platform_slug = slug_part
+                                                                print(f"🔍 DEBUG: Set platform_slug to: {platform_slug}")
+                                                        else:
+                                                            print(f"🔍 DEBUG: states/ not found in remaining: {remaining}")
+                                                else:
+                                                    print(f"🔍 DEBUG: Missing /users/ or /states/ in download_path")
+
+                                                if user_id:
+                                                    # Construct screenshot URL using the pattern from RomM
+                                                    # /api/raw/assets/users/{user_id}/screenshots/{platform}/{rom_id}/{filename}.png
+                                                    screenshot_filename = original_filename.replace('.state', '.png').replace('.State', '.png')
+                                                    screenshot_url = f"{self.romm_client.base_url}/api/raw/assets/users/{user_id}/screenshots/{platform_slug}/{rom_id}/{screenshot_filename}"
+
+                                                    try:
+                                                        print(f"🔍 DEBUG: Attempting to download screenshot from: {screenshot_url}")
+                                                        thumb_response = self.romm_client.session.get(screenshot_url, timeout=10)
+                                                        print(f"🔍 DEBUG: Screenshot response status: {thumb_response.status_code}, size: {len(thumb_response.content)} bytes")
+                                                        print(f"🔍 DEBUG: Response headers: {thumb_response.headers.get('content-type')}")
+
+                                                        if thumb_response.status_code == 200:
+                                                            thumbnail_path = final_path.with_suffix(final_path.suffix + '.png')
+                                                            print(f"🔍 DEBUG: Saving thumbnail to: {thumbnail_path}")
+                                                            with open(thumbnail_path, 'wb') as f:
+                                                                f.write(thumb_response.content)
+                                                            GLib.idle_add(lambda: self.log_message(f"✓ Thumbnail downloaded"))
+                                                        else:
+                                                            print(f"🔍 DEBUG: Screenshot download failed with status {thumb_response.status_code}")
+                                                    except Exception as e:
+                                                        print(f"🔍 DEBUG: Screenshot download error: {e}")
+                                            except Exception as e:
+                                                pass
                                         except Exception as e:
-                                            GLib.idle_add(lambda err=str(e): 
+                                            GLib.idle_add(lambda err=str(e):
                                                         self.log_message(f"✗ Failed to rename state file: {err}"))
                                     else:
                                         GLib.idle_add(lambda f=original_filename: 
@@ -14610,7 +14687,11 @@ class AutoSyncManager:
         if not self.retroarch.save_dirs:
             self.log("⚠️ No RetroArch save directories found")
             return
-        
+
+        # Skip file events for the first 5 seconds to avoid uploading existing saves on startup
+        self.startup_time = time.time()
+        self.startup_grace_period = 5
+
         self.observer = Observer()
         
         for save_type, directory in self.retroarch.save_dirs.items():
@@ -14980,15 +15061,21 @@ class AutoSyncManager:
         """Handle save file change detected by file system monitor"""
         if not self.upload_enabled or not self.romm_client or not self.romm_client.authenticated:
             return
-            
-        # PREVENT RAPID RE-TRIGGERS
+
+        # Skip uploads during startup grace period (first 5 seconds)
+        if hasattr(self, 'startup_time') and hasattr(self, 'startup_grace_period'):
+            elapsed = time.time() - self.startup_time
+            if elapsed < self.startup_grace_period:
+                return
+
+        # Queue for upload - the background upload worker will handle actual upload
         current_time = time.time()
         if file_path in self.upload_debounce:
             time_since_last = current_time - self.upload_debounce[file_path]
-            if time_since_last < 2.0:  # Ignore changes within 2 seconds
+            if time_since_last < 10.0:  # Ignore rapid re-triggers within 10 seconds
                 return
-        
-        # Update debounce time
+
+        # Update debounce time - the upload worker will process this when it's stable
         self.upload_debounce[file_path] = current_time
     
     def process_save_upload(self, file_path):
@@ -15510,32 +15597,67 @@ class AutoSyncManager:
                                         downloads_successful += 1
                                         self.log(f"  ✅ State ready: {retroarch_filename}")
                                         if hasattr(self.parent_window, 'auto_sync') and self.parent_window.auto_sync:
-                                            # Skip auto-upload for recently downloaded files  
-                                            self.parent_window.auto_sync.upload_debounce[str(final_path)] = time.time() + 30                                        
+                                            # Skip auto-upload for recently downloaded files
+                                            self.parent_window.auto_sync.upload_debounce[str(final_path)] = time.time() + 30
                                         self.retroarch.send_notification(f"Save state downloaded: {game_name}")
-                                        
-                                        # Download screenshot if available
+
+                                        # Download screenshot if available - try multiple approaches
+                                        screenshot_filename = f"{final_path.name}.png"
+                                        screenshot_path = final_path.parent / screenshot_filename
+
+                                        # First, check if screenshot is in the state object from API
                                         screenshot_data = latest_state.get('screenshot')
                                         if screenshot_data and isinstance(screenshot_data, dict):
                                             screenshot_url = screenshot_data.get('download_path')
                                             if screenshot_url:
-                                                screenshot_filename = f"{final_path.name}.png"
-                                                screenshot_path = final_path.parent / screenshot_filename
-                                                
                                                 try:
                                                     full_screenshot_url = urljoin(self.romm_client.base_url, screenshot_url)
                                                     screenshot_response = self.romm_client.session.get(full_screenshot_url, timeout=30)
-                                                    
+
                                                     if screenshot_response.status_code == 200:
                                                         with open(screenshot_path, 'wb') as f:
                                                             f.write(screenshot_response.content)
                                                         self.log(f"  📸 Downloaded screenshot: {screenshot_filename}")
-                                                            
-                                                except Exception as screenshot_error:
-                                                    self.log(f"  ❌ Screenshot download error: {screenshot_error}")
-                                    
+                                                except Exception as e:
+                                                    self.log(f"  ⚠️ Failed to download screenshot from state object: {e}")
+                                        else:
+                                            # If not in API response, try to fetch the state details directly
+                                            try:
+                                                state_id = latest_state.get('id')
+                                                if state_id:
+                                                    self.log(f"  🔍 DEBUG: Fetching state details for ID {state_id}")
+                                                    state_details_url = urljoin(self.romm_client.base_url, f'/api/states/{state_id}')
+                                                    state_response = self.romm_client.session.get(state_details_url, timeout=10)
+                                                    self.log(f"  🔍 DEBUG: State API response status: {state_response.status_code}")
+
+                                                    if state_response.status_code == 200:
+                                                        state_details = state_response.json()
+                                                        self.log(f"  🔍 DEBUG: State details keys: {list(state_details.keys())}")
+
+                                                        screenshot_data = state_details.get('screenshot')
+                                                        self.log(f"  🔍 DEBUG: Screenshot data: {screenshot_data}")
+
+                                                        if screenshot_data and isinstance(screenshot_data, dict):
+                                                            screenshot_url = screenshot_data.get('download_path')
+                                                            self.log(f"  🔍 DEBUG: Screenshot URL from API: {screenshot_url}")
+
+                                                            if screenshot_url:
+                                                                full_screenshot_url = urljoin(self.romm_client.base_url, screenshot_url)
+                                                                self.log(f"  🔍 DEBUG: Full screenshot URL: {full_screenshot_url}")
+                                                                screenshot_response = self.romm_client.session.get(full_screenshot_url, timeout=30)
+                                                                self.log(f"  🔍 DEBUG: Screenshot response status: {screenshot_response.status_code}, size: {len(screenshot_response.content)} bytes")
+
+                                                                if screenshot_response.status_code == 200:
+                                                                    with open(screenshot_path, 'wb') as f:
+                                                                        f.write(screenshot_response.content)
+                                                                    self.log(f"  📸 Downloaded screenshot: {screenshot_filename}")
+                                                        else:
+                                                            self.log(f"  ⚠️ No screenshot field in state details")
+                                            except Exception as e:
+                                                self.log(f"  ⚠️ Screenshot fetch error: {e}")  # Log the error for debugging
+
                                     except Exception as e:
-                                        self.log(f"  ❌ Failed to rename state: {e}")
+                                        self.log(f"  ❌ Failed to process state: {e}")
             
             # Enhanced summary
             if downloads_attempted > 0:
@@ -15628,12 +15750,7 @@ class SaveFileHandler(FileSystemEventHandler):
         # Only process file events, not directory events
         if not event.is_directory and self.is_save_file(event.src_path):
             self.callback(event.src_path, self.save_type)
-    
-    def on_created(self, event):
-        # Only process file events, not directory events
-        if not event.is_directory and self.is_save_file(event.src_path):
-            self.callback(event.src_path, self.save_type)
-    
+
     def is_save_file(self, file_path):
         """Check if the file is a save file we should monitor"""
         try:
