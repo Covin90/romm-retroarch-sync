@@ -6526,6 +6526,8 @@ class SettingsManager:
         """Load settings from file"""
         if self.config_file.exists():
             self.config.read(self.config_file)
+            # Migrate settings from older versions
+            self._migrate_settings()
         else:
             # Create default settings
             self.config['RomM'] = {
@@ -6543,10 +6545,10 @@ class SettingsManager:
             self.config['BIOS'] = {
                 'verify_on_launch': 'false',
                 'backup_existing': 'true',
-            }            
+            }
             self.config['AutoSync'] = {
                 'auto_enable_on_connect': 'true',
-                'overwrite_behavior': '0' 
+                'overwrite_behavior': '0'
             }
             self.config['System'] = {
                 'autostart': 'false'
@@ -6557,9 +6559,46 @@ class SettingsManager:
                 'auto_download': 'true',
                 'auto_delete': 'false',
                 'auto_sync_enabled': 'false'
-            }      
+            }
+            self.config['Device'] = {
+                'device_id': '',
+                'device_name': socket.gethostname(),
+                'device_platform': 'Linux',
+                'client': 'RomM-RetroArch-Sync',
+                'client_version': '1.3.2',
+                'sync_enabled': 'true'
+            }
 
             self.save_settings()
+
+    def _migrate_settings(self):
+        """Migrate settings from older app versions - add missing sections/keys"""
+        modified = False
+
+        # Ensure Device section exists (added in v1.3.3+)
+        if 'Device' not in self.config:
+            self.config['Device'] = {}
+            modified = True
+
+        device_defaults = {
+            'device_id': '',
+            'device_name': socket.gethostname(),
+            'device_platform': 'Linux',
+            'client': 'RomM-RetroArch-Sync',
+            'client_version': '1.3.2',
+            'sync_enabled': 'true'
+        }
+
+        # Add any missing Device fields
+        for key, default_value in device_defaults.items():
+            if key not in self.config['Device']:
+                self.config['Device'][key] = default_value
+                modified = True
+
+        # Save if any migrations were applied
+        if modified:
+            self.save_settings()
+            print(f"✅ Settings migrated to latest version")
     
     def save_settings(self):
         """Save settings to file"""
@@ -6746,6 +6785,104 @@ class RomMClient:
         except Exception as e:
             print(f"Authentication error: {e}")
             self.authenticated = False
+            return False
+
+    def register_device(self, device_name=None, platform=None, client=None, client_version=None):
+        """Register or get device ID with RomM.
+
+        Uses allow_existing=True to return existing device if already registered.
+        Returns device_id on success, None on failure.
+        """
+        if not self.authenticated:
+            return None
+
+        try:
+            import socket
+            import platform as sys_platform
+
+            # Prepare device payload
+            payload = {
+                'name': device_name or socket.gethostname(),
+                'platform': platform or sys_platform.system(),
+                'client': client or 'RomM-RetroArch-Sync',
+                'client_version': client_version or '1.3.2',
+                'hostname': socket.gethostname(),
+                'allow_existing': True,
+                'allow_duplicate': False
+            }
+
+            print(f"📱 Registering device: {payload['name']}")
+
+            response = self.session.post(
+                urljoin(self.base_url, '/api/devices'),
+                json=payload,
+                timeout=10
+            )
+
+            if response.status_code in [200, 201]:
+                data = response.json()
+                device_id = data.get('device_id') or data.get('id')
+                if device_id:
+                    print(f"✅ Device registered: {device_id}")
+                    return device_id
+                else:
+                    print(f"⚠️ Device registered but no ID in response: {data}")
+                    return None
+            else:
+                print(f"❌ Device registration failed: HTTP {response.status_code}")
+                try:
+                    error_data = response.json()
+                    print(f"   Error: {error_data}")
+                except:
+                    print(f"   Response: {response.text[:200]}")
+                return None
+
+        except Exception as e:
+            print(f"❌ Error registering device: {e}")
+            return None
+
+    def get_device(self, device_id):
+        """Get device information by device ID"""
+        if not self.authenticated or not device_id:
+            return None
+
+        try:
+            response = self.session.get(
+                urljoin(self.base_url, f'/api/devices/{device_id}'),
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            else:
+                print(f"Failed to get device {device_id}: HTTP {response.status_code}")
+                return None
+
+        except Exception as e:
+            print(f"Error getting device: {e}")
+            return None
+
+    def update_device(self, device_id, updates):
+        """Update device information"""
+        if not self.authenticated or not device_id:
+            return False
+
+        try:
+            response = self.session.put(
+                urljoin(self.base_url, f'/api/devices/{device_id}'),
+                json=updates,
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                print(f"✅ Device updated: {device_id}")
+                return True
+            else:
+                print(f"Failed to update device: HTTP {response.status_code}")
+                return False
+
+        except Exception as e:
+            print(f"Error updating device: {e}")
             return False
 
     def get_games_count_only(self):
@@ -7379,7 +7516,7 @@ class RomMClient:
             print(f"Error downloading {save_type} for ROM {rom_id}: {e}")
             return False
     
-    def upload_save(self, rom_id, save_type, file_path, emulator=None):
+    def upload_save(self, rom_id, save_type, file_path, emulator=None, device_id=None):
         """Upload save file using RomM naming convention with timestamps"""
         try:
             file_path = Path(file_path)
@@ -7391,12 +7528,16 @@ class RomMClient:
             print(f"Uploading {file_path.name} ({file_size} bytes) to ROM {rom_id} as {save_type}")
 
             # Correct endpoint with rom_id as query parameter
-            if emulator:
+            if emulator and device_id:
+                endpoint = f'/api/{save_type}?rom_id={rom_id}&emulator={emulator}&device_id={device_id}'
+            elif emulator:
                 endpoint = f'/api/{save_type}?rom_id={rom_id}&emulator={emulator}'
+            elif device_id:
+                endpoint = f'/api/{save_type}?rom_id={rom_id}&device_id={device_id}'
             else:
                 endpoint = f'/api/{save_type}?rom_id={rom_id}'
-                upload_url = urljoin(self.base_url, endpoint)
-                print(f"Using endpoint: {upload_url}")
+            upload_url = urljoin(self.base_url, endpoint)
+            print(f"Using endpoint: {upload_url}")
 
             # Use correct field names discovered from web interface
             if save_type == 'states':
@@ -7491,9 +7632,9 @@ class RomMClient:
             print(f"Error in upload_save: {e}")
             return False
             
-    def upload_save_with_thumbnail(self, rom_id, save_type, file_path, thumbnail_path=None, emulator=None):
+    def upload_save_with_thumbnail(self, rom_id, save_type, file_path, thumbnail_path=None, emulator=None, device_id=None):
         """NEW METHOD: Upload save file with optional thumbnail using separate linked uploads"""
-        
+
         try:
             file_path = Path(file_path)
             if not file_path.exists():
@@ -7502,19 +7643,19 @@ class RomMClient:
 
             file_size = file_path.stat().st_size
             print(f"🚀 NEW METHOD: Uploading {file_path.name} ({file_size} bytes) to ROM {rom_id} as {save_type}")
-            
+
             if thumbnail_path and thumbnail_path.exists():
                 thumbnail_size = thumbnail_path.stat().st_size
                 print(f"🖼️ With screenshot: {thumbnail_path.name} ({thumbnail_size} bytes)")
-            
+
             # Step 1: Upload the save state file first and get its ID AND server filename
             print(f"📤 Step 1: Uploading save state file...")
-            save_state_id, server_filename = self.upload_save_and_get_id(rom_id, save_type, file_path, emulator)
+            save_state_id, server_filename = self.upload_save_and_get_id(rom_id, save_type, file_path, emulator, device_id)
             
             if not save_state_id:
                 print(f"❌ Failed to upload save file or get save state ID, falling back to old method")
                 # Fallback to old method if new method fails
-                return self.upload_save(rom_id, save_type, file_path)
+                return self.upload_save(rom_id, save_type, file_path, emulator, device_id)
             
             print(f"✅ Step 1 complete: Save file uploaded with ID: {save_state_id}")
             print(f"📄 Server filename: {server_filename}")
@@ -7540,7 +7681,7 @@ class RomMClient:
         except Exception as e:
             print(f"Error in new upload method: {e}")
             print(f"Falling back to old method...")
-            return self.upload_save(rom_id, save_type, file_path)
+            return self.upload_save(rom_id, save_type, file_path, emulator, device_id)
 
     def upload_screenshot_with_matching_timestamp(self, rom_id, save_state_id, save_type, save_state_filename, thumbnail_path):
         """Upload screenshot using the EXACT same timestamp as the save state"""
@@ -7642,17 +7783,20 @@ class RomMClient:
             print(f"Falling back to old method...")
             return self.upload_save(rom_id, save_type, file_path)
 
-    def upload_save_and_get_id(self, rom_id, save_type, file_path, emulator=None):
+    def upload_save_and_get_id(self, rom_id, save_type, file_path, emulator=None, device_id=None):
         try:
             file_path = Path(file_path)
-            
-            # Build endpoint with emulator if provided
+
+            # Build endpoint with optional parameters
+            params = [f'rom_id={rom_id}']
             if emulator:
-                endpoint = f'/api/{save_type}?rom_id={rom_id}&emulator={emulator}'
-            else:
-                endpoint = f'/api/{save_type}?rom_id={rom_id}'
-            
+                params.append(f'emulator={emulator}')
+            if device_id:
+                params.append(f'device_id={device_id}')
+
+            endpoint = f'/api/{save_type}?' + '&'.join(params)
             upload_url = urljoin(self.base_url, endpoint)
+            print(f"📡 Upload endpoint: {upload_url}")
 
             # Use correct field names
             if save_type == 'states':
@@ -8737,7 +8881,7 @@ class RetroArchInterface:
         """Send notification to RetroArch using SHOW_MSG command"""
         try:
             # Use SHOW_MSG instead of NOTIFICATION
-            command = f'SHOW_MSG "{message}"'
+            command = f'SHOW_MSG {message}'
             print(f"🔔 Sending RetroArch notification: {message}")
             
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -9408,6 +9552,7 @@ class SyncWindow(Gtk.ApplicationWindow):
         self.debug_icon_loading()
         
         self.romm_client = None
+        self.device_id = None
 
         self.settings = SettingsManager()
 
@@ -11007,6 +11152,56 @@ class SyncWindow(Gtk.ApplicationWindow):
         else:
             self.log_message(f"❌ Cache system not initialized")
 
+    def initialize_device(self):
+        """Initialize device registration with RomM on connection.
+
+        Checks if device is already registered in config, if not registers a new one.
+        Returns device_id on success, None on failure.
+        """
+        if not self.romm_client or not self.romm_client.authenticated:
+            return None
+
+        try:
+            # Check if device is already registered
+            existing_device_id = self.settings.get('Device', 'device_id', '')
+
+            if existing_device_id:
+                # Device already registered, just verify it still exists
+                print(f"Device ID found in config: {existing_device_id}")
+                device_info = self.romm_client.get_device(existing_device_id)
+
+                if device_info:
+                    print(f"Device verified on server")
+                    return existing_device_id
+                else:
+                    print(f"Device not found on server, registering new device")
+                    # Fall through to register new
+
+            # Register new device
+            device_name = self.settings.get('Device', 'device_name', socket.gethostname())
+            platform = self.settings.get('Device', 'device_platform', 'Linux')
+            client = self.settings.get('Device', 'client', 'RomM-RetroArch-Sync')
+            client_version = self.settings.get('Device', 'client_version', '1.3.2')
+
+            device_id = self.romm_client.register_device(
+                device_name=device_name,
+                platform=platform,
+                client=client,
+                client_version=client_version
+            )
+
+            if device_id:
+                # Store device ID in config
+                self.settings.set('Device', 'device_id', device_id)
+                self.device_id = device_id  # Cache in app instance
+                return device_id
+            else:
+                return None
+
+        except Exception as e:
+            print(f"Error initializing device: {e}")
+            return None
+
     def on_connection_toggle(self, switch_row, pspec):
             """Handle connection enable/disable toggle"""
             if switch_row.get_active():
@@ -11063,6 +11258,18 @@ class SyncWindow(Gtk.ApplicationWindow):
                 
                 if self.romm_client.authenticated:
                     self.log_message(f"✅ Authentication successful in {auth_time:.2f}s")
+
+                    # Device Registration: Initialize or retrieve device ID
+                    try:
+                        device_reg_start = time.time()
+                        device_id = self.initialize_device()
+                        if device_id:
+                            device_reg_time = time.time() - device_reg_start
+                            self.log_message(f"📱 Device registered: {device_id} ({device_reg_time:.2f}s)")
+                        else:
+                            self.log_message(f"⚠️ Device registration skipped or failed")
+                    except Exception as e:
+                        self.log_message(f"⚠️ Device initialization error: {e}")
 
                     # CRITICAL: Fetch platform mapping immediately after authentication
                     # This ensures platform names are available for all operations
@@ -12136,7 +12343,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             if hasattr(self, 'available_games') and self.available_games:
                 # Keep all existing games for now (they'll be updated/merged with server data)
                 existing_local_games = list(self.available_games)
-                self.log_message(f"🔍 DEBUG: Preserving {len(existing_local_games)} existing games during fetch")
+                self.log_message(f"Preserving {len(existing_local_games)} existing games during fetch")
 
             # Debouncing: Track last UI update time to prevent excessive updates
             last_ui_update = [0]  # Use list to allow modification in nested function
@@ -12276,8 +12483,8 @@ class SyncWindow(Gtk.ApplicationWindow):
         """Enhanced local game scanning that handles both slug and full platform names"""
         games = []
 
-        self.log_message(f"🔍 DEBUG: Scanning {download_dir}")
-        self.log_message(f"🔍 DEBUG: Directory exists: {download_dir.exists()}")
+        self.log_message(f"Scanning {download_dir}")
+        self.log_message(f"Directory exists: {download_dir.exists()}")
 
         if not download_dir.exists():
             return games
@@ -14152,30 +14359,30 @@ class SyncWindow(Gtk.ApplicationWindow):
                                             try:
                                                 # Extract user_id and platform slug from download_path
                                                 download_path = state_file.get('download_path', '')
-                                                print(f"🔍 DEBUG: Download path: {download_path}")
+                                                print(f"Download path: {download_path}")
                                                 user_id = None
                                                 platform_slug = 'snes'  # fallback
 
                                                 if '/users/' in download_path and '/states/' in download_path:
                                                     # Extract user_id: /users/{user_id}/
                                                     parts = download_path.split('/users/')
-                                                    print(f"🔍 DEBUG: Split parts: {parts}")
+                                                    print(f"Split parts: {parts}")
                                                     if len(parts) > 1:
                                                         user_id = parts[1].split('/')[0]
-                                                        print(f"🔍 DEBUG: Extracted user_id: {user_id}")
+                                                        print(f"Extracted user_id: {user_id}")
                                                         # Extract platform slug: /states/{platform}/
                                                         remaining = parts[1][len(user_id)+1:]
-                                                        print(f"🔍 DEBUG: Remaining after user_id: {remaining}")
+                                                        print(f"Remaining after user_id: {remaining}")
                                                         if 'states/' in remaining:
                                                             slug_part = remaining.split('states/')[1].split('/')[0]
-                                                            print(f"🔍 DEBUG: Extracted slug_part: {slug_part}")
+                                                            print(f"Extracted slug_part: {slug_part}")
                                                             if slug_part:
                                                                 platform_slug = slug_part
-                                                                print(f"🔍 DEBUG: Set platform_slug to: {platform_slug}")
+                                                                print(f"Set platform_slug to: {platform_slug}")
                                                         else:
-                                                            print(f"🔍 DEBUG: states/ not found in remaining: {remaining}")
+                                                            print(f"states/ not found in remaining: {remaining}")
                                                 else:
-                                                    print(f"🔍 DEBUG: Missing /users/ or /states/ in download_path")
+                                                    print(f"Missing /users/ or /states/ in download_path")
 
                                                 if user_id:
                                                     # Construct screenshot URL using the pattern from RomM
@@ -14184,21 +14391,21 @@ class SyncWindow(Gtk.ApplicationWindow):
                                                     screenshot_url = f"{self.romm_client.base_url}/api/raw/assets/users/{user_id}/screenshots/{platform_slug}/{rom_id}/{screenshot_filename}"
 
                                                     try:
-                                                        print(f"🔍 DEBUG: Attempting to download screenshot from: {screenshot_url}")
+                                                        print(f"Attempting to download screenshot from: {screenshot_url}")
                                                         thumb_response = self.romm_client.session.get(screenshot_url, timeout=10)
-                                                        print(f"🔍 DEBUG: Screenshot response status: {thumb_response.status_code}, size: {len(thumb_response.content)} bytes")
-                                                        print(f"🔍 DEBUG: Response headers: {thumb_response.headers.get('content-type')}")
+                                                        print(f"Screenshot response status: {thumb_response.status_code}, size: {len(thumb_response.content)} bytes")
+                                                        print(f"Response headers: {thumb_response.headers.get('content-type')}")
 
                                                         if thumb_response.status_code == 200:
                                                             thumbnail_path = final_path.with_suffix(final_path.suffix + '.png')
-                                                            print(f"🔍 DEBUG: Saving thumbnail to: {thumbnail_path}")
+                                                            print(f"Saving thumbnail to: {thumbnail_path}")
                                                             with open(thumbnail_path, 'wb') as f:
                                                                 f.write(thumb_response.content)
                                                             GLib.idle_add(lambda: self.log_message(f"✓ Thumbnail downloaded"))
                                                         else:
-                                                            print(f"🔍 DEBUG: Screenshot download failed with status {thumb_response.status_code}")
+                                                            print(f"Screenshot download failed with status {thumb_response.status_code}")
                                                     except Exception as e:
-                                                        print(f"🔍 DEBUG: Screenshot download error: {e}")
+                                                        print(f"Screenshot download error: {e}")
                                             except Exception as e:
                                                 pass
                                         except Exception as e:
@@ -14285,7 +14492,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                                             self.log_message(f"  📤 Uploading {n} using NEW method..."))
                             
                             # Use NEW method for all uploads
-                            success = self.romm_client.upload_save_with_thumbnail(rom_id, save_type, save_path, thumbnail_path, emulator)
+                            success = self.romm_client.upload_save_with_thumbnail(rom_id, save_type, save_path, thumbnail_path, emulator, self.device_id)
                             
                             if success:
                                 if thumbnail_path:
@@ -15126,18 +15333,22 @@ class AutoSyncManager:
                 self.log(f"⬆️ Auto-uploading {file_path.name} with screenshot...")
             else:
                 self.log(f"⬆️ Auto-uploading {file_path.name}...")
-                
-            success = self.romm_client.upload_save_with_thumbnail(rom_id, save_type, file_path, thumbnail_path, emulator)
+
+            # Get device_id from settings (more reliable than parent_window)
+            device_id = self.settings.get('Device', 'device_id', '')
+            if not device_id:
+                device_id = None
+            success = self.romm_client.upload_save_with_thumbnail(rom_id, save_type, file_path, thumbnail_path, emulator, device_id)
             
             if success:
                 if thumbnail_path:
                     msg = f"✅ Auto-uploaded {file_path.name} with screenshot 📸"
                     self.log(msg)
-                    self.retroarch.send_notification(f"Save uploaded: {file_path.name}")
+                    self.retroarch.send_notification(f"{save_type.rstrip('s').capitalize()} uploaded")
                 else:
                     msg = f"✅ Auto-uploaded {file_path.name}"
                     self.log(msg)
-                    self.retroarch.send_notification(f"Save uploaded: {file_path.name}")
+                    self.retroarch.send_notification(f"{save_type.rstrip('s').capitalize()} uploaded")
             else:
                 msg = f"❌ Failed to auto-upload {file_path.name}"
                 self.log(msg)
@@ -15316,7 +15527,7 @@ class AutoSyncManager:
                     return dt.timestamp()
                     
                 except Exception as e:
-                    self.log(f"🔍 DEBUG: Failed to parse timestamp '{timestamp_str}': {e}")
+                    self.log(f"Failed to parse timestamp '{timestamp_str}': {e}")
                     pass
                     
                 # Try alternative parsing for RomM filename timestamps
@@ -15348,7 +15559,7 @@ class AutoSyncManager:
                         return dt.timestamp()
                         
                 except Exception as e:
-                    self.log(f"🔍 DEBUG: Failed to parse filename timestamp '{timestamp_str}': {e}")
+                    self.log(f"Failed to parse filename timestamp '{timestamp_str}': {e}")
                     pass
                     
                 return None
@@ -15625,27 +15836,27 @@ class AutoSyncManager:
                                             try:
                                                 state_id = latest_state.get('id')
                                                 if state_id:
-                                                    self.log(f"  🔍 DEBUG: Fetching state details for ID {state_id}")
+                                                    self.log(f"  Fetching state details for ID {state_id}")
                                                     state_details_url = urljoin(self.romm_client.base_url, f'/api/states/{state_id}')
                                                     state_response = self.romm_client.session.get(state_details_url, timeout=10)
-                                                    self.log(f"  🔍 DEBUG: State API response status: {state_response.status_code}")
+                                                    self.log(f"  State API response status: {state_response.status_code}")
 
                                                     if state_response.status_code == 200:
                                                         state_details = state_response.json()
-                                                        self.log(f"  🔍 DEBUG: State details keys: {list(state_details.keys())}")
+                                                        self.log(f"  State details keys: {list(state_details.keys())}")
 
                                                         screenshot_data = state_details.get('screenshot')
-                                                        self.log(f"  🔍 DEBUG: Screenshot data: {screenshot_data}")
+                                                        self.log(f"  Screenshot data: {screenshot_data}")
 
                                                         if screenshot_data and isinstance(screenshot_data, dict):
                                                             screenshot_url = screenshot_data.get('download_path')
-                                                            self.log(f"  🔍 DEBUG: Screenshot URL from API: {screenshot_url}")
+                                                            self.log(f"  Screenshot URL from API: {screenshot_url}")
 
                                                             if screenshot_url:
                                                                 full_screenshot_url = urljoin(self.romm_client.base_url, screenshot_url)
-                                                                self.log(f"  🔍 DEBUG: Full screenshot URL: {full_screenshot_url}")
+                                                                self.log(f"  Full screenshot URL: {full_screenshot_url}")
                                                                 screenshot_response = self.romm_client.session.get(full_screenshot_url, timeout=30)
-                                                                self.log(f"  🔍 DEBUG: Screenshot response status: {screenshot_response.status_code}, size: {len(screenshot_response.content)} bytes")
+                                                                self.log(f"  Screenshot response status: {screenshot_response.status_code}, size: {len(screenshot_response.content)} bytes")
 
                                                                 if screenshot_response.status_code == 200:
                                                                     with open(screenshot_path, 'wb') as f:
