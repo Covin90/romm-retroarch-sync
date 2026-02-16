@@ -7503,15 +7503,22 @@ class RomMClient:
                             matching_files.append({'file_name': f})
 
                     if matching_files:
-                        # Sort by filename (later timestamps last) and pick the most recent
-                        latest_file = sorted(matching_files, key=lambda x: x.get('file_name', ''), reverse=True)[0]
+                        # Sort by updated_at timestamp (most recent first) and pick the latest
+                        def get_timestamp(file_obj):
+                            timestamp_str = file_obj.get('updated_at', file_obj.get('created_at', ''))
+                            if timestamp_str:
+                                return timestamp_str
+                            # Fallback to filename sorting if no timestamp
+                            return file_obj.get('file_name', '')
+
+                        latest_file = sorted(matching_files, key=get_timestamp, reverse=True)[0]
                         filename = latest_file['file_name']
                         expected_size = latest_file.get('file_size_bytes', 0)
                         save_id = latest_file.get('id')  # Extract save/state ID
 
-                        print(f"Expected file size: {expected_size} bytes")
-                        if save_id:
-                            print(f"Save/State ID: {save_id}")
+                        print(f"🔍 DEBUG: Selected latest file from {len(matching_files)} candidates:")
+                        print(f"   ID: {save_id}, file: {filename}, updated: {latest_file.get('updated_at')}")
+                        print(f"   Expected file size: {expected_size} bytes")
 
                         # Debug: show what metadata fields we have
                         available_fields = list(latest_file.keys())
@@ -8020,7 +8027,7 @@ class RomMClient:
             return False
             
     def upload_save_with_thumbnail(self, rom_id, save_type, file_path, thumbnail_path=None, emulator=None, device_id=None):
-        """NEW METHOD: Upload save file with optional thumbnail using separate linked uploads"""
+        """Upload save file with optional thumbnail using separate linked uploads"""
 
         try:
             file_path = Path(file_path)
@@ -8028,46 +8035,26 @@ class RomMClient:
                 print(f"Upload error: file not found at {file_path}")
                 return False
 
-            file_size = file_path.stat().st_size
-            print(f"🚀 NEW METHOD: Uploading {file_path.name} ({file_size} bytes) to ROM {rom_id} as {save_type}")
-
-            if thumbnail_path and thumbnail_path.exists():
-                thumbnail_size = thumbnail_path.stat().st_size
-                print(f"🖼️ With screenshot: {thumbnail_path.name} ({thumbnail_size} bytes)")
-
-            # Step 1: Upload the save state file first and get its ID AND server filename
-            print(f"📤 Step 1: Uploading save state file...")
+            # Upload the save state file first and get its ID and server filename
             save_state_id, server_filename = self.upload_save_and_get_id(rom_id, save_type, file_path, emulator, device_id)
-            
+
             if not save_state_id:
-                print(f"❌ Failed to upload save file or get save state ID, falling back to old method")
-                # Fallback to old method if new method fails
                 return self.upload_save(rom_id, save_type, file_path, emulator, device_id)
-            
-            print(f"✅ Step 1 complete: Save file uploaded with ID: {save_state_id}")
-            print(f"📄 Server filename: {server_filename}")
-            
-            # Step 2: Upload thumbnail and link it to the save state using MATCHING timestamp
+
+            # Upload thumbnail and link it to the save state using MATCHING timestamp
             if thumbnail_path and thumbnail_path.exists():
-                print(f"📸 Step 2: Uploading screenshot with matching timestamp...")
-                
                 screenshot_success = self.upload_screenshot_with_matching_timestamp(
                     rom_id, save_state_id, save_type, server_filename, thumbnail_path
                 )
-                
+
                 if screenshot_success:
-                    print(f"🎉 SUCCESS: Save file and screenshot uploaded and linked!")
                     return True
                 else:
-                    print(f"⚠️ Save file uploaded, but screenshot linking failed")
                     return True  # Still consider it successful since save file worked
             else:
-                print(f"✅ Save file uploaded successfully (no screenshot to upload)")
                 return True
-                
+
         except Exception as e:
-            print(f"Error in new upload method: {e}")
-            print(f"Falling back to old method...")
             return self.upload_save(rom_id, save_type, file_path, emulator, device_id)
 
     def upload_screenshot_with_matching_timestamp(self, rom_id, save_state_id, save_type, save_state_filename, thumbnail_path):
@@ -11470,7 +11457,50 @@ class SyncWindow(Gtk.ApplicationWindow):
         self.autostart_row.set_subtitle("Run as a service at startup")
         self.autostart_row.connect('notify::active', self.on_autostart_changed)
         self.connection_expander.add_row(self.autostart_row)
-        
+
+        # Device Information section
+        device_expander = Adw.ExpanderRow()
+        device_expander.set_title("Device Information")
+        device_expander.set_subtitle("Registered device details")
+        self.connection_expander.add_row(device_expander)
+
+        # Device ID (read-only)
+        self.device_id_row = Adw.ActionRow()
+        self.device_id_row.set_title("Device ID")
+        device_id_label = Gtk.Label()
+        device_id_label.set_text("Not registered")
+        device_id_label.add_css_class("monospace")
+        self.device_id_row.add_suffix(device_id_label)
+        self.device_id_label = device_id_label
+        device_expander.add_row(self.device_id_row)
+
+        # Device Name
+        self.device_name_row = Adw.ActionRow()
+        self.device_name_row.set_title("Device Name")
+        device_name_label = Gtk.Label()
+        device_name_label.set_text("-")
+        self.device_name_row.add_suffix(device_name_label)
+        self.device_name_label = device_name_label
+        device_expander.add_row(self.device_name_row)
+
+        # Device Platform
+        self.device_platform_row = Adw.ActionRow()
+        self.device_platform_row.set_title("Platform")
+        device_platform_label = Gtk.Label()
+        device_platform_label.set_text("-")
+        self.device_platform_row.add_suffix(device_platform_label)
+        self.device_platform_label = device_platform_label
+        device_expander.add_row(self.device_platform_row)
+
+        # Client Info
+        self.device_client_row = Adw.ActionRow()
+        self.device_client_row.set_title("Client")
+        device_client_label = Gtk.Label()
+        device_client_label.set_text("-")
+        self.device_client_row.add_suffix(device_client_label)
+        self.device_client_label = device_client_label
+        device_expander.add_row(self.device_client_row)
+
         connection_group.add(self.connection_expander)
         
         # RetroArch section - simplified without status monitoring
@@ -11620,6 +11650,36 @@ class SyncWindow(Gtk.ApplicationWindow):
             print(f"Error initializing device: {e}")
             return None
 
+    def update_device_info_display(self, device_id):
+        """Update the device information display in the preferences"""
+        try:
+            if not self.romm_client or not device_id:
+                return
+
+            device_info = self.romm_client.get_device(device_id)
+            if device_info:
+                # Update ID
+                self.device_id_label.set_text(device_id)
+
+                # Update Name
+                device_name = device_info.get('name', '-')
+                self.device_name_label.set_text(device_name)
+
+                # Update Platform
+                device_platform = device_info.get('platform', '-')
+                self.device_platform_label.set_text(device_platform)
+
+                # Update Client
+                client = device_info.get('client', '-')
+                client_version = device_info.get('client_version', '')
+                if client_version:
+                    client_text = f"{client} ({client_version})"
+                else:
+                    client_text = client
+                self.device_client_label.set_text(client_text)
+        except Exception as e:
+            print(f"Error updating device info display: {e}")
+
     def on_connection_toggle(self, switch_row, pspec):
             """Handle connection enable/disable toggle"""
             if switch_row.get_active():
@@ -11684,6 +11744,8 @@ class SyncWindow(Gtk.ApplicationWindow):
                         if device_id:
                             device_reg_time = time.time() - device_reg_start
                             self.log_message(f"📱 Device registered: {device_id} ({device_reg_time:.2f}s)")
+                            # Update the device info display in preferences
+                            GLib.idle_add(lambda: self.update_device_info_display(device_id))
                         else:
                             self.log_message(f"⚠️ Device registration skipped or failed")
                     except Exception as e:
@@ -14649,20 +14711,50 @@ class SyncWindow(Gtk.ApplicationWindow):
         """Downloads save file and state for a specific game after ROM download"""
         rom_id = game['rom_id']
         rom_data = game.get('romm_data', {})
-        
+
+        # Check if we have device-aware sync data to skip unnecessary downloads
+        device_saves_to_skip = set()
+        device_states_to_skip = set()
+
+        if self.device_id:
+            # Query saves uploaded from this device to avoid re-downloading them (optimistic sync)
+            try:
+                device_saves = self.romm_client.get_saves_by_device(
+                    self.device_id,
+                    save_type='saves',
+                    rom_id=rom_id,
+                    limit=50
+                )
+                device_saves_to_skip = {s.get('id') for s in device_saves if s.get('id')}
+
+                device_states = self.romm_client.get_saves_by_device(
+                    self.device_id,
+                    save_type='states',
+                    rom_id=rom_id,
+                    limit=50
+                )
+                device_states_to_skip = {s.get('id') for s in device_states if s.get('id')}
+
+                if device_saves_to_skip or device_states_to_skip:
+                    GLib.idle_add(lambda saves=len(device_saves_to_skip), states=len(device_states_to_skip):
+                                self.log_message(f"🔄 Optimistic sync: {saves} saves, {states} states already on device"))
+            except Exception as e:
+                print(f"Could not query device saves: {e}")
+                # Continue without optimistic sync
+
         # Get ROM details to find save/state files with emulator info
         try:
             rom_details_response = self.romm_client.session.get(
                 urljoin(self.romm_client.base_url, f'/api/roms/{rom_id}'),
                 timeout=10
             )
-            
+
             if rom_details_response.status_code != 200:
                 GLib.idle_add(lambda: self.log_message(f"Could not get ROM details for save download"))
                 return
-            
+
             rom_details = rom_details_response.json()
-            
+
             # Try to download saves
             if 'saves' in self.retroarch.save_dirs:
                 save_base_dir = self.retroarch.save_dirs['saves']
@@ -14678,26 +14770,57 @@ class SyncWindow(Gtk.ApplicationWindow):
 
                     for save_file in user_saves:
                         if isinstance(save_file, dict):
+                            save_file_id = save_file.get('id')
                             original_filename = save_file.get('file_name', '')
                             romm_emulator = save_file.get('emulator', 'unknown')
-                            
+
                             if original_filename:
                                 # Convert RomM emulator name to RetroArch directory name
                                 retroarch_emulator_dir = self.retroarch.get_retroarch_directory_name(romm_emulator)
-                                
+
                                 if retroarch_emulator_dir:
                                     # Create RetroArch-compatible emulator directory
                                     emulator_save_dir = save_base_dir / retroarch_emulator_dir
                                     emulator_save_dir.mkdir(parents=True, exist_ok=True)
-                                    
+
                                     # Convert filename to RetroArch format
                                     retroarch_filename = self.retroarch.convert_to_retroarch_filename(
                                         original_filename, 'saves', emulator_save_dir
                                     )
-                                    
+
                                     # Download to temporary location first
                                     temp_path = emulator_save_dir / original_filename
                                     final_path = emulator_save_dir / retroarch_filename
+
+                                    # Optimistic sync with timestamp check
+                                    should_skip = False
+                                    if save_file_id in device_saves_to_skip:
+                                        # Check if local file exists and compare timestamps
+                                        if final_path.exists():
+                                            import datetime
+                                            local_mtime = final_path.stat().st_mtime
+                                            server_updated = save_file.get('updated_at', '')
+
+                                            if server_updated:
+                                                try:
+                                                    # Parse server timestamp
+                                                    if server_updated.endswith('Z'):
+                                                        server_updated = server_updated.replace('Z', '+00:00')
+                                                    server_dt = datetime.datetime.fromisoformat(server_updated)
+                                                    if server_dt.tzinfo is None:
+                                                        server_dt = server_dt.replace(tzinfo=datetime.timezone.utc)
+                                                    server_timestamp = server_dt.timestamp()
+
+                                                    # Compare timestamps (allow 60 second tolerance for clock differences)
+                                                    if local_mtime >= server_timestamp - 60:
+                                                        should_skip = True
+                                                except Exception as e:
+                                                    pass  # If timestamp parsing fails, download to be safe
+
+                                    if should_skip:
+                                        GLib.idle_add(lambda fn=save_file.get('file_name', 'unknown'):
+                                                    self.log_message(f"⏭️ Skipping save (local is up-to-date): {fn}"))
+                                        continue
                                     
                                     GLib.idle_add(lambda f=original_filename, rf=retroarch_filename, e=romm_emulator: 
                                                 self.log_message(f"Downloading save: {f} → {rf} ({e})"))
@@ -14741,26 +14864,57 @@ class SyncWindow(Gtk.ApplicationWindow):
 
                     for state_file in user_states:
                         if isinstance(state_file, dict):
+                            state_file_id = state_file.get('id')
                             original_filename = state_file.get('file_name', '')
                             romm_emulator = state_file.get('emulator', 'unknown')
-                            
+
                             if original_filename:
                                 # Convert RomM emulator name to RetroArch directory name
                                 retroarch_emulator_dir = self.retroarch.get_retroarch_directory_name(romm_emulator)
-                                
+
                                 if retroarch_emulator_dir:
                                     # Create RetroArch-compatible emulator directory
                                     emulator_state_dir = state_base_dir / retroarch_emulator_dir
                                     emulator_state_dir.mkdir(parents=True, exist_ok=True)
-                                    
+
                                     # Convert filename to RetroArch format
                                     retroarch_filename = self.retroarch.convert_to_retroarch_filename(
                                         original_filename, 'states', emulator_state_dir
                                     )
-                                    
+
                                     # Download to temporary location first
                                     temp_path = emulator_state_dir / original_filename
                                     final_path = emulator_state_dir / retroarch_filename
+
+                                    # Optimistic sync with timestamp check
+                                    should_skip = False
+                                    if state_file_id in device_states_to_skip:
+                                        # Check if local file exists and compare timestamps
+                                        if final_path.exists():
+                                            import datetime
+                                            local_mtime = final_path.stat().st_mtime
+                                            server_updated = state_file.get('updated_at', '')
+
+                                            if server_updated:
+                                                try:
+                                                    # Parse server timestamp
+                                                    if server_updated.endswith('Z'):
+                                                        server_updated = server_updated.replace('Z', '+00:00')
+                                                    server_dt = datetime.datetime.fromisoformat(server_updated)
+                                                    if server_dt.tzinfo is None:
+                                                        server_dt = server_dt.replace(tzinfo=datetime.timezone.utc)
+                                                    server_timestamp = server_dt.timestamp()
+
+                                                    # Compare timestamps (allow 60 second tolerance for clock differences)
+                                                    if local_mtime >= server_timestamp - 60:
+                                                        should_skip = True
+                                                except Exception as e:
+                                                    pass  # If timestamp parsing fails, download to be safe
+
+                                    if should_skip:
+                                        GLib.idle_add(lambda fn=state_file.get('file_name', 'unknown'):
+                                                    self.log_message(f"⏭️ Skipping state (local is up-to-date): {fn}"))
+                                        continue
                                     
                                     GLib.idle_add(lambda f=original_filename, rf=retroarch_filename, e=romm_emulator: 
                                                 self.log_message(f"Downloading state: {f} → {rf} ({e})"))
@@ -16101,16 +16255,51 @@ class AutoSyncManager:
     def download_saves_for_specific_game(self, game):
         """Download only the LATEST saves/states for a specific game from RomM with smart overwrite protection"""
         from gi.repository import GLib, Adw
-        
+
         try:
             from urllib.parse import urljoin
             import datetime
             rom_id = game['rom_id']
             game_name = game.get('name', 'Unknown')
-            
+
+            # Check if we have device-aware sync data to skip unnecessary downloads
+            device_saves_to_skip = set()
+            device_states_to_skip = set()
+
+            if self.parent_window and self.parent_window.device_id:
+                # Query saves uploaded from this device to avoid re-downloading them (optimistic sync)
+                try:
+                    device_saves = self.romm_client.get_saves_by_device(
+                        self.parent_window.device_id,
+                        save_type='saves',
+                        rom_id=rom_id,
+                        limit=50
+                    )
+                    device_saves_to_skip = {s.get('id') for s in device_saves if s.get('id')}
+                    self.log(f"🔍 DEBUG: Found {len(device_saves_to_skip)} saves from this device")
+                    for save in device_saves:
+                        self.log(f"   Save ID: {save.get('id')}, file: {save.get('file_name')}, updated: {save.get('updated_at')}")
+
+                    device_states = self.romm_client.get_saves_by_device(
+                        self.parent_window.device_id,
+                        save_type='states',
+                        rom_id=rom_id,
+                        limit=50
+                    )
+                    device_states_to_skip = {s.get('id') for s in device_states if s.get('id')}
+                    self.log(f"🔍 DEBUG: Found {len(device_states_to_skip)} states from this device")
+                    for state in device_states:
+                        self.log(f"   State ID: {state.get('id')}, file: {state.get('file_name')}, updated: {state.get('updated_at')}")
+
+                    if device_saves_to_skip or device_states_to_skip:
+                        self.log(f"🔄 Optimistic sync: {len(device_saves_to_skip)} saves, {len(device_states_to_skip)} states already on device")
+                except Exception as e:
+                    print(f"Could not query device saves: {e}")
+                    # Continue without optimistic sync
+
             # Get user preference for overwrite behavior
             overwrite_behavior = self.parent_window.get_overwrite_behavior() if self.parent_window else "Smart (prefer newer)"
-                
+
             # Get ROM details
             rom_details_response = self.romm_client.session.get(
                 urljoin(self.romm_client.base_url, f'/api/roms/{rom_id}'),
@@ -16309,197 +16498,211 @@ class AutoSyncManager:
             if 'saves' in self.retroarch.save_dirs:
                 save_base_dir = self.retroarch.save_dirs['saves']
                 user_saves = rom_details.get('user_saves', [])
-                
+
                 latest_save = get_latest_file(user_saves, "save")
-                
+
                 if latest_save:
-                    downloads_attempted += 1
-                    original_filename = latest_save.get('file_name', '')
-                    romm_emulator = latest_save.get('emulator', 'unknown')
-                    
-                    if original_filename:
-                        # Detect existing folder structure and use appropriate directory
-                        folder_structure = self.retroarch.detect_save_folder_structure()
-                        
-                        if folder_structure == 'platform_slugs':
-                            # Use RomM platform slug
-                            platform_slug = self.get_platform_slug_from_emulator(romm_emulator)
-                            emulator_save_dir = save_base_dir / platform_slug
-                        else:
-                            # Use RetroArch core name
-                            retroarch_emulator_dir = self.retroarch.get_retroarch_directory_name(romm_emulator)
-                            emulator_save_dir = save_base_dir / retroarch_emulator_dir
-                        
-                        if emulator_save_dir:
-                            emulator_save_dir.mkdir(parents=True, exist_ok=True)
-                            
-                            retroarch_filename = self.retroarch.convert_to_retroarch_filename(
-                                original_filename, 'saves', emulator_save_dir
-                            )
-                            
-                            final_path = emulator_save_dir / retroarch_filename
-                            
-                            # Enhanced conflict detection
-                            should_download, reason = should_download_file(final_path, latest_save, "save")
-                            
-                            if not should_download:
-                                if final_path.exists():
-                                    conflicts_detected += 1
-                                self.log(f"  ⏭️ {reason}")
+                    # Skip if this save was uploaded from this device (optimistic sync)
+                    save_id = latest_save.get('id')
+                    self.log(f"🔍 DEBUG: Latest save ID: {save_id}, file: {latest_save.get('file_name')}, updated: {latest_save.get('updated_at')}")
+                    self.log(f"🔍 DEBUG: Checking if {save_id} is in device_saves_to_skip: {save_id in device_saves_to_skip}")
+                    if save_id in device_saves_to_skip:
+                        self.log(f"  ⏭️ Skipping save (already on device via optimistic sync): {latest_save.get('file_name', 'unknown')}")
+                    else:
+                        downloads_attempted += 1
+                        original_filename = latest_save.get('file_name', '')
+                        romm_emulator = latest_save.get('emulator', 'unknown')
+
+                        if original_filename:
+                            # Detect existing folder structure and use appropriate directory
+                            folder_structure = self.retroarch.detect_save_folder_structure()
+
+                            if folder_structure == 'platform_slugs':
+                                # Use RomM platform slug
+                                platform_slug = self.get_platform_slug_from_emulator(romm_emulator)
+                                emulator_save_dir = save_base_dir / platform_slug
                             else:
-                                # Create backup if overwriting
-                                if final_path.exists():
-                                    conflicts_detected += 1
-                                    backup_path = final_path.with_suffix(final_path.suffix + '.backup')
-                                    if backup_path.exists():
-                                        backup_path.unlink()
-                                    final_path.rename(backup_path)
-                                    self.log(f"  💾 Backed up existing save as {backup_path.name}")
-                                
-                                temp_path = emulator_save_dir / original_filename
-                                self.log(f"  📥 {reason} - downloading: {original_filename} → {retroarch_filename}")
+                                # Use RetroArch core name
+                                retroarch_emulator_dir = self.retroarch.get_retroarch_directory_name(romm_emulator)
+                                emulator_save_dir = save_base_dir / retroarch_emulator_dir
 
-                                # Get device_id from settings
-                                device_id = self.settings.get('Device', 'device_id', '') or None
+                            if emulator_save_dir:
+                                emulator_save_dir.mkdir(parents=True, exist_ok=True)
 
-                                if self.romm_client.download_save(rom_id, 'saves', temp_path, device_id):
-                                    try:
-                                        if temp_path != final_path:
-                                            temp_path.rename(final_path)
-                                        downloads_successful += 1
-                                        self.log(f"  ✅ Save ready: {retroarch_filename}")
-                                        if hasattr(self.parent_window, 'auto_sync') and self.parent_window.auto_sync:
-                                            # Skip auto-upload for recently downloaded files
-                                            self.parent_window.auto_sync.upload_debounce[str(final_path)] = time.time() + 30                                        
-                                        self.retroarch.send_notification(f"Save downloaded: {game_name}")
-                                    except Exception as e:
-                                        self.log(f"  ❌ Failed to rename save: {e}")
+                                retroarch_filename = self.retroarch.convert_to_retroarch_filename(
+                                    original_filename, 'saves', emulator_save_dir
+                                )
+
+                                final_path = emulator_save_dir / retroarch_filename
+
+                                # Enhanced conflict detection
+                                should_download, reason = should_download_file(final_path, latest_save, "save")
+
+                                if not should_download:
+                                    if final_path.exists():
+                                        conflicts_detected += 1
+                                    self.log(f"  ⏭️ {reason}")
+                                else:
+                                    # Create backup if overwriting
+                                    if final_path.exists():
+                                        conflicts_detected += 1
+                                        backup_path = final_path.with_suffix(final_path.suffix + '.backup')
+                                        if backup_path.exists():
+                                            backup_path.unlink()
+                                        final_path.rename(backup_path)
+                                        self.log(f"  💾 Backed up existing save as {backup_path.name}")
+
+                                    temp_path = emulator_save_dir / original_filename
+                                    self.log(f"  📥 {reason} - downloading: {original_filename} → {retroarch_filename}")
+
+                                    # Get device_id from settings
+                                    device_id = self.settings.get('Device', 'device_id', '') or None
+
+                                    if self.romm_client.download_save(rom_id, 'saves', temp_path, device_id):
+                                        try:
+                                            if temp_path != final_path:
+                                                temp_path.rename(final_path)
+                                            downloads_successful += 1
+                                            self.log(f"  ✅ Save ready: {retroarch_filename}")
+                                            if hasattr(self.parent_window, 'auto_sync') and self.parent_window.auto_sync:
+                                                # Skip auto-upload for recently downloaded files
+                                                self.parent_window.auto_sync.upload_debounce[str(final_path)] = time.time() + 30
+                                            self.retroarch.send_notification(f"Save downloaded: {game_name}")
+                                        except Exception as e:
+                                            self.log(f"  ❌ Failed to rename save: {e}")
 
             # Process states
             if 'states' in self.retroarch.save_dirs:
                 state_base_dir = self.retroarch.save_dirs['states']
                 user_states = rom_details.get('user_states', [])
-                
+
                 latest_state = get_latest_file(user_states, "state")
-                
+
                 if latest_state:
-                    downloads_attempted += 1
-                    original_filename = latest_state.get('file_name', '')
-                    romm_emulator = latest_state.get('emulator', 'unknown')
-                    
-                    if original_filename:
-                        # Detect existing folder structure and use appropriate directory
-                        folder_structure = self.retroarch.detect_save_folder_structure()
-                        
-                        if folder_structure == 'platform_slugs':
-                            # Use RomM platform slug
-                            platform_slug = self.get_platform_slug_from_emulator(romm_emulator)
-                            emulator_state_dir = state_base_dir / platform_slug
-                        else:
-                            # Use RetroArch core name
-                            retroarch_emulator_dir = self.retroarch.get_retroarch_directory_name(romm_emulator)
-                            emulator_state_dir = state_base_dir / retroarch_emulator_dir
-                        
-                        if emulator_state_dir:
-                            emulator_state_dir.mkdir(parents=True, exist_ok=True)
-                            
-                            retroarch_filename = self.retroarch.convert_to_retroarch_filename(
-                                original_filename, 'states', emulator_state_dir
-                            )
-                            
-                            final_path = emulator_state_dir / retroarch_filename
-                            
-                            # Enhanced conflict detection
-                            should_download, reason = should_download_file(final_path, latest_state, "state")
-                            
-                            if not should_download:
-                                if final_path.exists():
-                                    conflicts_detected += 1
-                                self.log(f"  ⏭️ {reason}")
+                    # Skip if this state was uploaded from this device (optimistic sync)
+                    state_id = latest_state.get('id')
+                    self.log(f"🔍 DEBUG: Latest state ID: {state_id}, file: {latest_state.get('file_name')}, updated: {latest_state.get('updated_at')}")
+                    self.log(f"🔍 DEBUG: Checking if {state_id} is in device_states_to_skip: {state_id in device_states_to_skip}")
+                    if state_id in device_states_to_skip:
+                        self.log(f"  ⏭️ Skipping state (already on device via optimistic sync): {latest_state.get('file_name', 'unknown')}")
+                    else:
+                        downloads_attempted += 1
+                        original_filename = latest_state.get('file_name', '')
+                        romm_emulator = latest_state.get('emulator', 'unknown')
+
+                        if original_filename:
+                            # Detect existing folder structure and use appropriate directory
+                            folder_structure = self.retroarch.detect_save_folder_structure()
+
+                            if folder_structure == 'platform_slugs':
+                                # Use RomM platform slug
+                                platform_slug = self.get_platform_slug_from_emulator(romm_emulator)
+                                emulator_state_dir = state_base_dir / platform_slug
                             else:
-                                # Create backup if overwriting
-                                if final_path.exists():
-                                    conflicts_detected += 1
-                                    backup_path = final_path.with_suffix(final_path.suffix + '.backup')
-                                    if backup_path.exists():
-                                        backup_path.unlink()
-                                    final_path.rename(backup_path)
-                                    self.log(f"  💾 Backed up existing state as {backup_path.name}")
-                                
-                                temp_path = emulator_state_dir / original_filename
-                                self.log(f"  📥 {reason} - downloading: {original_filename} → {retroarch_filename}")
+                                # Use RetroArch core name
+                                retroarch_emulator_dir = self.retroarch.get_retroarch_directory_name(romm_emulator)
+                                emulator_state_dir = state_base_dir / retroarch_emulator_dir
 
-                                # Get device_id from settings
-                                device_id = self.settings.get('Device', 'device_id', '') or None
+                            if emulator_state_dir:
+                                emulator_state_dir.mkdir(parents=True, exist_ok=True)
 
-                                if self.romm_client.download_save(rom_id, 'states', temp_path, device_id):
-                                    try:
-                                        if temp_path != final_path:
-                                            temp_path.rename(final_path)
-                                        downloads_successful += 1
-                                        self.log(f"  ✅ State ready: {retroarch_filename}")
-                                        if hasattr(self.parent_window, 'auto_sync') and self.parent_window.auto_sync:
-                                            # Skip auto-upload for recently downloaded files
-                                            self.parent_window.auto_sync.upload_debounce[str(final_path)] = time.time() + 30
-                                        self.retroarch.send_notification(f"Save state downloaded: {game_name}")
+                                retroarch_filename = self.retroarch.convert_to_retroarch_filename(
+                                    original_filename, 'states', emulator_state_dir
+                                )
 
-                                        # Download screenshot if available - try multiple approaches
-                                        screenshot_filename = f"{final_path.name}.png"
-                                        screenshot_path = final_path.parent / screenshot_filename
+                                final_path = emulator_state_dir / retroarch_filename
 
-                                        # First, check if screenshot is in the state object from API
-                                        screenshot_data = latest_state.get('screenshot')
-                                        if screenshot_data and isinstance(screenshot_data, dict):
-                                            screenshot_url = screenshot_data.get('download_path')
-                                            if screenshot_url:
+                                # Enhanced conflict detection
+                                should_download, reason = should_download_file(final_path, latest_state, "state")
+
+                                if not should_download:
+                                    if final_path.exists():
+                                        conflicts_detected += 1
+                                    self.log(f"  ⏭️ {reason}")
+                                else:
+                                    # Create backup if overwriting
+                                    if final_path.exists():
+                                        conflicts_detected += 1
+                                        backup_path = final_path.with_suffix(final_path.suffix + '.backup')
+                                        if backup_path.exists():
+                                            backup_path.unlink()
+                                        final_path.rename(backup_path)
+                                        self.log(f"  💾 Backed up existing state as {backup_path.name}")
+
+                                    temp_path = emulator_state_dir / original_filename
+                                    self.log(f"  📥 {reason} - downloading: {original_filename} → {retroarch_filename}")
+
+                                    # Get device_id from settings
+                                    device_id = self.settings.get('Device', 'device_id', '') or None
+
+                                    if self.romm_client.download_save(rom_id, 'states', temp_path, device_id):
+                                        try:
+                                            if temp_path != final_path:
+                                                temp_path.rename(final_path)
+                                            downloads_successful += 1
+                                            self.log(f"  ✅ State ready: {retroarch_filename}")
+                                            if hasattr(self.parent_window, 'auto_sync') and self.parent_window.auto_sync:
+                                                # Skip auto-upload for recently downloaded files
+                                                self.parent_window.auto_sync.upload_debounce[str(final_path)] = time.time() + 30
+                                            self.retroarch.send_notification(f"Save state downloaded: {game_name}")
+
+                                            # Download screenshot if available - try multiple approaches
+                                            screenshot_filename = f"{final_path.name}.png"
+                                            screenshot_path = final_path.parent / screenshot_filename
+
+                                            # First, check if screenshot is in the state object from API
+                                            screenshot_data = latest_state.get('screenshot')
+                                            if screenshot_data and isinstance(screenshot_data, dict):
+                                                screenshot_url = screenshot_data.get('download_path')
+                                                if screenshot_url:
+                                                    try:
+                                                        full_screenshot_url = urljoin(self.romm_client.base_url, screenshot_url)
+                                                        screenshot_response = self.romm_client.session.get(full_screenshot_url, timeout=30)
+
+                                                        if screenshot_response.status_code == 200:
+                                                            with open(screenshot_path, 'wb') as f:
+                                                                f.write(screenshot_response.content)
+                                                            self.log(f"  📸 Downloaded screenshot: {screenshot_filename}")
+                                                    except Exception as e:
+                                                        self.log(f"  ⚠️ Failed to download screenshot from state object: {e}")
+                                            else:
+                                                # If not in API response, try to fetch the state details directly
                                                 try:
-                                                    full_screenshot_url = urljoin(self.romm_client.base_url, screenshot_url)
-                                                    screenshot_response = self.romm_client.session.get(full_screenshot_url, timeout=30)
+                                                    state_id = latest_state.get('id')
+                                                    if state_id:
+                                                        self.log(f"  Fetching state details for ID {state_id}")
+                                                        state_details_url = urljoin(self.romm_client.base_url, f'/api/states/{state_id}')
+                                                        state_response = self.romm_client.session.get(state_details_url, timeout=10)
+                                                        self.log(f"  State API response status: {state_response.status_code}")
 
-                                                    if screenshot_response.status_code == 200:
-                                                        with open(screenshot_path, 'wb') as f:
-                                                            f.write(screenshot_response.content)
-                                                        self.log(f"  📸 Downloaded screenshot: {screenshot_filename}")
+                                                        if state_response.status_code == 200:
+                                                            state_details = state_response.json()
+                                                            self.log(f"  State details keys: {list(state_details.keys())}")
+
+                                                            screenshot_data = state_details.get('screenshot')
+                                                            self.log(f"  Screenshot data: {screenshot_data}")
+
+                                                            if screenshot_data and isinstance(screenshot_data, dict):
+                                                                screenshot_url = screenshot_data.get('download_path')
+                                                                self.log(f"  Screenshot URL from API: {screenshot_url}")
+
+                                                                if screenshot_url:
+                                                                    full_screenshot_url = urljoin(self.romm_client.base_url, screenshot_url)
+                                                                    self.log(f"  Full screenshot URL: {full_screenshot_url}")
+                                                                    screenshot_response = self.romm_client.session.get(full_screenshot_url, timeout=30)
+                                                                    self.log(f"  Screenshot response status: {screenshot_response.status_code}, size: {len(screenshot_response.content)} bytes")
+
+                                                                    if screenshot_response.status_code == 200:
+                                                                        with open(screenshot_path, 'wb') as f:
+                                                                            f.write(screenshot_response.content)
+                                                                        self.log(f"  📸 Downloaded screenshot: {screenshot_filename}")
+                                                            else:
+                                                                self.log(f"  ⚠️ No screenshot field in state details")
                                                 except Exception as e:
-                                                    self.log(f"  ⚠️ Failed to download screenshot from state object: {e}")
-                                        else:
-                                            # If not in API response, try to fetch the state details directly
-                                            try:
-                                                state_id = latest_state.get('id')
-                                                if state_id:
-                                                    self.log(f"  Fetching state details for ID {state_id}")
-                                                    state_details_url = urljoin(self.romm_client.base_url, f'/api/states/{state_id}')
-                                                    state_response = self.romm_client.session.get(state_details_url, timeout=10)
-                                                    self.log(f"  State API response status: {state_response.status_code}")
+                                                    self.log(f"  ⚠️ Screenshot fetch error: {e}")  # Log the error for debugging
 
-                                                    if state_response.status_code == 200:
-                                                        state_details = state_response.json()
-                                                        self.log(f"  State details keys: {list(state_details.keys())}")
-
-                                                        screenshot_data = state_details.get('screenshot')
-                                                        self.log(f"  Screenshot data: {screenshot_data}")
-
-                                                        if screenshot_data and isinstance(screenshot_data, dict):
-                                                            screenshot_url = screenshot_data.get('download_path')
-                                                            self.log(f"  Screenshot URL from API: {screenshot_url}")
-
-                                                            if screenshot_url:
-                                                                full_screenshot_url = urljoin(self.romm_client.base_url, screenshot_url)
-                                                                self.log(f"  Full screenshot URL: {full_screenshot_url}")
-                                                                screenshot_response = self.romm_client.session.get(full_screenshot_url, timeout=30)
-                                                                self.log(f"  Screenshot response status: {screenshot_response.status_code}, size: {len(screenshot_response.content)} bytes")
-
-                                                                if screenshot_response.status_code == 200:
-                                                                    with open(screenshot_path, 'wb') as f:
-                                                                        f.write(screenshot_response.content)
-                                                                    self.log(f"  📸 Downloaded screenshot: {screenshot_filename}")
-                                                        else:
-                                                            self.log(f"  ⚠️ No screenshot field in state details")
-                                            except Exception as e:
-                                                self.log(f"  ⚠️ Screenshot fetch error: {e}")  # Log the error for debugging
-
-                                    except Exception as e:
-                                        self.log(f"  ❌ Failed to process state: {e}")
+                                        except Exception as e:
+                                            self.log(f"  ❌ Failed to process state: {e}")
             
             # Enhanced summary
             if downloads_attempted > 0:
