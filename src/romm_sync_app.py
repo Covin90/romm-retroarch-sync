@@ -6679,6 +6679,12 @@ class RomMClient:
         self.session = requests.Session()
         self.authenticated = False
 
+        # OAuth2 token storage
+        self.access_token = None
+        self.refresh_token = None
+        self.token_type = 'bearer'
+        self.token_expiry = None
+
         # Force HTTP/2 and connection reuse
         from requests.adapters import HTTPAdapter
         from urllib3.util.retry import Retry
@@ -6742,42 +6748,60 @@ class RomMClient:
             elif test_response.status_code in [401, 403]:
                 print("Basic auth failed (401/403), trying token endpoint...")
                 
-                # Method 3: Token-based authentication
+                # Method 3: Token-based authentication (OAuth2)
                 if 'Authorization' in self.session.headers:
                     del self.session.headers['Authorization']
-                
+
+                # Use OAuth2 standard format (application/x-www-form-urlencoded)
                 token_data = {
                     'username': username,
                     'password': password,
-                    'scopes': 'read:roms write:roms read:platforms write:platforms read:saves write:saves read:states write:states'
+                    'grant_type': 'password',
+                    'scope': 'read:roms write:roms read:platforms write:platforms read:saves write:saves read:states write:states'
                 }
-                
+
                 print("Requesting access token...")
                 token_response = self.session.post(
                     urljoin(self.base_url, '/api/token'),
-                    json=token_data,
+                    data=token_data,  # Use data= for form-encoded (not json=)
                     timeout=10
                 )
-                
+
                 if token_response.status_code == 200:
-                    token_data = token_response.json()
-                    access_token = token_data.get('access_token')
-                    
-                    if access_token:
+                    import time
+                    token_info = token_response.json()
+                    self.access_token = token_info.get('access_token')
+                    self.refresh_token = token_info.get('refresh_token')
+                    self.token_type = token_info.get('token_type', 'bearer')
+
+                    # Calculate expiration time (default 1 hour if not specified)
+                    expires_in = token_info.get('expires_in', 3600)
+                    self.token_expiry = time.time() + expires_in
+
+                    if self.access_token:
                         self.session.headers.update({
-                            'Authorization': f'Bearer {access_token}'
+                            'Authorization': f'Bearer {self.access_token}'
                         })
-                        
+
                         test_response = self.session.get(
                             urljoin(self.base_url, '/api/roms'),
                             timeout=10
                         )
-                        
+
                         if test_response.status_code == 200:
                             print("✅ Token authentication successful!")
+                            if self.refresh_token:
+                                print(f"   Refresh token captured (expires in {expires_in}s)")
                             self.authenticated = True
                             return True
-            
+                else:
+                    print(f"❌ Token endpoint failed: HTTP {token_response.status_code}")
+                    try:
+                        error_detail = token_response.json()
+                        print(f"   Error: {error_detail}")
+                    except:
+                        print(f"   Response: {token_response.text[:200]}")
+
             print("All authentication methods failed")
             self.authenticated = False
             return False
@@ -6786,6 +6810,67 @@ class RomMClient:
             print(f"Authentication error: {e}")
             self.authenticated = False
             return False
+
+    def refresh_access_token(self):
+        """Refresh the access token using refresh_token"""
+        if not self.refresh_token:
+            print("⚠️ No refresh token available")
+            return False
+
+        try:
+            import time
+            refresh_data = {
+                'grant_type': 'refresh_token',
+                'refresh_token': self.refresh_token
+            }
+
+            print("🔄 Refreshing access token...")
+            response = self.session.post(
+                urljoin(self.base_url, '/api/token'),
+                data=refresh_data,
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                token_info = response.json()
+                self.access_token = token_info.get('access_token')
+                # Server may return a new refresh token, or we keep the old one
+                self.refresh_token = token_info.get('refresh_token', self.refresh_token)
+
+                expires_in = token_info.get('expires_in', 3600)
+                self.token_expiry = time.time() + expires_in
+
+                self.session.headers.update({
+                    'Authorization': f'Bearer {self.access_token}'
+                })
+
+                print(f"✅ Token refreshed successfully (expires in {expires_in}s)")
+                return True
+            else:
+                print(f"❌ Token refresh failed: HTTP {response.status_code}")
+                self.authenticated = False
+                return False
+
+        except Exception as e:
+            print(f"❌ Error refreshing token: {e}")
+            self.authenticated = False
+            return False
+
+    def ensure_authenticated(self):
+        """Ensure token is valid, refresh if needed"""
+        import time
+
+        if not self.authenticated:
+            return False
+
+        # Check if token will expire in next 5 minutes (300 seconds)
+        if hasattr(self, 'token_expiry') and self.token_expiry:
+            time_until_expiry = self.token_expiry - time.time()
+            if time_until_expiry < 300:
+                print(f"⏰ Token expires in {int(time_until_expiry)}s, refreshing...")
+                return self.refresh_access_token()
+
+        return True
 
     def register_device(self, device_name=None, platform=None, client=None, client_version=None):
         """Register or get device ID with RomM.
@@ -6887,6 +6972,9 @@ class RomMClient:
 
     def get_games_count_only(self):
         """Get total games count without fetching data - lightweight check"""
+        if not self.ensure_authenticated():
+            return None
+
         try:
             response = self.session.get(
                 urljoin(self.base_url, '/api/roms'),
@@ -6902,7 +6990,7 @@ class RomMClient:
 
     def get_roms(self, progress_callback=None, limit=500, offset=0):
         """Get ROMs with pagination support - FIXED to fetch ALL games"""
-        if not self.authenticated:
+        if not self.ensure_authenticated():
             return [], 0
         
         try:
@@ -6940,6 +7028,9 @@ class RomMClient:
 
     def get_collections(self):
         """Get custom collections from RomM"""
+        if not self.ensure_authenticated():
+            return []
+
         try:
             response = self.session.get(
                 urljoin(self.base_url, '/api/collections'),
@@ -6953,6 +7044,9 @@ class RomMClient:
 
     def get_platforms(self):
         """Get list of all platforms from RomM"""
+        if not self.ensure_authenticated():
+            return []
+
         try:
             response = self.session.get(
                 urljoin(self.base_url, '/api/platforms'),
@@ -6969,6 +7063,9 @@ class RomMClient:
 
     def get_collection_roms(self, collection_id):
         """Get ROMs in a specific collection"""
+        if not self.ensure_authenticated():
+            return []
+
         try:
             response = self.session.get(
                 urljoin(self.base_url, f'/api/roms?collection_id={collection_id}'),
@@ -7155,6 +7252,9 @@ class RomMClient:
             progress_callback: Optional callback for progress updates
             cancellation_checker: Optional callable that returns True if download should be cancelled
         """
+        if not self.ensure_authenticated():
+            return False, "Not authenticated"
+
         try:
             # First, get detailed ROM info to find the filename
             rom_details_response = self.session.get(
@@ -7363,23 +7463,34 @@ class RomMClient:
             print(f"Download exception: {e}")
             return False, f"Download error: {e}"
     
-    def download_save(self, rom_id, save_type, download_path):
-        """Download the latest save or state file for the given ROM"""
+    def download_save(self, rom_id, save_type, download_path, device_id=None):
+        """Download the latest save or state file for the given ROM
+
+        Args:
+            rom_id: ROM identifier
+            save_type: Type of save ('saves' or 'states')
+            download_path: Path where to save the downloaded file
+            device_id: Optional device ID for optimistic downloads
+        """
+        if not self.ensure_authenticated():
+            return False
+
         try:
             suffix = download_path.suffix.lower()
             filename = None
             download_url = None
             expected_size = 0
+            save_id = None
 
             # Step 1: Get ROM details to check metadata first
             rom_details_url = urljoin(self.base_url, f"/api/roms/{rom_id}")
             rom_response = self.session.get(rom_details_url, timeout=10)
-            
+
             if rom_response.status_code == 200:
                 rom_data = rom_response.json()
                 metadata_key = 'user_saves' if save_type == 'saves' else 'user_states'
                 possible_files = rom_data.get(metadata_key, [])
-                
+
                 if isinstance(possible_files, list) and possible_files:
                     # Find files with matching extension
                     matching_files = []
@@ -7390,24 +7501,40 @@ class RomMClient:
                                 matching_files.append(f)
                         elif isinstance(f, str) and f.lower().endswith(suffix):
                             matching_files.append({'file_name': f})
-                    
+
                     if matching_files:
                         # Sort by filename (later timestamps last) and pick the most recent
                         latest_file = sorted(matching_files, key=lambda x: x.get('file_name', ''), reverse=True)[0]
                         filename = latest_file['file_name']
                         expected_size = latest_file.get('file_size_bytes', 0)
-                        
+                        save_id = latest_file.get('id')  # Extract save/state ID
+
                         print(f"Expected file size: {expected_size} bytes")
-                        
-                        # Check if the metadata provides a direct download_path
+                        if save_id:
+                            print(f"Save/State ID: {save_id}")
+
+                        # Debug: show what metadata fields we have
+                        available_fields = list(latest_file.keys())
+                        print(f"Available metadata fields: {available_fields}")
                         if 'download_path' in latest_file:
-                            # Use the download_path from metadata (it's relative to base_url)
+                            print(f"Metadata download_path: {latest_file['download_path']}")
+
+                        # Use proper /api/saves/{id}/content or /api/states/{id}/content endpoint
+                        if save_id:
+                            download_url = urljoin(self.base_url, f"/api/{save_type}/{save_id}/content")
+                            # Add device_id and optimistic params if provided
+                            if device_id:
+                                download_url += f"?device_id={device_id}&optimistic=true"
+                                print(f"✓ Using proper API endpoint: {download_url} (device_id: {device_id})")
+                            else:
+                                print(f"✓ Using proper API endpoint: {download_url} (no device_id)")
+                        elif 'download_path' in latest_file:
+                            # Fallback to download_path from metadata if no ID
                             download_url = urljoin(self.base_url, latest_file['download_path'])
                             print(f"Using metadata download_path: {download_url}")
                         else:
-                            # Fallback to constructed URL
-                            download_url = urljoin(self.base_url, f"/api/roms/{rom_id}/{save_type}/{filename}")
-                            print(f"Using constructed URL: {download_url}")
+                            print(f"❌ No save_id or download_path available")
+                            return False
                     else:
                         print(f"No {save_type} files with {suffix} extension found in metadata")
                         return False
@@ -7421,14 +7548,27 @@ class RomMClient:
             # Step 2: Try to download the file with enhanced debugging
             if download_url and filename:
                 print(f"Downloading {filename} from {download_url}")
-                
+
                 # Make request with detailed logging
                 download_response = self.session.get(download_url, stream=True, timeout=30)
-                
+                used_fallback = False  # Track if we used fallback path
+
                 if download_response.status_code != 200:
                     print(f"Failed to download {filename}: {download_response.status_code}")
                     print(f"Response text: {download_response.text[:500]}")
-                    return False
+
+                    # If new endpoint fails with 404, try fallback to download_path if available
+                    if download_response.status_code == 404 and save_id and 'download_path' in latest_file:
+                        fallback_url = urljoin(self.base_url, latest_file['download_path'])
+                        print(f"⚠️ Trying fallback download_path: {fallback_url}")
+                        download_response = self.session.get(fallback_url, stream=True, timeout=30)
+                        if download_response.status_code != 200:
+                            print(f"❌ Fallback also failed: {download_response.status_code}")
+                            return False
+                        download_url = fallback_url  # Update for logging
+                        used_fallback = True  # Mark that we used fallback
+                    else:
+                        return False
 
                 # Check content type and headers
                 content_type = download_response.headers.get('content-type', 'unknown')
@@ -7497,6 +7637,11 @@ class RomMClient:
                                 print(f"Could not inspect file content: {e}")
                         
                         if file_size > 0:
+                            # Confirm successful download to server (only if we used the proper API endpoint)
+                            if save_id and device_id and not used_fallback:
+                                self.confirm_save_downloaded(save_id, save_type, device_id)
+                            elif used_fallback:
+                                print(f"⚠️ Skipping download confirmation (used fallback path, not API endpoint)")
                             return True
                         else:
                             print(f"Downloaded file is empty")
@@ -7504,7 +7649,7 @@ class RomMClient:
                     else:
                         print(f"Downloaded file not found after write")
                         return False
-                        
+
                 except Exception as write_error:
                     print(f"Error writing file: {write_error}")
                     return False
@@ -7515,9 +7660,251 @@ class RomMClient:
         except Exception as e:
             print(f"Error downloading {save_type} for ROM {rom_id}: {e}")
             return False
-    
+
+    def confirm_save_downloaded(self, save_id, save_type, device_id):
+        """Confirm to the server that a save/state was successfully downloaded by this device
+
+        Args:
+            save_id: The ID of the save/state that was downloaded
+            save_type: Type of save ('saves' or 'states')
+            device_id: The device ID that downloaded the save
+
+        Returns:
+            True if confirmation was successful, False otherwise
+        """
+        if not self.authenticated or not save_id or not device_id:
+            return False
+
+        try:
+            confirm_url = urljoin(self.base_url, f'/api/{save_type}/{save_id}/downloaded')
+
+            # Send device_id as query parameter or in body
+            payload = {'device_id': device_id}
+
+            print(f"📥 Confirming download of {save_type[:-1]} {save_id} for device {device_id}")
+
+            response = self.session.post(
+                confirm_url,
+                json=payload,
+                timeout=10
+            )
+
+            if response.status_code in [200, 201, 204]:
+                print(f"✅ Download confirmation successful")
+                return True
+            else:
+                print(f"⚠️ Download confirmation failed: HTTP {response.status_code}")
+                try:
+                    error_data = response.json()
+                    print(f"   Error: {error_data}")
+                except:
+                    print(f"   Response: {response.text[:200]}")
+                return False
+
+        except Exception as e:
+            print(f"❌ Error confirming download: {e}")
+            return False
+
+    def track_save(self, save_id, save_type, device_id):
+        """Re-enable sync tracking for a save/state on this device
+
+        Args:
+            save_id: The ID of the save/state to track
+            save_type: Type of save ('saves' or 'states')
+            device_id: The device ID that should track this save
+
+        Returns:
+            True if tracking was enabled successfully, False otherwise
+        """
+        if not self.authenticated or not save_id or not device_id:
+            return False
+
+        try:
+            track_url = urljoin(self.base_url, f'/api/{save_type}/{save_id}/track')
+            payload = {'device_id': device_id}
+
+            print(f"🔔 Enabling sync tracking for {save_type[:-1]} {save_id} on device {device_id}")
+
+            response = self.session.post(
+                track_url,
+                json=payload,
+                timeout=10
+            )
+
+            if response.status_code in [200, 201, 204]:
+                print(f"✅ Sync tracking enabled")
+                return True
+            else:
+                print(f"⚠️ Failed to enable tracking: HTTP {response.status_code}")
+                try:
+                    error_data = response.json()
+                    print(f"   Error: {error_data}")
+                except:
+                    print(f"   Response: {response.text[:200]}")
+                return False
+
+        except Exception as e:
+            print(f"❌ Error enabling tracking: {e}")
+            return False
+
+    def untrack_save(self, save_id, save_type, device_id):
+        """Disable sync tracking for a save/state on this device
+
+        Args:
+            save_id: The ID of the save/state to stop tracking
+            save_type: Type of save ('saves' or 'states')
+            device_id: The device ID that should stop tracking this save
+
+        Returns:
+            True if tracking was disabled successfully, False otherwise
+        """
+        if not self.authenticated or not save_id or not device_id:
+            return False
+
+        try:
+            untrack_url = urljoin(self.base_url, f'/api/{save_type}/{save_id}/untrack')
+            payload = {'device_id': device_id}
+
+            print(f"🔕 Disabling sync tracking for {save_type[:-1]} {save_id} on device {device_id}")
+
+            response = self.session.post(
+                untrack_url,
+                json=payload,
+                timeout=10
+            )
+
+            if response.status_code in [200, 201, 204]:
+                print(f"✅ Sync tracking disabled")
+                return True
+            else:
+                print(f"⚠️ Failed to disable tracking: HTTP {response.status_code}")
+                try:
+                    error_data = response.json()
+                    print(f"   Error: {error_data}")
+                except:
+                    print(f"   Response: {response.text[:200]}")
+                return False
+
+        except Exception as e:
+            print(f"❌ Error disabling tracking: {e}")
+            return False
+
+    def get_saves_by_device(self, device_id, save_type='saves', rom_id=None, limit=100):
+        """Get saves/states filtered by device ID
+
+        Args:
+            device_id: The device ID to filter by
+            save_type: Type of save ('saves' or 'states')
+            rom_id: Optional ROM ID to further filter results
+            limit: Maximum number of results to return
+
+        Returns:
+            List of saves/states for this device, or empty list on error
+        """
+        if not self.authenticated or not device_id:
+            return []
+
+        try:
+            params = {
+                'device_id': device_id,
+                'limit': limit
+            }
+
+            if rom_id:
+                params['rom_id'] = rom_id
+
+            query_url = urljoin(self.base_url, f'/api/{save_type}')
+
+            print(f"📋 Querying {save_type} for device {device_id}")
+            if rom_id:
+                print(f"   Filtering by ROM ID: {rom_id}")
+
+            response = self.session.get(
+                query_url,
+                params=params,
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+
+                # Handle both list and dict responses
+                if isinstance(data, list):
+                    items = data
+                elif isinstance(data, dict):
+                    items = data.get('items', [])
+                else:
+                    items = []
+
+                print(f"✅ Found {len(items)} {save_type} for device")
+                return items
+            else:
+                print(f"⚠️ Query failed: HTTP {response.status_code}")
+                try:
+                    error_data = response.json()
+                    print(f"   Error: {error_data}")
+                except:
+                    print(f"   Response: {response.text[:200]}")
+                return []
+
+        except Exception as e:
+            print(f"❌ Error querying {save_type}: {e}")
+            return []
+
+    def get_saves_summary(self, rom_id, save_type='saves'):
+        """Get saves/states summary grouped by slot for a ROM
+
+        Args:
+            rom_id: The ROM ID to get saves for
+            save_type: Type of save ('saves' or 'states')
+
+        Returns:
+            Summary data grouped by slot, or None on error
+        """
+        if not self.authenticated or not rom_id:
+            return None
+
+        try:
+            summary_url = urljoin(self.base_url, f'/api/{save_type}/summary')
+            params = {'rom_id': rom_id}
+
+            print(f"📊 Getting {save_type} summary for ROM {rom_id}")
+
+            response = self.session.get(
+                summary_url,
+                params=params,
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                summary_data = response.json()
+                print(f"✅ Retrieved {save_type} summary")
+
+                # Log some info about the structure
+                if isinstance(summary_data, dict):
+                    print(f"   Summary keys: {list(summary_data.keys())}")
+                elif isinstance(summary_data, list):
+                    print(f"   Summary has {len(summary_data)} entries")
+
+                return summary_data
+            else:
+                print(f"⚠️ Summary query failed: HTTP {response.status_code}")
+                try:
+                    error_data = response.json()
+                    print(f"   Error: {error_data}")
+                except:
+                    print(f"   Response: {response.text[:200]}")
+                return None
+
+        except Exception as e:
+            print(f"❌ Error getting summary: {e}")
+            return None
+
     def upload_save(self, rom_id, save_type, file_path, emulator=None, device_id=None):
         """Upload save file using RomM naming convention with timestamps"""
+        if not self.ensure_authenticated():
+            return False
+
         try:
             file_path = Path(file_path)
             if not file_path.exists():
@@ -8281,21 +8668,46 @@ class RomMClient:
             return False
 
     def get_platform_bios_list(self, platform_slug):
-        """Get available BIOS files for a platform from RomM"""
+        """Get available BIOS files for a platform from RomM
+
+        Args:
+            platform_slug: Platform slug (e.g., 'sony-playstation')
+
+        Returns:
+            List of firmware/BIOS objects with 'id' and 'file_name' fields
+        """
+        if not self.ensure_authenticated():
+            return []
+
         try:
-            # Try the firmware endpoint first
-            response = self.session.get(
-                urljoin(self.base_url, f'/api/firmware'),
-                params={'platform': platform_slug},
+            # Step 1: Get all platforms to find the platform_id from slug
+            platforms_response = self.session.get(
+                urljoin(self.base_url, '/api/platforms'),
                 timeout=10
             )
-            
-            if response.status_code == 200:
-                return response.json()
-            
-            # Fallback to platform-specific endpoint
+
+            if platforms_response.status_code != 200:
+                print(f"Failed to get platforms list: {platforms_response.status_code}")
+                return []
+
+            platforms = platforms_response.json()
+
+            # Step 2: Find matching platform by slug and extract ID
+            platform_id = None
+            for platform in platforms:
+                if platform.get('slug') == platform_slug:
+                    platform_id = platform.get('id')
+                    print(f"✓ Found platform '{platform_slug}' with ID: {platform_id}")
+                    break
+
+            if not platform_id:
+                print(f"❌ Platform not found: {platform_slug}")
+                return []
+
+            # Step 3: Get firmware list using platform_id (integer)
             response = self.session.get(
-                urljoin(self.base_url, f'/api/platforms/{platform_slug}/firmware'),
+                urljoin(self.base_url, '/api/firmware'),
+                params={'platform_id': platform_id},  # Use platform_id instead of platform slug
                 timeout=10
             )
             
@@ -8307,23 +8719,28 @@ class RomMClient:
         
         return []
     
-    def download_bios_file(self, bios_id, download_path, progress_callback=None):
-        """Download a BIOS file from RomM"""
+    def download_bios_file(self, bios_id, file_name, download_path, progress_callback=None):
+        """Download a BIOS file from RomM
+
+        Args:
+            bios_id: Firmware ID from RomM
+            file_name: Filename of the BIOS file (e.g., 'scph5500.bin')
+            download_path: Path where to save the downloaded file
+            progress_callback: Optional callback for progress updates
+
+        Returns:
+            True on success, False on failure
+        """
+        if not self.ensure_authenticated():
+            return False
+
         try:
-            # Try firmware download endpoint
+            # Use correct endpoint: /api/firmware/{firmware_id}/content/{file_name}
             response = self.session.get(
-                urljoin(self.base_url, f'/api/firmware/{bios_id}/download'),
+                urljoin(self.base_url, f'/api/firmware/{bios_id}/content/{file_name}'),
                 stream=True,
                 timeout=30
             )
-            
-            if response.status_code != 200:
-                # Try alternative endpoint
-                response = self.session.get(
-                    urljoin(self.base_url, f'/api/firmware/{bios_id}/content'),
-                    stream=True,
-                    timeout=30
-                )
             
             if response.status_code == 200:
                 total_size = int(response.headers.get('content-length', 0))
@@ -11172,6 +11589,7 @@ class SyncWindow(Gtk.ApplicationWindow):
 
                 if device_info:
                     print(f"Device verified on server")
+                    self.device_id = existing_device_id  # Cache in app instance
                     return existing_device_id
                 else:
                     print(f"Device not found on server, registering new device")
@@ -11996,6 +12414,17 @@ class SyncWindow(Gtk.ApplicationWindow):
         debug_btn.connect('clicked', self.on_debug_api)
         debug_row.add_suffix(debug_btn)
         advanced_group.add(debug_row)
+
+        # Debug Sync Tracking
+        sync_debug_row = Adw.ActionRow()
+        sync_debug_row.set_title("Test Sync Tracking")
+        sync_debug_row.set_subtitle("Test track/untrack save sync controls")
+        sync_debug_btn = Gtk.Button(label="Test")
+        sync_debug_btn.set_valign(Gtk.Align.CENTER)
+        sync_debug_btn.set_size_request(80, -1)
+        sync_debug_btn.connect('clicked', self.on_debug_sync_tracking)
+        sync_debug_row.add_suffix(sync_debug_btn)
+        advanced_group.add(sync_debug_row)
 
         # Inspect Files
         inspect_row = Adw.ActionRow()
@@ -14274,7 +14703,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                                                 self.log_message(f"Downloading save: {f} → {rf} ({e})"))
                                     
                                     # Download with original filename
-                                    if self.romm_client.download_save(rom_id, 'saves', temp_path):
+                                    if self.romm_client.download_save(rom_id, 'saves', temp_path, self.device_id):
                                         # Rename to RetroArch format
                                         try:
                                             if temp_path != final_path:
@@ -14337,7 +14766,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                                                 self.log_message(f"Downloading state: {f} → {rf} ({e})"))
                                     
                                     # Download with original filename
-                                    if self.romm_client.download_save(rom_id, 'states', temp_path):
+                                    if self.romm_client.download_save(rom_id, 'states', temp_path, self.device_id):
                                         # Rename to RetroArch format
                                         try:
                                             if temp_path != final_path:
@@ -14680,7 +15109,203 @@ class SyncWindow(Gtk.ApplicationWindow):
                 GLib.idle_add(lambda err=str(e): self.log_message(f"Debug error: {err}"))
         
         threading.Thread(target=debug, daemon=True).start()
-    
+
+    def on_debug_sync_tracking(self, button):
+        """Test track/untrack save sync functionality"""
+        if not self.romm_client or not self.romm_client.authenticated:
+            self.log_message("Please connect to RomM first")
+            return
+
+        if not self.device_id:
+            self.log_message("No device ID found - device registration may have failed")
+            return
+
+        def test_tracking():
+            try:
+                self.log_message("=== Testing Sync Tracking API ===")
+                self.log_message(f"Device ID: {self.device_id}")
+
+                # Query all saves/states directly from the API
+                test_save_id = None
+                test_state_id = None
+
+                # Try to get saves directly from /api/saves endpoint
+                try:
+                    saves_response = self.romm_client.session.get(
+                        urljoin(self.romm_client.base_url, '/api/saves'),
+                        params={'limit': 10},
+                        timeout=10
+                    )
+
+                    if saves_response.status_code == 200:
+                        saves_data = saves_response.json()
+
+                        # Handle both list and dict responses
+                        if isinstance(saves_data, list):
+                            items = saves_data
+                        elif isinstance(saves_data, dict):
+                            items = saves_data.get('items', [])
+                        else:
+                            items = []
+
+                        if items:
+                            test_save_id = items[0].get('id')
+                            rom_id = items[0].get('rom_id')
+                            GLib.idle_add(lambda sid=test_save_id, rid=rom_id:
+                                        self.log_message(f"Found save ID: {sid} (ROM: {rid})"))
+                except Exception as e:
+                    GLib.idle_add(lambda err=str(e):
+                                self.log_message(f"Could not fetch saves: {err}"))
+
+                # If no saves, try states
+                if not test_save_id:
+                    try:
+                        states_response = self.romm_client.session.get(
+                            urljoin(self.romm_client.base_url, '/api/states'),
+                            params={'limit': 10},
+                            timeout=10
+                        )
+
+                        if states_response.status_code == 200:
+                            states_data = states_response.json()
+
+                            # Handle both list and dict responses
+                            if isinstance(states_data, list):
+                                items = states_data
+                            elif isinstance(states_data, dict):
+                                items = states_data.get('items', [])
+                            else:
+                                items = []
+
+                            if items:
+                                test_state_id = items[0].get('id')
+                                rom_id = items[0].get('rom_id')
+                                GLib.idle_add(lambda sid=test_state_id, rid=rom_id:
+                                            self.log_message(f"Found state ID: {sid} (ROM: {rid})"))
+                    except Exception as e:
+                        GLib.idle_add(lambda err=str(e):
+                                    self.log_message(f"Could not fetch states: {err}"))
+
+                if not test_save_id and not test_state_id:
+                    GLib.idle_add(lambda: self.log_message("❌ No saves or states found to test with"))
+                    GLib.idle_add(lambda: self.log_message("💡 Upload a save file first, then try again"))
+                    return
+
+                # Test with save or state
+                save_id = test_save_id or test_state_id
+                save_type = 'saves' if test_save_id else 'states'
+
+                GLib.idle_add(lambda: self.log_message(f"\n--- Testing with {save_type[:-1]} ID: {save_id} ---"))
+
+                # Test 1: Untrack the save
+                GLib.idle_add(lambda: self.log_message("\n1️⃣ Testing UNTRACK..."))
+                untrack_result = self.romm_client.untrack_save(save_id, save_type, self.device_id)
+                if untrack_result:
+                    GLib.idle_add(lambda: self.log_message("✅ Untrack successful"))
+                else:
+                    GLib.idle_add(lambda: self.log_message("⚠️ Untrack failed (may already be untracked)"))
+
+                # Wait a bit
+                import time
+                time.sleep(1)
+
+                # Test 2: Track the save again
+                GLib.idle_add(lambda: self.log_message("\n2️⃣ Testing TRACK..."))
+                track_result = self.romm_client.track_save(save_id, save_type, self.device_id)
+                if track_result:
+                    GLib.idle_add(lambda: self.log_message("✅ Track successful"))
+                else:
+                    GLib.idle_add(lambda: self.log_message("⚠️ Track failed (may already be tracked)"))
+
+                # Test 3: Check device_syncs in metadata
+                GLib.idle_add(lambda: self.log_message("\n3️⃣ Checking metadata..."))
+                check_response = self.romm_client.session.get(
+                    urljoin(self.romm_client.base_url, f'/api/{save_type}/{save_id}'),
+                    timeout=10
+                )
+
+                if check_response.status_code == 200:
+                    save_data = check_response.json()
+                    device_syncs = save_data.get('device_syncs', [])
+                    GLib.idle_add(lambda syncs=device_syncs:
+                                self.log_message(f"📱 Device syncs: {syncs}"))
+
+                    # Look for our device in the sync list
+                    our_sync = None
+                    for sync in device_syncs:
+                        if sync.get('device_id') == self.device_id:
+                            our_sync = sync
+                            break
+
+                    if our_sync:
+                        GLib.idle_add(lambda: self.log_message(f"✅ Found our device in sync list:"))
+                        GLib.idle_add(lambda s=our_sync:
+                                    self.log_message(f"   Tracking: {s.get('is_tracking', 'unknown')}"))
+                        GLib.idle_add(lambda s=our_sync:
+                                    self.log_message(f"   Downloaded: {s.get('downloaded', 'unknown')}"))
+                    else:
+                        GLib.idle_add(lambda: self.log_message("⚠️ Our device not found in sync list"))
+                else:
+                    GLib.idle_add(lambda code=check_response.status_code:
+                                self.log_message(f"⚠️ Could not fetch metadata: HTTP {code}"))
+
+                # Test 4: Query saves by device
+                GLib.idle_add(lambda: self.log_message("\n4️⃣ Testing device-filtered query..."))
+                device_saves = self.romm_client.get_saves_by_device(
+                    self.device_id,
+                    save_type=save_type,
+                    limit=5
+                )
+
+                if device_saves:
+                    GLib.idle_add(lambda count=len(device_saves):
+                                self.log_message(f"✅ Found {count} {save_type} for this device"))
+                    for save in device_saves[:3]:  # Show first 3
+                        save_id_item = save.get('id')
+                        rom_id_item = save.get('rom_id')
+                        filename = save.get('file_name', 'unknown')
+                        GLib.idle_add(lambda sid=save_id_item, rid=rom_id_item, fn=filename:
+                                    self.log_message(f"   - {fn} (save:{sid}, rom:{rid})"))
+                else:
+                    GLib.idle_add(lambda: self.log_message("⚠️ No saves found for device (query may not be supported)"))
+
+                # Test 5: Get saves summary for the ROM
+                if save_id and save_type == 'saves':  # Only test with saves, not states
+                    GLib.idle_add(lambda: self.log_message("\n5️⃣ Testing saves summary..."))
+
+                    # Get the ROM ID from the save
+                    summary_rom_id = None
+                    if device_saves:
+                        for save in device_saves:
+                            if save.get('id') == save_id:
+                                summary_rom_id = save.get('rom_id')
+                                break
+
+                    if summary_rom_id:
+                        summary = self.romm_client.get_saves_summary(summary_rom_id, save_type='saves')
+
+                        if summary:
+                            GLib.idle_add(lambda: self.log_message("✅ Retrieved saves summary"))
+                            if isinstance(summary, dict):
+                                for key, value in list(summary.items())[:3]:  # Show first 3 items
+                                    GLib.idle_add(lambda k=key, v=str(value)[:80]:
+                                                self.log_message(f"   {k}: {v}"))
+                            elif isinstance(summary, list):
+                                GLib.idle_add(lambda count=len(summary):
+                                            self.log_message(f"   Summary contains {count} slots"))
+                        else:
+                            GLib.idle_add(lambda: self.log_message("⚠️ Summary not available (may not be supported)"))
+                    else:
+                        GLib.idle_add(lambda: self.log_message("⚠️ Could not determine ROM ID for summary"))
+
+                GLib.idle_add(lambda: self.log_message("\n=== Test Complete ==="))
+                GLib.idle_add(lambda: self.log_message("💡 Check the RomM web interface to verify sync status"))
+
+            except Exception as e:
+                GLib.idle_add(lambda err=str(e): self.log_message(f"Test error: {err}"))
+
+        threading.Thread(target=test_tracking, daemon=True).start()
+
     def on_browse_downloads(self, button):
         """Open the download directory in file manager"""
         download_dir = Path(self.rom_dir_row.get_text())
@@ -15733,8 +16358,11 @@ class AutoSyncManager:
                                 
                                 temp_path = emulator_save_dir / original_filename
                                 self.log(f"  📥 {reason} - downloading: {original_filename} → {retroarch_filename}")
-                                
-                                if self.romm_client.download_save(rom_id, 'saves', temp_path):
+
+                                # Get device_id from settings
+                                device_id = self.settings.get('Device', 'device_id', '') or None
+
+                                if self.romm_client.download_save(rom_id, 'saves', temp_path, device_id):
                                     try:
                                         if temp_path != final_path:
                                             temp_path.rename(final_path)
@@ -15800,8 +16428,11 @@ class AutoSyncManager:
                                 
                                 temp_path = emulator_state_dir / original_filename
                                 self.log(f"  📥 {reason} - downloading: {original_filename} → {retroarch_filename}")
-                                
-                                if self.romm_client.download_save(rom_id, 'states', temp_path):
+
+                                # Get device_id from settings
+                                device_id = self.settings.get('Device', 'device_id', '') or None
+
+                                if self.romm_client.download_save(rom_id, 'states', temp_path, device_id):
                                     try:
                                         if temp_path != final_path:
                                             temp_path.rename(final_path)
