@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "py_modules"))
 
 try:
-    from sync_core import run_daemon_mode
+    from sync_core import run_daemon_mode, SettingsManager, RomMClient
     SYNC_CORE_AVAILABLE = True
 except ImportError as e:
     logging.warning(f"sync_core not available: {e}. Daemon will not start automatically.")
@@ -408,6 +408,87 @@ class Plugin:
         except Exception as e:
             logging.error(f"delete_collection_roms error: {e}", exc_info=True)
             return False
+
+    async def get_config(self):
+        """Get current RomM configuration (never returns the raw password)"""
+        try:
+            if not SYNC_CORE_AVAILABLE:
+                return {'configured': False, 'error': 'sync_core not available'}
+            settings = SettingsManager()
+            url = settings.get('RomM', 'url')
+            username = settings.get('RomM', 'username')
+            has_password = bool(settings.get('RomM', 'password'))
+            return {
+                'url': url,
+                'username': username,
+                'has_password': has_password,
+                'rom_directory': settings.get('Download', 'rom_directory'),
+                'save_directory': settings.get('Download', 'save_directory'),
+                'device_name': settings.get('Device', 'device_name'),
+                'configured': bool(url and username and has_password),
+            }
+        except Exception as e:
+            logging.error(f"get_config error: {e}", exc_info=True)
+            return {'configured': False, 'error': str(e)}
+
+    async def save_config(self, url: str, username: str, password: str,
+                          rom_directory: str, save_directory: str, device_name: str):
+        """Save RomM configuration and restart the daemon to pick up the new settings"""
+        try:
+            if not SYNC_CORE_AVAILABLE:
+                return {'success': False, 'error': 'sync_core not available'}
+            settings = SettingsManager()
+            settings.set('RomM', 'url', url.strip().rstrip('/'))
+            settings.set('RomM', 'username', username.strip())
+            if password:
+                settings.set('RomM', 'password', password)
+            settings.set('RomM', 'remember_credentials', 'true')
+            settings.set('RomM', 'auto_connect', 'true')
+            if rom_directory:
+                settings.set('Download', 'rom_directory', rom_directory.strip())
+            if save_directory:
+                settings.set('Download', 'save_directory', save_directory.strip())
+            if device_name:
+                settings.set('Device', 'device_name', device_name.strip())
+
+            # Restart daemon so it picks up the new credentials immediately
+            self._stop_daemon()
+            import time as _time
+            _time.sleep(0.5)
+            self._start_daemon()
+            return {'success': True}
+        except Exception as e:
+            logging.error(f"save_config error: {e}", exc_info=True)
+            return {'success': False, 'error': str(e)}
+
+    async def test_connection(self, url: str, username: str, password: str):
+        """Test connection to RomM with the given credentials"""
+        try:
+            if not SYNC_CORE_AVAILABLE:
+                return {'success': False, 'message': 'sync_core not available'}
+
+            actual_password = password
+            if not actual_password:
+                # Fall back to the saved password when the user hasn't entered a new one
+                settings = SettingsManager()
+                actual_password = settings.get('RomM', 'password')
+
+            if not actual_password:
+                return {'success': False, 'message': 'Password is required to test the connection.'}
+
+            client = RomMClient(url.strip().rstrip('/'), username.strip(), actual_password)
+            if client.authenticated:
+                collections = client.get_collections()
+                return {
+                    'success': True,
+                    'message': f'Connected! Found {len(collections)} collection(s).',
+                    'collections': [{'id': c.get('id'), 'name': c.get('name', '')} for c in collections],
+                }
+            else:
+                return {'success': False, 'message': 'Authentication failed — check URL, username and password.'}
+        except Exception as e:
+            logging.error(f"test_connection error: {e}", exc_info=True)
+            return {'success': False, 'message': f'Connection error: {str(e)[:150]}'}
 
     async def get_logging_enabled(self):
         """Get current logging preference"""

@@ -1,8 +1,8 @@
 {
   "name": "RomM Sync Monitor",
   "author": "Your Name",
-  "flags": ["_root"],
-  "api_version": 1,
+  "flags": [],
+  "api_version": 2,
   "publish": {
     "tags": ["utility", "romm"],
     "description": "Monitor RomM-RetroArch Sync service status",

@@ -3,11 +3,12 @@ import {
   PanelSection,
   PanelSectionRow,
   ToggleField,
+  TextField,
   Navigation,
   staticClasses,
 } from "@decky/ui";
 import { callable, definePlugin, toaster, routerHook } from "@decky/api";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, ChangeEvent } from "react";
 import { FaSync, FaTrash, FaCog } from "react-icons/fa";
 
 // Call backend methods
@@ -18,6 +19,9 @@ const toggleCollectionSync = callable<[string, boolean], boolean>("toggle_collec
 const deleteCollectionRoms = callable<[string], boolean>("delete_collection_roms");
 const getLoggingEnabled = callable<[], boolean>("get_logging_enabled");
 const updateLoggingEnabled = callable<[boolean], boolean>("set_logging_enabled");
+const getConfig = callable<[], any>("get_config");
+const saveConfig = callable<[string, string, string, string, string, string], any>("save_config");
+const testRommConnection = callable<[string, string, string], any>("test_connection");
 
 // Background monitoring - runs independently of UI
 let backgroundInterval: any = null;
@@ -122,6 +126,170 @@ const stopBackgroundMonitoring = () => {
 console.log('[PLUGIN INIT] Module loaded, starting background monitoring');
 startBackgroundMonitoring();
 
+// Configuration / first-time setup page
+function ConfigPage() {
+  const [url, setUrl] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [romDir, setRomDir] = useState('');
+  const [saveDir, setSaveDir] = useState('');
+  const [deviceName, setDeviceName] = useState('');
+  const [hasPassword, setHasPassword] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [testing, setTesting] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [testResult, setTestResult] = useState<{success: boolean; message: string} | null>(null);
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const config = await getConfig();
+        setUrl(config.url || '');
+        setUsername(config.username || '');
+        setRomDir(config.rom_directory || '');
+        setSaveDir(config.save_directory || '');
+        setDeviceName(config.device_name || '');
+        setHasPassword(config.has_password || false);
+      } catch (e) {
+        console.error('[ConfigPage] Failed to load config:', e);
+      } finally {
+        setLoading(false);
+      }
+    };
+    load();
+  }, []);
+
+  const handleTest = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const result = await testRommConnection(url.trim(), username.trim(), password);
+      setTestResult(result);
+    } catch (e) {
+      setTestResult({ success: false, message: 'Test failed unexpectedly.' });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const result = await saveConfig(url.trim(), username.trim(), password, romDir.trim(), saveDir.trim(), deviceName.trim());
+      if (result.success) {
+        toaster.toast({ title: 'RomM Sync', body: 'Configuration saved — daemon restarted!', duration: 3000 });
+        Navigation.NavigateBack();
+      } else {
+        toaster.toast({ title: 'RomM Sync Error', body: result.error || 'Failed to save configuration.', duration: 5000 });
+      }
+    } catch (e) {
+      toaster.toast({ title: 'RomM Sync Error', body: 'Failed to save configuration.', duration: 5000 });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) {
+    return <div style={{ color: 'white', padding: '20px' }}>Loading configuration…</div>;
+  }
+
+  const canSubmit = url.trim().length > 0 && username.trim().length > 0 && (password.length > 0 || hasPassword);
+
+  return (
+    <div style={{ marginTop: '40px', color: 'white' }}>
+      <div className={staticClasses.Title} style={{ marginBottom: '20px' }}>RomM Connection Setup</div>
+
+      <PanelSection title="Server">
+        <PanelSectionRow>
+          <TextField
+            label="RomM URL"
+            value={url}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => { setUrl(e.target.value); setTestResult(null); }}
+            description="e.g. https://romm.example.com"
+          />
+        </PanelSectionRow>
+      </PanelSection>
+
+      <PanelSection title="Credentials">
+        <PanelSectionRow>
+          <TextField
+            label="Username"
+            value={username}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => { setUsername(e.target.value); setTestResult(null); }}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <TextField
+            label="Password"
+            value={password}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => { setPassword(e.target.value); setTestResult(null); }}
+            description={hasPassword && !password ? 'Leave blank to keep the saved password' : undefined}
+            bIsPassword={true}
+          />
+        </PanelSectionRow>
+      </PanelSection>
+
+      <PanelSection title="Directories">
+        <PanelSectionRow>
+          <TextField
+            label="ROM Directory"
+            value={romDir}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setRomDir(e.target.value)}
+            description="Where ROMs will be downloaded"
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <TextField
+            label="Save Directory"
+            value={saveDir}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setSaveDir(e.target.value)}
+            description="Where save files are stored"
+          />
+        </PanelSectionRow>
+      </PanelSection>
+
+      <PanelSection title="Device">
+        <PanelSectionRow>
+          <TextField
+            label="Device Name"
+            value={deviceName}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setDeviceName(e.target.value)}
+            description="Name shown in RomM for this device"
+          />
+        </PanelSectionRow>
+      </PanelSection>
+
+      {testResult && (
+        <PanelSection>
+          <PanelSectionRow>
+            <div style={{ color: testResult.success ? '#4ade80' : '#f87171', fontSize: '0.9em', padding: '4px 0' }}>
+              {testResult.success ? '✅' : '❌'} {testResult.message}
+            </div>
+          </PanelSectionRow>
+        </PanelSection>
+      )}
+
+      <PanelSection>
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={handleTest} disabled={testing || saving || !url.trim() || !username.trim()}>
+            {testing ? 'Testing…' : '🔌 Test Connection'}
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={handleSave} disabled={saving || testing || !canSubmit}>
+            {saving ? 'Saving…' : '💾 Save & Apply'}
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={() => Navigation.NavigateBack()}>
+            Cancel
+          </ButtonItem>
+        </PanelSectionRow>
+      </PanelSection>
+    </div>
+  );
+}
+
 // Settings page component
 function SettingsPage() {
   const [loggingEnabled, setLoggingEnabled] = useState<boolean>(true);
@@ -156,6 +324,22 @@ function SettingsPage() {
   return (
     <div style={{ marginTop: "40px", color: "white" }}>
       <div className={staticClasses.Title} style={{ marginBottom: "20px" }}>RomM Sync Settings</div>
+      <PanelSection title="Connection">
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            onClick={() => {
+              Navigation.Navigate("/romm-sync-config");
+              Navigation.CloseSideMenus();
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <FaCog size={14} />
+              <span>Configure RomM Connection</span>
+            </div>
+          </ButtonItem>
+        </PanelSectionRow>
+      </PanelSection>
       <PanelSection title="Debug Settings">
         <PanelSectionRow>
           <ToggleField
@@ -175,6 +359,7 @@ function Content() {
   const [status, setStatus] = useState<any>({ status: 'loading', message: 'Loading...' });
   const [loading, setLoading] = useState(false);
   const [togglingCollection, setTogglingCollection] = useState<string | null>(null);
+  const [configured, setConfigured] = useState<boolean | null>(null);
   const intervalRef = useRef<any>(null);
   const optimisticOverrides = useRef<Map<string, {auto_sync: boolean, sync_state: string, downloaded?: number, total?: number}>>(new Map());
 
@@ -261,6 +446,7 @@ function Content() {
   };
 
   useEffect(() => {
+    getConfig().then((cfg: any) => setConfigured(cfg?.configured ?? false)).catch(() => setConfigured(false));
     refreshStatus();
     startPolling();
     return () => stopPolling();
@@ -380,6 +566,32 @@ function Content() {
       setTogglingCollection(null);
     }
   };
+
+  if (configured === false) {
+    return (
+      <PanelSection title="RomM Sync">
+        <PanelSectionRow>
+          <div style={{ color: '#fbbf24', fontSize: '0.9em', marginBottom: '8px' }}>
+            ⚙️ RomM is not configured yet. Set up your server connection to get started.
+          </div>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            onClick={() => {
+              Navigation.Navigate("/romm-sync-config");
+              Navigation.CloseSideMenus();
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <FaCog size={14} />
+              <span>Set Up RomM Connection</span>
+            </div>
+          </ButtonItem>
+        </PanelSectionRow>
+      </PanelSection>
+    );
+  }
 
   return (
     <PanelSection title="RomM Sync Status">
@@ -557,10 +769,8 @@ function TitleView() {
 }
 
 export default definePlugin(() => {
-  // Register the settings route
-  routerHook.addRoute("/romm-sync-settings", () => <SettingsPage />, {
-    exact: true,
-  });
+  routerHook.addRoute("/romm-sync-settings", () => <SettingsPage />, { exact: true });
+  routerHook.addRoute("/romm-sync-config", () => <ConfigPage />, { exact: true });
 
   return {
     name: "RomM Sync Monitor",
@@ -568,12 +778,11 @@ export default definePlugin(() => {
     content: <Content />,
     icon: <FaSync />,
     onDismount: () => {
-      // Stop background monitoring when plugin unloads
       console.log('[PLUGIN] onDismount - Stopping background monitoring');
       stopBackgroundMonitoring();
 
-      // Remove the settings route
       routerHook.removeRoute("/romm-sync-settings");
+      routerHook.removeRoute("/romm-sync-config");
     },
   };
 });
