@@ -4,6 +4,7 @@
   "description": "RomM Sync Service Monitor",
   "type": "module",
   "scripts": {
+    "prebuild": "cp ../src/sync_core.py py_modules/sync_core.py",
     "build": "rollup -c",
     "watch": "rollup -c -w",
     "test": "echo \"Error: no test specified\" && exit 1"

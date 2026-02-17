@@ -1,8 +1,19 @@
-import subprocess
 import json
 import logging
 import os
+import sys
+import threading
 from pathlib import Path
+
+# Add py_modules to path so sync_core is importable
+sys.path.insert(0, str(Path(__file__).parent / "py_modules"))
+
+try:
+    from sync_core import run_daemon_mode
+    SYNC_CORE_AVAILABLE = True
+except ImportError as e:
+    logging.warning(f"sync_core not available: {e}. Daemon will not start automatically.")
+    SYNC_CORE_AVAILABLE = False
 
 # Set up logging
 log_file = Path.home() / '.config' / 'romm-retroarch-sync' / 'decky_debug.log'
@@ -49,78 +60,75 @@ else:
         format='%(asctime)s - %(levelname)s - %(message)s'
     )
 
-def get_systemd_env():
-    """Get proper environment variables for systemd user commands on Steam Deck"""
-    env = os.environ.copy()
-
-    # Ensure XDG_RUNTIME_DIR is set (required for systemd --user)
-    if 'XDG_RUNTIME_DIR' not in env:
-        uid = os.getuid()
-        env['XDG_RUNTIME_DIR'] = f'/run/user/{uid}'
-
-    # Try to get DBUS_SESSION_BUS_ADDRESS if not set
-    if 'DBUS_SESSION_BUS_ADDRESS' not in env:
-        xdg_runtime = env.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')
-        bus_path = Path(xdg_runtime) / 'bus'
-        if bus_path.exists():
-            env['DBUS_SESSION_BUS_ADDRESS'] = f'unix:path={bus_path}'
-
-    return env
-
 class Plugin:
+    _stop_event: threading.Event = None
+    _daemon_thread: threading.Thread = None
+
     async def _main(self):
         logging.info("RomM Sync Monitor starting...")
+        self._start_daemon()
         return await self.get_service_status()
-    
+
+    async def _unload(self):
+        logging.info("RomM Sync Monitor unloading...")
+        self._stop_daemon()
+
+    def _start_daemon(self):
+        if not SYNC_CORE_AVAILABLE:
+            logging.error("sync_core not available, cannot start daemon")
+            return
+        if self._daemon_thread and self._daemon_thread.is_alive():
+            return
+        self._stop_event = threading.Event()
+        self._daemon_thread = threading.Thread(
+            target=run_daemon_mode,
+            args=(self._stop_event,),
+            daemon=True,
+            name="romm-sync-daemon"
+        )
+        self._daemon_thread.start()
+        logging.info("Daemon thread started")
+
+    def _stop_daemon(self):
+        if self._stop_event:
+            self._stop_event.set()
+        if self._daemon_thread:
+            self._daemon_thread.join(timeout=5)
+        self._daemon_thread = None
+        self._stop_event = None
+        logging.info("Daemon thread stopped")
+
     async def get_service_status(self):
-        """Check if the RomM sync service is running"""
+        """Check if the sync daemon is running"""
         try:
-            # Get proper environment for systemd commands
-            env = get_systemd_env()
+            service_running = bool(self._daemon_thread and self._daemon_thread.is_alive())
 
-            # Check systemd service status with proper environment
-            logging.debug(f"Checking service with env: XDG_RUNTIME_DIR={env.get('XDG_RUNTIME_DIR')}")
-            result = subprocess.run(
-                ['systemctl', '--user', 'is-active', 'romm-retroarch-sync.service'],
-                capture_output=True,
-                text=True,
-                env=env
-            )
-
-            logging.debug(f"systemctl returncode: {result.returncode}, stdout: {result.stdout.strip()}, stderr: {result.stderr.strip()}")
-
-            service_running = result.returncode == 0 and 'active' in result.stdout
-
-            # Fallback: Check if process is running by looking for the status file being recently updated
+            # status.json is still written by run_daemon_mode — read it for detailed status
             status_file = Path.home() / '.config' / 'romm-retroarch-sync' / 'status.json'
             app_status = {}
-            status_file_recent = False
 
             if status_file.exists():
                 try:
+                    import time
                     with open(status_file, 'r') as f:
                         app_status = json.load(f)
                     logging.info(f"Status file read: {app_status}")
 
-                    # Check if status file was updated recently (within last 120 seconds)
-                    # Increased timeout to handle large collection sync calculations
-                    import time
+                    # Check if status file was updated recently (within last 300 seconds)
                     file_mtime = status_file.stat().st_mtime
                     status_file_recent = (time.time() - file_mtime) < 300
                     logging.debug(f"Status file age: {time.time() - file_mtime}s, recent: {status_file_recent}")
+
+                    # If thread isn't alive but status file is recent, trust the file
+                    if not service_running and status_file_recent and app_status.get('running', False):
+                        logging.info("Thread not detected but status file indicates running")
+                        service_running = True
                 except Exception as e:
                     logging.error(f"Failed to read status file: {e}")
 
-            # If systemctl failed but status file is recent and shows running, trust the status file
-            # This handles cases where systemctl --user doesn't work properly on Steam Deck
-            if not service_running and status_file_recent and app_status.get('running', False):
-                logging.info("systemctl check failed but status file indicates service is running")
-                service_running = True
-
-            # Combine service and app status
+            # Build response based on status
             if service_running:
                 if app_status.get('connected', False):
-                    # Build message with game count and collections
                     game_count = app_status.get('game_count', 0)
                     collections = app_status.get('collections', [])
                     collection_count = app_status.get('collection_count', 0)
@@ -131,7 +139,6 @@ class Plugin:
                         message += f", {collection_count} collections"
                     message += ")"
 
-                    # Log collection data for debugging
                     for col in collections:
                         logging.info(f"[STATUS] Collection {col.get('name')}: auto_sync={col.get('auto_sync')}, downloaded={col.get('downloaded')}, total={col.get('total')}, sync_state={col.get('sync_state')}")
 
@@ -178,35 +185,21 @@ class Plugin:
                 'collections': [],
                 'collection_count': 0
             }
-    
+
     async def start_service(self):
-        """Start the RomM sync service"""
+        """Start the sync daemon"""
         try:
-            env = get_systemd_env()
-            result = subprocess.run(
-                ['systemctl', '--user', 'start', 'romm-retroarch-sync.service'],
-                capture_output=True,
-                text=True,
-                env=env
-            )
-            logging.info(f"start_service returncode: {result.returncode}, stderr: {result.stderr}")
-            return result.returncode == 0
+            self._start_daemon()
+            return self._daemon_thread is not None and self._daemon_thread.is_alive()
         except Exception as e:
             logging.error(f"start_service error: {e}")
             return False
 
     async def stop_service(self):
-        """Stop the RomM sync service"""
+        """Stop the sync daemon"""
         try:
-            env = get_systemd_env()
-            result = subprocess.run(
-                ['systemctl', '--user', 'stop', 'romm-retroarch-sync.service'],
-                capture_output=True,
-                text=True,
-                env=env
-            )
-            logging.info(f"stop_service returncode: {result.returncode}, stderr: {result.stderr}")
-            return result.returncode == 0
+            self._stop_daemon()
+            return True
         except Exception as e:
             logging.error(f"stop_service error: {e}")
             return False
