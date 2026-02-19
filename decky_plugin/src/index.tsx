@@ -6,22 +6,29 @@ import {
   TextField,
   Navigation,
   staticClasses,
+  DialogButton,
 } from "@decky/ui";
-import { callable, definePlugin, toaster, routerHook } from "@decky/api";
+import { callable, definePlugin, toaster, routerHook, openFilePicker, FileSelectionType } from "@decky/api";
 import { useState, useEffect, useRef, ChangeEvent } from "react";
 import { FaSync, FaTrash, FaCog } from "react-icons/fa";
+import { BsGearFill } from "react-icons/bs";
 
 // Call backend methods
 const getServiceStatus = callable<[], any>("get_service_status");
-const startService = callable<[], boolean>("start_service");
-const stopService = callable<[], boolean>("stop_service");
 const toggleCollectionSync = callable<[string, boolean], boolean>("toggle_collection_sync");
 const deleteCollectionRoms = callable<[string], boolean>("delete_collection_roms");
 const getLoggingEnabled = callable<[], boolean>("get_logging_enabled");
 const updateLoggingEnabled = callable<[boolean], boolean>("set_logging_enabled");
 const getConfig = callable<[], any>("get_config");
+const resetAllSettings = callable<[], any>("reset_all_settings");
 const saveConfig = callable<[string, string, string, string, string, string], any>("save_config");
 const testRommConnection = callable<[string, string, string], any>("test_connection");
+
+const formatSpeed = (bytesPerSec: number): string => {
+  if (bytesPerSec >= 1024 * 1024) return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`;
+  if (bytesPerSec >= 1024) return `${(bytesPerSec / 1024).toFixed(0)} KB/s`;
+  return `${bytesPerSec.toFixed(0)} B/s`;
+};
 
 // Background monitoring - runs independently of UI
 let backgroundInterval: any = null;
@@ -40,10 +47,6 @@ const checkForNotifications = async () => {
       const currentState = col.sync_state;
 
       // Log state for debugging
-      if (col.auto_sync || previousData) {
-        console.log(`[BACKGROUND CHECK] ${col.name}: prev=${previousData?.sync_state || 'none'}, curr=${currentState}, auto_sync=${col.auto_sync}`);
-      }
-
       // Detect transition to 'synced' from either 'syncing' OR 'not_synced'
       // 'syncing' -> 'synced': Normal case
       // 'not_synced' -> 'synced': Fast sync where we missed the 'syncing' state
@@ -134,7 +137,10 @@ function ConfigPage() {
   const [romDir, setRomDir] = useState('');
   const [saveDir, setSaveDir] = useState('');
   const [deviceName, setDeviceName] = useState('');
+  const [deviceNameDefault, setDeviceNameDefault] = useState('Steam Deck');
   const [hasPassword, setHasPassword] = useState(false);
+  const [retrodeckDetected, setRetrodeckDetected] = useState(false);
+  const [isFirstTime, setIsFirstTime] = useState(false);
   const [loading, setLoading] = useState(true);
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -149,7 +155,10 @@ function ConfigPage() {
         setRomDir(config.rom_directory || '');
         setSaveDir(config.save_directory || '');
         setDeviceName(config.device_name || '');
+        setDeviceNameDefault(config.device_name_default || 'Steam Deck');
         setHasPassword(config.has_password || false);
+        setRetrodeckDetected(config.retrodeck_detected || false);
+        setIsFirstTime(!config.configured);
       } catch (e) {
         console.error('[ConfigPage] Failed to load config:', e);
       } finally {
@@ -175,9 +184,10 @@ function ConfigPage() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      const result = await saveConfig(url.trim(), username.trim(), password, romDir.trim(), saveDir.trim(), deviceName.trim());
+      const effectiveDeviceName = deviceName.trim() || deviceNameDefault;
+      const result = await saveConfig(url.trim(), username.trim(), password, romDir.trim(), saveDir.trim(), effectiveDeviceName);
       if (result.success) {
-        toaster.toast({ title: 'RomM Sync', body: 'Configuration saved — daemon restarted!', duration: 3000 });
+        toaster.toast({ title: 'RomM Sync', body: 'Settings saved — reconnecting...', duration: 3000 });
         Navigation.NavigateBack();
       } else {
         toaster.toast({ title: 'RomM Sync Error', body: result.error || 'Failed to save configuration.', duration: 5000 });
@@ -196,10 +206,37 @@ function ConfigPage() {
   const canSubmit = url.trim().length > 0 && username.trim().length > 0 && (password.length > 0 || hasPassword);
 
   return (
-    <div style={{ marginTop: '40px', color: 'white' }}>
-      <div className={staticClasses.Title} style={{ marginBottom: '20px' }}>RomM Connection Setup</div>
+    <div style={{ overflowY: 'auto', height: 'calc(100vh - 40px)', marginTop: '40px', paddingBottom: '40px', color: 'white' }}>
 
-      <PanelSection title="Server">
+      {/* Header */}
+      {isFirstTime ? (
+        <div style={{ padding: '16px 16px 4px' }}>
+          <div className={staticClasses.Title} style={{ marginBottom: '8px' }}>Welcome to RomM Sync</div>
+          <div style={{ fontSize: '13px', color: '#d1d5db', lineHeight: '1.6' }}>
+            Connect your Steam Deck to your RomM server to automatically sync ROMs and save files across devices.
+          </div>
+        </div>
+      ) : (
+        <div className={staticClasses.Title} style={{ margin: '0 16px 8px' }}>RomM Connection Setup</div>
+      )}
+
+      {/* RetroDECK banner */}
+      {retrodeckDetected && (
+        <div style={{
+          margin: '8px 16px 4px',
+          padding: '10px 14px',
+          background: 'rgba(74, 222, 128, 0.12)',
+          border: '1px solid rgba(74, 222, 128, 0.4)',
+          borderRadius: '6px',
+          fontSize: '13px',
+          color: '#4ade80',
+          lineHeight: '1.5',
+        }}>
+          <strong>RetroDECK detected!</strong> ROM and save directories have been pre-filled with RetroDECK defaults. You can change them below if needed.
+        </div>
+      )}
+
+      <PanelSection title="Connection">
         <PanelSectionRow>
           <TextField
             label="RomM URL"
@@ -208,9 +245,6 @@ function ConfigPage() {
             description="e.g. https://romm.example.com"
           />
         </PanelSectionRow>
-      </PanelSection>
-
-      <PanelSection title="Credentials">
         <PanelSectionRow>
           <TextField
             label="Username"
@@ -227,6 +261,29 @@ function ConfigPage() {
             bIsPassword={true}
           />
         </PanelSectionRow>
+        {testResult && (
+          <PanelSectionRow>
+            <div style={{ color: testResult.success ? '#4ade80' : '#f87171', fontSize: '0.9em', padding: '4px 0' }}>
+              {testResult.success ? '✅' : '❌'} {testResult.message}
+            </div>
+          </PanelSectionRow>
+        )}
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={handleTest} disabled={testing || saving || !url.trim() || !username.trim()}>
+            {testing ? 'Testing…' : '🔌 Test Connection'}
+          </ButtonItem>
+        </PanelSectionRow>
+      </PanelSection>
+
+      <PanelSection title="Device">
+        <PanelSectionRow>
+          <TextField
+            label="Device Name"
+            value={deviceName}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setDeviceName(e.target.value)}
+            description={`Identifies this device in RomM for save syncing. Defaults to "${deviceNameDefault}" if left blank.`}
+          />
+        </PanelSectionRow>
       </PanelSection>
 
       <PanelSection title="Directories">
@@ -239,45 +296,39 @@ function ConfigPage() {
           />
         </PanelSectionRow>
         <PanelSectionRow>
+          <ButtonItem layout="below" onClick={async () => {
+            try {
+              const res = await openFilePicker(FileSelectionType.FOLDER, romDir || '/home/deck', false, true);
+              if (res?.realpath) setRomDir(res.realpath);
+            } catch {}
+          }}>
+            Browse…
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
           <TextField
             label="Save Directory"
             value={saveDir}
             onChange={(e: ChangeEvent<HTMLInputElement>) => setSaveDir(e.target.value)}
-            description="Where save files are stored"
+            description="Where save files are stored (used for upload/download)"
           />
         </PanelSectionRow>
-      </PanelSection>
-
-      <PanelSection title="Device">
         <PanelSectionRow>
-          <TextField
-            label="Device Name"
-            value={deviceName}
-            onChange={(e: ChangeEvent<HTMLInputElement>) => setDeviceName(e.target.value)}
-            description="Name shown in RomM for this device"
-          />
+          <ButtonItem layout="below" onClick={async () => {
+            try {
+              const res = await openFilePicker(FileSelectionType.FOLDER, saveDir || '/home/deck', false, true);
+              if (res?.realpath) setSaveDir(res.realpath);
+            } catch {}
+          }}>
+            Browse…
+          </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
-
-      {testResult && (
-        <PanelSection>
-          <PanelSectionRow>
-            <div style={{ color: testResult.success ? '#4ade80' : '#f87171', fontSize: '0.9em', padding: '4px 0' }}>
-              {testResult.success ? '✅' : '❌'} {testResult.message}
-            </div>
-          </PanelSectionRow>
-        </PanelSection>
-      )}
 
       <PanelSection>
         <PanelSectionRow>
-          <ButtonItem layout="below" onClick={handleTest} disabled={testing || saving || !url.trim() || !username.trim()}>
-            {testing ? 'Testing…' : '🔌 Test Connection'}
-          </ButtonItem>
-        </PanelSectionRow>
-        <PanelSectionRow>
           <ButtonItem layout="below" onClick={handleSave} disabled={saving || testing || !canSubmit}>
-            {saving ? 'Saving…' : '💾 Save & Apply'}
+            {saving ? 'Saving…' : isFirstTime ? '🚀 Connect & Start' : '💾 Save & Apply'}
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
@@ -294,6 +345,8 @@ function ConfigPage() {
 function SettingsPage() {
   const [loggingEnabled, setLoggingEnabled] = useState<boolean>(true);
   const [loading, setLoading] = useState<boolean>(true);
+  const [confirmReset, setConfirmReset] = useState<boolean>(false);
+  const [resetting, setResetting] = useState<boolean>(false);
 
   useEffect(() => {
     // Load initial logging preference
@@ -316,13 +369,32 @@ function SettingsPage() {
       await updateLoggingEnabled(enabled);
     } catch (error) {
       console.error('Failed to set logging preference:', error);
-      // Revert on error
       setLoggingEnabled(!enabled);
     }
   };
 
+  const handleReset = async () => {
+    setResetting(true);
+    try {
+      const result = await resetAllSettings();
+      if (result?.success) {
+        toaster.toast({ title: 'Reset complete', body: `${result.deleted_roms ?? 0} ROM file(s) deleted. Sync state cleared.` });
+        // Navigate to the config/welcome page so the user goes through onboarding
+        Navigation.Navigate("/romm-sync-config");
+        Navigation.CloseSideMenus();
+      } else {
+        toaster.toast({ title: 'Reset failed', body: result?.error ?? 'Unknown error' });
+      }
+    } catch (error) {
+      toaster.toast({ title: 'Reset failed', body: String(error) });
+    } finally {
+      setResetting(false);
+      setConfirmReset(false);
+    }
+  };
+
   return (
-    <div style={{ marginTop: "40px", color: "white" }}>
+    <div style={{ overflowY: 'auto', height: 'calc(100vh - 40px)', marginTop: "40px", paddingBottom: '40px', color: "white" }}>
       <div className={staticClasses.Title} style={{ marginBottom: "20px" }}>RomM Sync Settings</div>
       <PanelSection title="Connection">
         <PanelSectionRow>
@@ -351,6 +423,47 @@ function SettingsPage() {
           />
         </PanelSectionRow>
       </PanelSection>
+      <PanelSection title="Danger Zone">
+        {!confirmReset ? (
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              onClick={() => setConfirmReset(true)}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#f87171' }}>
+                <FaTrash size={14} />
+                <span>Reset to New User</span>
+              </div>
+            </ButtonItem>
+            <div style={{ fontSize: '11px', color: '#9ca3af', marginTop: '4px' }}>
+              Deletes all synced ROMs and clears sync state. Credentials are kept.
+            </div>
+          </PanelSectionRow>
+        ) : (
+          <PanelSectionRow>
+            <div style={{ fontSize: '13px', color: '#fbbf24', marginBottom: '8px' }}>
+              This will delete all downloaded ROM files and clear collection sync state. Are you sure?
+            </div>
+            <ButtonItem
+              layout="below"
+              onClick={handleReset}
+              disabled={resetting}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#f87171' }}>
+                <FaTrash size={14} />
+                <span>{resetting ? 'Resetting...' : 'Yes, reset everything'}</span>
+              </div>
+            </ButtonItem>
+            <ButtonItem
+              layout="below"
+              onClick={() => setConfirmReset(false)}
+              disabled={resetting}
+            >
+              Cancel
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
+      </PanelSection>
     </div>
   );
 }
@@ -360,38 +473,57 @@ function Content() {
   const [loading, setLoading] = useState(false);
   const [togglingCollection, setTogglingCollection] = useState<string | null>(null);
   const [configured, setConfigured] = useState<boolean | null>(null);
+  const configuredRef = useRef<boolean | null>(null);
   const intervalRef = useRef<any>(null);
   const optimisticOverrides = useRef<Map<string, {auto_sync: boolean, sync_state: string, downloaded?: number, total?: number}>>(new Map());
 
+  const getStatusColor = () => {
+    switch (status.status) {
+      case 'connected': return '#4ade80'; // green
+      case 'running': return '#fbbf24'; // yellow
+      case 'stopped': return '#f87171'; // red
+      case 'error': return '#f87171'; // red
+      default: return '#9ca3af'; // gray
+    }
+  };
+
+  const checkConfigured = async () => {
+    try {
+      const cfg = await getConfig();
+      const isConfigured = cfg?.configured ?? false;
+      configuredRef.current = isConfigured;
+      setConfigured(isConfigured);
+      return isConfigured;
+    } catch {
+      setConfigured(false);
+      return false;
+    }
+  };
+
   const refreshStatus = async () => {
     try {
+      // If not yet configured, re-check so the panel transitions automatically
+      // after the user saves from ConfigPage — without calling getConfig() every cycle.
+      if (configuredRef.current === false) {
+        const isConfigured = await checkConfigured();
+        if (!isConfigured) return;
+      }
+
       const result = await getServiceStatus();
-      console.log(`[REFRESH] ========== NEW REFRESH ==========`);
-      console.log(`[REFRESH] Raw backend data:`, JSON.stringify(result.collections, null, 2));
-      console.log(`[REFRESH] Current overrides:`, Array.from(optimisticOverrides.current.entries()));
 
       // Check if backend data matches any overrides - if so, clear them
       if (optimisticOverrides.current.size > 0) {
         result.collections.forEach((col: any) => {
           const override = optimisticOverrides.current.get(col.name);
-          if (override) {
-            console.log(`[REFRESH] Checking ${col.name}: override={auto_sync:${override.auto_sync}, sync_state:${override.sync_state}}, backend={auto_sync:${col.auto_sync}, sync_state:${col.sync_state}, downloaded:${col.downloaded}, total:${col.total}}`);
-          }
           if (override && override.auto_sync === col.auto_sync) {
-            // Clear override when backend has REAL progress data (not just 0/0)
             const backendHasProgress = (col.downloaded !== undefined && col.total !== undefined && col.total > 0);
             const shouldClear = backendHasProgress && (
-              // Clear if backend state matches override state
               override.sync_state === col.sync_state ||
-              // OR clear if backend is 'synced' (sync completed, override no longer needed)
               col.sync_state === 'synced'
             );
-            console.log(`[REFRESH] ${col.name}: shouldClear=${shouldClear} (backendHasProgress=${backendHasProgress}, override.sync_state=${override.sync_state}, col.sync_state=${col.sync_state})`);
             if (shouldClear) {
-              console.log(`[REFRESH] ✅ CLEARING override for ${col.name}`);
+              console.log(`[REFRESH] Clearing override for ${col.name}`);
               optimisticOverrides.current.delete(col.name);
-            } else {
-              console.log(`[REFRESH] ⏸️  KEEPING override for ${col.name} (backend has no progress yet)`);
             }
           }
         });
@@ -399,33 +531,24 @@ function Content() {
 
       // Apply remaining optimistic overrides
       if (optimisticOverrides.current.size > 0) {
-        console.log(`[REFRESH] 🎨 Applying ${optimisticOverrides.current.size} override(s) to result`);
         const modifiedResult = {
           ...result,
           collections: result.collections.map((col: any) => {
             const override = optimisticOverrides.current.get(col.name);
             if (override) {
-              const before = `{sync_state:${col.sync_state}, downloaded:${col.downloaded}, total:${col.total}}`;
-              // Apply override fields - if override has downloaded/total, use them
-              const modified = {
+              return {
                 ...col,
                 auto_sync: override.auto_sync,
                 sync_state: override.sync_state,
                 ...(override.downloaded !== undefined ? { downloaded: override.downloaded } : {}),
                 ...(override.total !== undefined ? { total: override.total } : {})
               };
-              const after = `{sync_state:${modified.sync_state}, downloaded:${modified.downloaded}, total:${modified.total}}`;
-              console.log(`[REFRESH] 🔧 ${col.name}: BEFORE=${before}, AFTER=${after}`);
-              return modified;
             }
             return col;
           })
         };
-        console.log(`[REFRESH] Final data being set to UI:`, JSON.stringify(modifiedResult.collections, null, 2));
         setStatus(modifiedResult);
       } else {
-        console.log(`[REFRESH] No overrides, using raw backend result`);
-        console.log(`[REFRESH] Final data being set to UI:`, JSON.stringify(result.collections, null, 2));
         setStatus(result);
       }
     } catch (error) {
@@ -446,23 +569,14 @@ function Content() {
   };
 
   useEffect(() => {
-    getConfig().then((cfg: any) => setConfigured(cfg?.configured ?? false)).catch(() => setConfigured(false));
-    refreshStatus();
+    checkConfigured().then(refreshStatus);
     startPolling();
     return () => stopPolling();
   }, []);
 
-  const handleStart = async () => {
+  const handleReconnect = async () => {
     setLoading(true);
-    await startService();
-    setTimeout(refreshStatus, 1000); // Refresh after 1 second
-    setLoading(false);
-  };
-
-  const handleStop = async () => {
-    setLoading(true);
-    await stopService();
-    setTimeout(refreshStatus, 1000);
+    setTimeout(refreshStatus, 1500);
     setLoading(false);
   };
 
@@ -516,13 +630,16 @@ function Content() {
       console.log(`[TOGGLE] Calling backend toggleCollectionSync...`);
       const result = await toggleCollectionSync(collectionName, enabled);
       console.log(`[TOGGLE] Backend returned:`, result);
-      // Force immediate refresh to get the fresh status from backend
-      // The backend immediately updates status.json, so we should read it ASAP
+      if (!enabled) {
+        // Fire ROM deletion in background — don't block the UI refresh on it
+        deleteCollectionRoms(collectionName).catch((e: any) =>
+          console.error('[TOGGLE] ROM deletion failed:', e)
+        );
+      }
       console.log(`[TOGGLE] Forcing immediate refresh after backend call`);
       await refreshStatus();
     } catch (error) {
       console.error('[TOGGLE] Failed to toggle collection sync:', error);
-      // Clear override on error and refresh
       optimisticOverrides.current.delete(collectionName);
       refreshStatus();
     } finally {
@@ -530,49 +647,22 @@ function Content() {
     }
   };
 
-  const handleDeleteCollection = async (collectionName: string) => {
-    console.log(`[DELETE] Starting deletion for ${collectionName}`);
-    setTogglingCollection(collectionName);
-
-    // Store optimistic override
-    optimisticOverrides.current.set(collectionName, {
-      auto_sync: false,
-      sync_state: 'not_synced'
-    });
-
-    // Update UI immediately - only change auto_sync
-    setStatus((prevStatus: any) => {
-      const updatedCollections = prevStatus.collections.map((col: any) =>
-        col.name === collectionName
-          ? { ...col, auto_sync: false }
-          : col
-      );
-      return {
-        ...prevStatus,
-        collections: updatedCollections,
-        actively_syncing_count: updatedCollections.filter((c: any) => c.auto_sync).length
-      };
-    });
-
-    try {
-      const result = await deleteCollectionRoms(collectionName);
-      console.log(`[DELETE] Backend returned:`, result);
-      // Override will auto-clear when backend data matches (via refreshStatus)
-    } catch (error) {
-      console.error('[DELETE] Failed to delete collection ROMs:', error);
-      optimisticOverrides.current.delete(collectionName);
-      refreshStatus();
-    } finally {
-      setTogglingCollection(null);
-    }
-  };
+  if (configured === null) {
+    return (
+      <PanelSection>
+        <PanelSectionRow>
+          <div style={{ color: '#9ca3af', fontSize: '0.9em' }}>Loading…</div>
+        </PanelSectionRow>
+      </PanelSection>
+    );
+  }
 
   if (configured === false) {
     return (
       <PanelSection title="RomM Sync">
         <PanelSectionRow>
-          <div style={{ color: '#fbbf24', fontSize: '0.9em', marginBottom: '8px' }}>
-            ⚙️ RomM is not configured yet. Set up your server connection to get started.
+          <div style={{ fontSize: '0.85em', color: '#d1d5db', lineHeight: '1.5' }}>
+            Connect your Steam Deck to your RomM server to automatically sync ROMs and save files.
           </div>
         </PanelSectionRow>
         <PanelSectionRow>
@@ -585,7 +675,7 @@ function Content() {
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
               <FaCog size={14} />
-              <span>Set Up RomM Connection</span>
+              <span>Get Started</span>
             </div>
           </ButtonItem>
         </PanelSectionRow>
@@ -594,20 +684,54 @@ function Content() {
   }
 
   return (
-    <PanelSection title="RomM Sync Status">
-      <PanelSectionRow>
-        <div style={{ display: 'flex', alignItems: 'center' }}>
-          <span>{status.message}</span>
-        </div>
-      </PanelSectionRow>
+    <PanelSection>
+      <div style={{ paddingLeft: 0, paddingTop: '8px', paddingBottom: '8px', fontSize: '0.9em', color: '#b0b0b0' }}>
+        Status:
+      </div>
+      <div style={{ paddingLeft: 0, paddingTop: '8px', paddingBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85em' }}>
+        <div style={{
+          width: '8px',
+          height: '8px',
+          borderRadius: '50%',
+          backgroundColor: getStatusColor()
+        }} />
+        <span>{status.message.replace(', ', ' - ')}</span>
+      </div>
+
+      {status.status === 'running' && status.details?.last_update && (
+        <>
+          <PanelSectionRow>
+            <div style={{ fontSize: '0.82em', color: '#fbbf24', lineHeight: '1.4' }}>
+              Not connected to RomM. Check your connection settings or retry.
+            </div>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <ButtonItem layout="below" onClick={handleReconnect} disabled={loading}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <FaSync size={12} />
+                <span>Retry Connection</span>
+              </div>
+            </ButtonItem>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              onClick={() => { Navigation.Navigate("/romm-sync-config"); Navigation.CloseSideMenus(); }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <FaCog size={12} />
+                <span>Connection Settings</span>
+              </div>
+            </ButtonItem>
+          </PanelSectionRow>
+        </>
+      )}
 
       {status.collections && status.collections.length > 0 && (
         <>
-          <PanelSectionRow>
-            <div style={{ fontSize: '0.9em', color: '#b0b0b0' }}>
-              Collections:
-            </div>
-          </PanelSectionRow>
+          <div style={{ paddingLeft: 0, paddingTop: '8px', paddingBottom: '8px', fontSize: '0.9em', color: '#b0b0b0' }}>
+            Collections:
+          </div>
           {status.collections.map((collection: any, index: number) => {
             // Determine dot color based on sync state
             const getDotColor = () => {
@@ -619,6 +743,15 @@ function Content() {
                 default: return '#6b7280';           // gray - unknown
               }
             };
+
+            const isSyncing = collection.auto_sync && collection.sync_state === 'syncing';
+            const hasCount = collection.downloaded !== undefined && collection.total !== undefined && collection.total > 0;
+            // Use downloaded_pct (0–100) when available — it's computed on the backend with full
+            // float precision and doesn't lose significant digits for large files in large collections.
+            // Fall back to the ratio for the rare case where it's missing.
+            const pct = isSyncing && collection.downloaded_pct !== undefined
+              ? Math.round(collection.downloaded_pct)
+              : (hasCount ? Math.round((collection.downloaded / collection.total) * 100) : 0);
 
             return (
               <div key={index}>
@@ -632,138 +765,103 @@ function Content() {
                           borderRadius: '50%',
                           backgroundColor: getDotColor()
                         }} />
-                        <span>
-                          {collection.name}
-                          {collection.auto_sync && collection.sync_state === 'syncing' ? ' - Syncing' : ''}
-                        </span>
+                        <span>{collection.name}</span>
                       </div>
                     }
                     description={(() => {
-                      console.log(`[RENDER] ${collection.name}: auto_sync=${collection.auto_sync}, downloaded=${collection.downloaded}, total=${collection.total}, sync_state=${collection.sync_state}`);
                       if (collection.auto_sync) {
-                        // Only show counts if total > 0 (valid data from server)
-                        if (collection.downloaded !== undefined && collection.total !== undefined && collection.total > 0) {
-                          return `${collection.downloaded} / ${collection.total} ROMs`;
-                        }
-                        return "Auto-sync enabled";
+                        return hasCount ? `${Math.floor(collection.downloaded)} / ${collection.total} ROMs` : "Auto-sync enabled";
                       }
-                      return "Auto-sync disabled";
+                      return hasCount ? `${Math.floor(collection.downloaded)} / ${collection.total} ROMs locally` : "Auto-sync disabled";
                     })()}
                     checked={collection.auto_sync}
                     onChange={(value: boolean) => handleToggleCollection(collection.name, value)}
                     disabled={togglingCollection === collection.name}
                   />
                 </PanelSectionRow>
-                <PanelSectionRow>
-                  <ButtonItem
-                    layout="below"
-                    onClick={() => handleDeleteCollection(collection.name)}
-                    disabled={togglingCollection === collection.name}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <FaTrash size={12} />
-                      <span>Delete ROMs</span>
+                {isSyncing && hasCount && (
+                  <PanelSectionRow>
+                    <div style={{ width: '100%', padding: '0 2px 6px' }}>
+                      {/* Progress bar */}
+                      <div style={{
+                        width: '100%',
+                        height: '4px',
+                        background: 'rgba(255,255,255,0.12)',
+                        borderRadius: '2px',
+                        overflow: 'hidden',
+                        marginBottom: '5px',
+                      }}>
+                        <div style={{
+                          width: `${pct}%`,
+                          height: '100%',
+                          background: '#fb923c',
+                          borderRadius: '2px',
+                          transition: 'width 0.4s ease',
+                        }} />
+                      </div>
+                      {/* Percentage + speed row */}
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#9ca3af' }}>
+                        <span>{pct}%</span>
+                        {collection.speed > 0 && (
+                          <span>{formatSpeed(collection.speed)}</span>
+                        )}
+                      </div>
                     </div>
-                  </ButtonItem>
-                </PanelSectionRow>
+                  </PanelSectionRow>
+                )}
               </div>
             );
           })}
         </>
       )}
-      <PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={refreshStatus}
-          disabled={loading}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <span>🔄</span>
-            <span>Refresh</span>
-          </div>
-        </ButtonItem>
-      </PanelSectionRow>
-      {status.status === 'stopped' && (
-        <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            onClick={handleStart}
-            disabled={loading}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <span>▶️</span>
-              <span>Start Service</span>
-            </div>
-          </ButtonItem>
-        </PanelSectionRow>
-      )}
-      {status.status !== 'stopped' && status.status !== 'error' && (
-        <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            onClick={handleStop}
-            disabled={loading}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <span>⏹️</span>
-              <span>Stop Service</span>
-            </div>
-          </ButtonItem>
-        </PanelSectionRow>
-      )}
-
-      <PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={() => {
-            Navigation.Navigate("/romm-sync-settings");
-            Navigation.CloseSideMenus();
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <FaCog size={14} />
-            <span>Settings</span>
-          </div>
-        </ButtonItem>
-      </PanelSectionRow>
     </PanelSection>
   );
 }
 
 function TitleView() {
-  const [status, setStatus] = useState<any>({ status: 'loading' });
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
-  useEffect(() => {
-    const fetchStatus = async () => {
-      const result = await getServiceStatus();
-      setStatus(result);
-    };
-    fetchStatus();
-    const interval = setInterval(fetchStatus, 5000);
-    return () => clearInterval(interval);
-  }, []);
-
-  // Status dot colors
-  const getStatusColor = () => {
-    switch (status.status) {
-      case 'connected': return '#4ade80'; // green
-      case 'running': return '#fbbf24'; // yellow
-      case 'service_only': return '#60a5fa'; // blue
-      case 'stopped': return '#f87171'; // red
-      case 'error': return '#f87171'; // red
-      default: return '#9ca3af'; // gray
+  const handleRefresh = async () => {
+    if (isRefreshing) return;
+    setIsRefreshing(true);
+    try {
+      await getServiceStatus();
+      // Keep spinning for at least 500ms for visual feedback
+      setTimeout(() => setIsRefreshing(false), 500);
+    } catch (error) {
+      console.error('Failed to refresh status:', error);
+      setIsRefreshing(false);
     }
   };
 
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-      <div style={{
-        width: '8px',
-        height: '8px',
-        borderRadius: '50%',
-        backgroundColor: getStatusColor()
-      }} />
-      <span>RomM Sync</span>
+    <div style={{ display: 'flex', alignItems: 'center', width: '100%' }}>
+      <div style={{ marginRight: 'auto', flex: 0.9 }}>RomM Sync</div>
+      <DialogButton
+        style={{ height: '28px', width: '28px', minWidth: 0, padding: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', marginRight: '4px' }}
+        onClick={handleRefresh}
+        disabled={isRefreshing}
+      >
+        <FaSync style={{
+          display: 'block',
+          animation: isRefreshing ? 'spin 1s linear infinite' : 'none'
+        }} />
+      </DialogButton>
+      <DialogButton
+        style={{ height: '28px', width: '28px', minWidth: 0, padding: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+        onClick={() => {
+          Navigation.Navigate("/romm-sync-settings");
+          Navigation.CloseSideMenus();
+        }}
+      >
+        <BsGearFill style={{ display: 'block' }} />
+      </DialogButton>
+      <style>{`
+        @keyframes spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+      `}</style>
     </div>
   );
 }
