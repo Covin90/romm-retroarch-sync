@@ -4,9 +4,11 @@
   "description": "RomM Sync Service Monitor",
   "type": "module",
   "scripts": {
-    "prebuild": "cp -f --remove-destination ../src/sync_core.py py_modules/sync_core.py || true",
     "build": "rollup -c",
     "watch": "rollup -c -w",
+    "package": "cp -f --remove-destination ../src/sync_core.py py_modules/sync_core.py && rollup -c",
+    "postpackage": "rm -f py_modules/sync_core.py && ln -s ../../src/sync_core.py py_modules/sync_core.py",
+    "restore-symlink": "rm -f py_modules/sync_core.py && ln -s ../../src/sync_core.py py_modules/sync_core.py",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {

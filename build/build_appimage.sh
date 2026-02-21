@@ -105,8 +105,8 @@ pip3 install --target="$APPDIR/usr/lib/python3/dist-packages" \
 
 echo "✅ Dependencies installed with conflict avoidance"
 
-# Bundle GI typelibs for Steam Deck compatibility (but NOT libadwaita libraries)
-echo "📦 Bundling GI typelibs for Steam Deck..."
+# Bundle GI typelibs for SteamOS compatibility (but NOT libadwaita libraries)
+echo "📦 Bundling GI typelibs for SteamOS..."
 
 # Create directories for GObject introspection
 mkdir -p "$APPDIR/usr/lib/girepository-1.0"

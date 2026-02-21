@@ -15,14 +15,16 @@ import { BsGearFill } from "react-icons/bs";
 
 // Call backend methods
 const getServiceStatus = callable<[], any>("get_service_status");
+const refreshFromRomm = callable<[boolean], any>("refresh_from_romm");
 const toggleCollectionSync = callable<[string, boolean], boolean>("toggle_collection_sync");
 const deleteCollectionRoms = callable<[string], boolean>("delete_collection_roms");
 const getLoggingEnabled = callable<[], boolean>("get_logging_enabled");
 const updateLoggingEnabled = callable<[boolean], boolean>("set_logging_enabled");
 const getConfig = callable<[], any>("get_config");
 const resetAllSettings = callable<[], any>("reset_all_settings");
-const saveConfig = callable<[string, string, string, string, string, string], any>("save_config");
+const saveConfig = callable<[string, string, string, string, string, string, string], any>("save_config");
 const testRommConnection = callable<[string, string, string], any>("test_connection");
+const enableRetroArchSetting = callable<[string], any>("enable_retroarch_setting");
 
 const formatSpeed = (bytesPerSec: number): string => {
   if (bytesPerSec >= 1024 * 1024) return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`;
@@ -136,8 +138,9 @@ function ConfigPage() {
   const [password, setPassword] = useState('');
   const [romDir, setRomDir] = useState('');
   const [saveDir, setSaveDir] = useState('');
+  const [biosDir, setBiosDir] = useState('');
   const [deviceName, setDeviceName] = useState('');
-  const [deviceNameDefault, setDeviceNameDefault] = useState('Steam Deck');
+  const [deviceNameDefault, setDeviceNameDefault] = useState('SteamOS');
   const [hasPassword, setHasPassword] = useState(false);
   const [retrodeckDetected, setRetrodeckDetected] = useState(false);
   const [isFirstTime, setIsFirstTime] = useState(false);
@@ -154,8 +157,9 @@ function ConfigPage() {
         setUsername(config.username || '');
         setRomDir(config.rom_directory || '');
         setSaveDir(config.save_directory || '');
+        setBiosDir(config.bios_directory || '');
         setDeviceName(config.device_name || '');
-        setDeviceNameDefault(config.device_name_default || 'Steam Deck');
+        setDeviceNameDefault(config.device_name_default || 'SteamOS');
         setHasPassword(config.has_password || false);
         setRetrodeckDetected(config.retrodeck_detected || false);
         setIsFirstTime(!config.configured);
@@ -185,7 +189,7 @@ function ConfigPage() {
     setSaving(true);
     try {
       const effectiveDeviceName = deviceName.trim() || deviceNameDefault;
-      const result = await saveConfig(url.trim(), username.trim(), password, romDir.trim(), saveDir.trim(), effectiveDeviceName);
+      const result = await saveConfig(url.trim(), username.trim(), password, romDir.trim(), saveDir.trim(), effectiveDeviceName, biosDir.trim());
       if (result.success) {
         toaster.toast({ title: 'RomM Sync', body: 'Settings saved — reconnecting...', duration: 3000 });
         Navigation.NavigateBack();
@@ -213,7 +217,7 @@ function ConfigPage() {
         <div style={{ padding: '16px 16px 4px' }}>
           <div className={staticClasses.Title} style={{ marginBottom: '8px' }}>Welcome to RomM Sync</div>
           <div style={{ fontSize: '13px', color: '#d1d5db', lineHeight: '1.6' }}>
-            Connect your Steam Deck to your RomM server to automatically sync ROMs and save files across devices.
+            Connect your SteamOS device to your RomM server to automatically sync ROMs and save files across devices.
           </div>
         </div>
       ) : (
@@ -318,6 +322,24 @@ function ConfigPage() {
             try {
               const res = await openFilePicker(FileSelectionType.FOLDER, saveDir || '/home/deck', false, true);
               if (res?.realpath) setSaveDir(res.realpath);
+            } catch {}
+          }}>
+            Browse…
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <TextField
+            label="BIOS Directory"
+            value={biosDir}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setBiosDir(e.target.value)}
+            description="Where BIOS/firmware files are stored"
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={async () => {
+            try {
+              const res = await openFilePicker(FileSelectionType.FOLDER, biosDir || '/home/deck', false, true);
+              if (res?.realpath) setBiosDir(res.realpath);
             } catch {}
           }}>
             Browse…
@@ -472,10 +494,12 @@ function Content() {
   const [status, setStatus] = useState<any>({ status: 'loading', message: 'Loading...' });
   const [loading, setLoading] = useState(false);
   const [togglingCollection, setTogglingCollection] = useState<string | null>(null);
+  const [enablingWarning, setEnablingWarning] = useState<string | null>(null);
   const [configured, setConfigured] = useState<boolean | null>(null);
   const configuredRef = useRef<boolean | null>(null);
   const intervalRef = useRef<any>(null);
   const optimisticOverrides = useRef<Map<string, {auto_sync: boolean, sync_state: string, downloaded?: number, total?: number}>>(new Map());
+  const [biosExpanded, setBiosExpanded] = useState(false);
 
   const getStatusColor = () => {
     switch (status.status) {
@@ -647,6 +671,39 @@ function Content() {
     }
   };
 
+  const handleEnableWarning = async (warningType: string) => {
+    if (enablingWarning) return; // Already processing
+
+    setEnablingWarning(warningType);
+    try {
+      const result = await enableRetroArchSetting(warningType);
+      if (result?.success) {
+        toaster.toast({
+          title: '✅ Setting Enabled',
+          body: result.message,
+          duration: 4000,
+        });
+        // Refresh status to clear the warning
+        await refreshStatus();
+      } else {
+        toaster.toast({
+          title: '❌ Failed',
+          body: result?.message || 'Could not enable setting',
+          duration: 4000,
+        });
+      }
+    } catch (error) {
+      console.error('[ENABLE_WARNING] Error:', error);
+      toaster.toast({
+        title: '❌ Error',
+        body: 'Failed to enable setting',
+        duration: 4000,
+      });
+    } finally {
+      setEnablingWarning(null);
+    }
+  };
+
   if (configured === null) {
     return (
       <PanelSection>
@@ -662,7 +719,7 @@ function Content() {
       <PanelSection title="RomM Sync">
         <PanelSectionRow>
           <div style={{ fontSize: '0.85em', color: '#d1d5db', lineHeight: '1.5' }}>
-            Connect your Steam Deck to your RomM server to automatically sync ROMs and save files.
+            Connect your SteamOS device to your RomM server to automatically sync ROMs and save files.
           </div>
         </PanelSectionRow>
         <PanelSectionRow>
@@ -698,6 +755,54 @@ function Content() {
         <span>{status.message.replace(', ', ' - ')}</span>
       </div>
 
+      {/* RetroArch configuration warnings */}
+      {status.details?.warnings && status.details.warnings.length > 0 && (
+        <>
+          {status.details.warnings.map((warning: any, index: number) => {
+            const isEnabling = enablingWarning === warning.type;
+            return (
+              <div
+                key={index}
+                onClick={() => !isEnabling && handleEnableWarning(warning.type)}
+                style={{
+                  margin: '8px 0 4px',
+                  padding: '10px 14px',
+                  background: 'rgba(251, 191, 36, 0.12)',
+                  border: '1px solid rgba(251, 191, 36, 0.4)',
+                  borderRadius: '6px',
+                  fontSize: '13px',
+                  color: '#fbbf24',
+                  lineHeight: '1.5',
+                  cursor: isEnabling ? 'wait' : 'pointer',
+                  opacity: isEnabling ? 0.6 : 1,
+                  transition: 'opacity 0.2s, background 0.2s',
+                }}
+                onMouseEnter={(e) => {
+                  if (!isEnabling) {
+                    e.currentTarget.style.background = 'rgba(251, 191, 36, 0.2)';
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = 'rgba(251, 191, 36, 0.12)';
+                }}
+              >
+                <strong>⚠️ RetroArch Setting:</strong> {warning.message}
+                {!isEnabling && (
+                  <div style={{ fontSize: '11px', marginTop: '4px', opacity: 0.8 }}>
+                    Click to enable
+                  </div>
+                )}
+                {isEnabling && (
+                  <div style={{ fontSize: '11px', marginTop: '4px' }}>
+                    Enabling...
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </>
+      )}
+
       {status.status === 'running' && status.details?.last_update && (
         <>
           <PanelSectionRow>
@@ -724,6 +829,109 @@ function Content() {
               </div>
             </ButtonItem>
           </PanelSectionRow>
+        </>
+      )}
+
+      {/* BIOS Status Section - always show when there are platforms with BIOS requirements */}
+      {status.bios_status && status.bios_status.total_platforms > 0 && (
+        status.bios_status.downloading_count > 0 ||
+        status.bios_status.failed_count > 0 ||
+        status.bios_status.platforms_ready < status.bios_status.total_platforms
+      ) && (
+        <>
+          {/* BIOS Container - includes both summary and expanded list */}
+          <div
+            style={{
+              margin: '4px 0',
+              padding: '8px 12px',
+              background: status.bios_status.platforms_ready === status.bios_status.total_platforms
+                ? 'rgba(74, 222, 128, 0.12)'
+                : 'rgba(251, 191, 36, 0.12)',
+              border: status.bios_status.platforms_ready === status.bios_status.total_platforms
+                ? '1px solid rgba(74, 222, 128, 0.4)'
+                : '1px solid rgba(251, 191, 36, 0.4)',
+              borderRadius: '6px',
+              fontSize: '13px',
+              color: status.bios_status.platforms_ready === status.bios_status.total_platforms
+                ? '#4ade80'
+                : '#fbbf24',
+              lineHeight: '1.5',
+            }}
+          >
+            {/* Summary header - clickable */}
+            <div
+              onClick={() => setBiosExpanded(!biosExpanded)}
+              style={{
+                cursor: 'pointer',
+              }}
+            >
+              {status.bios_status.platforms_ready === status.bios_status.total_platforms ? '✅' : '⚠️'} {status.bios_status.platforms_ready}/{status.bios_status.total_platforms} platforms ready
+              <div style={{ fontSize: '11px', marginTop: '4px', opacity: 0.8 }}>
+                {biosExpanded ? '▼ Click to collapse' : '▶ Click to expand'}
+              </div>
+            </div>
+
+            {/* Expanded platform list - inside container */}
+            {biosExpanded && status.bios_status.platforms && (
+              <div style={{ marginTop: '12px', paddingTop: '8px', borderTop: '1px solid rgba(255, 255, 255, 0.1)' }}>
+                {Object.entries(status.bios_status.platforms).map(([slug, platform]: [string, any]) => {
+                  const isDownloading = status.bios_status.downloading?.includes(slug);
+                  const hasFailed = status.bios_status.failures?.[slug];
+                  let icon = '✅';
+                  let color = '#4ade80';
+                  let statusText = 'Ready';
+
+                  if (isDownloading) {
+                    icon = '📥';
+                    color = '#60a5fa';
+                    statusText = 'Downloading...';
+                  } else if (hasFailed && hasFailed !== 'unavailable_on_server') {
+                    icon = '❌';
+                    color = '#f87171';
+                    statusText = 'Failed';
+                  } else if (hasFailed === 'unavailable_on_server' || platform.present === 0) {
+                    // Zero BIOS files - needs attention (lenient logic)
+                    icon = '⚠️';
+                    color = '#fbbf24';
+                    statusText = 'Missing';
+                  } else if (platform.present > 0) {
+                    // Has at least one BIOS - functional (lenient logic)
+                    icon = '✅';
+                    color = '#4ade80';
+                    // Show detail: "Ready (2/3)" if partial, "Ready" if complete
+                    if (platform.missing > 0) {
+                      statusText = `Ready (${platform.present}/${platform.total_required})`;
+                    } else {
+                      statusText = `Ready (${platform.present})`;
+                    }
+                  }
+
+                  return (
+                    <div
+                      key={slug}
+                      style={{
+                        padding: '6px 10px',
+                        margin: '4px 0',
+                        background: 'rgba(0, 0, 0, 0.2)',
+                        borderRadius: '4px',
+                        fontSize: '12px',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span>{icon}</span>
+                        <span>{platform.name}</span>
+                      </div>
+                      <span style={{ color, fontSize: '11px' }}>{statusText}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
         </>
       )}
 
@@ -770,9 +978,9 @@ function Content() {
                     }
                     description={(() => {
                       if (collection.auto_sync) {
-                        return hasCount ? `${Math.floor(collection.downloaded)} / ${collection.total} ROMs` : "Auto-sync enabled";
+                        return hasCount ? `${Math.floor(collection.downloaded)} / ${collection.total} ROMs` : "Fetching...";
                       }
-                      return hasCount ? `${Math.floor(collection.downloaded)} / ${collection.total} ROMs locally` : "Auto-sync disabled";
+                      return hasCount ? `${Math.floor(collection.downloaded)} / ${collection.total} ROMs locally` : "Fetching...";
                     })()}
                     checked={collection.auto_sync}
                     onChange={(value: boolean) => handleToggleCollection(collection.name, value)}
@@ -825,11 +1033,17 @@ function TitleView() {
     if (isRefreshing) return;
     setIsRefreshing(true);
     try {
-      await getServiceStatus();
+      // Call refresh_from_romm to fetch fresh data from server
+      const result = await refreshFromRomm(false); // false = incremental refresh
+      if (result?.success) {
+        console.log('[REFRESH] Successfully refreshed from RomM:', result.message);
+      } else {
+        console.warn('[REFRESH] Refresh returned non-success:', result?.message);
+      }
       // Keep spinning for at least 500ms for visual feedback
       setTimeout(() => setIsRefreshing(false), 500);
     } catch (error) {
-      console.error('Failed to refresh status:', error);
+      console.error('[REFRESH] Failed to refresh from RomM:', error);
       setIsRefreshing(false);
     }
   };

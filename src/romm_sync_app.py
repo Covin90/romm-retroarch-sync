@@ -17,6 +17,7 @@ import html
 import webbrowser
 import base64
 import datetime
+from datetime import timezone
 import psutil
 import stat
 import re
@@ -34,7 +35,7 @@ os.environ['SSL_CERT_FILE'] = '/etc/ssl/certs/ca-certificates.crt'
 
 gi.require_version('Gtk', '4.0')
 
-# Try to load Adw, fallback to Gtk if not available (e.g., on Steam Deck)
+# Try to load Adw, fallback to Gtk if not available (e.g., on SteamOS)
 try:
     gi.require_version('Adw', '1')
     from gi.repository import Gtk, Adw, GLib, Gio, GObject
@@ -5933,7 +5934,12 @@ class SyncWindow(Gtk.ApplicationWindow):
         # Progress tracking
         self.download_queue = []
         self.available_games = []  # Initialize games list
-        
+
+        # Timestamps for efficient polling with updated_after parameter
+        self._last_full_fetch_time = None  # ISO 8601 datetime of last full data fetch
+        self._polling_thread = None  # Background polling thread
+        self._stop_polling = threading.Event()  # Event to stop polling thread
+
         self.download_progress = {}
         self._last_progress_update = {}  # rom_id -> timestamp
         self._progress_update_interval = 0.1  # Update UI every 100ms max
@@ -6011,11 +6017,6 @@ class SyncWindow(Gtk.ApplicationWindow):
 
         # Schedule cleanup check after initial load
         GLib.timeout_add(2000, setup_periodic_cleanup)
-
-        # Initialize status file for Decky plugin
-        self.status_file = Path.home() / '.config' / 'romm-retroarch-sync' / 'status.json'
-        self.update_status_file()
-
         # ADD AUTO-CONNECT LOGIC:
         GLib.timeout_add(50, self.try_auto_connect)
 
@@ -7870,8 +7871,9 @@ class SyncWindow(Gtk.ApplicationWindow):
                     # Restore collection auto-sync if it was enabled
                     if hasattr(self, 'library_section'):
                         self.library_section.restore_collection_auto_sync_on_connect()
-                    
-                    self.update_status_file()
+
+                    # Start background polling for new games
+                    self._start_background_polling()
 
                     total_time = time.time() - start_time
                     self.log_message(f"🎉 Total connection time: {total_time:.2f}s")
@@ -7903,12 +7905,13 @@ class SyncWindow(Gtk.ApplicationWindow):
             self.autosync_enable_switch.set_active(False)
             self.autosync_status_row.set_subtitle("Disabled - not connected to RomM")
             self.update_status_dot(self.autosync_status_dot, 'red')
-        
+
+        # Stop background polling
+        self._stop_background_polling()
+
         self.update_connection_ui("disconnected")
         self.log_message("Disconnected from RomM")
 
-        self.update_status_file()
-        
         # Switch to local-only view immediately
         self.handle_offline_mode()
 
@@ -7954,181 +7957,6 @@ class SyncWindow(Gtk.ApplicationWindow):
         elif "🔴" in message:
             self.update_status_dot(self.connection_status_dot, 'red')     
 
-    def update_status_file(self):
-            """Update status file for Decky plugin"""
-            # Get all collections from RomM with their auto-sync status
-            collections_list = []
-            actively_syncing = set()
-            if hasattr(self, 'game_sync_daemon') and self.game_sync_daemon:
-                actively_syncing = getattr(self.game_sync_daemon, 'actively_syncing_collections', set())
-
-            # Fetch all collections if connected
-            if self.romm_client and self.romm_client.authenticated:
-                try:
-                    all_collections = self.romm_client.get_collections()
-                    download_dir = Path(self.settings.get('Download', 'rom_directory'))
-
-                    for collection in all_collections:
-                        collection_name = collection.get('name', 'Unknown')
-                        collection_id = collection.get('id')
-                        is_auto_sync = collection_name in actively_syncing
-
-                        # Determine sync state: synced, syncing, or not_synced
-                        sync_state = 'not_synced'
-                        downloaded_roms = 0
-                        total_roms = 0
-
-                        if is_auto_sync:
-                            try:
-                                # Get collection ROMs
-                                collection_roms = self.romm_client.get_collection_roms(collection_id)
-                                total_roms = len(collection_roms)
-                                downloaded_roms = 0
-
-                                # Count downloaded ROMs
-                                for rom in collection_roms:
-                                    platform_slug = rom.get('platform_slug', 'Unknown')
-                                    file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
-                                    platform_dir = download_dir / platform_slug
-                                    local_path = platform_dir / file_name
-                                    if self.is_path_validly_downloaded(local_path):
-                                        downloaded_roms += 1
-
-                                # Determine state
-                                if total_roms == 0:
-                                    sync_state = 'synced'
-                                elif downloaded_roms == total_roms:
-                                    sync_state = 'synced'
-                                else:
-                                    sync_state = 'syncing'
-
-                            except Exception as e:
-                                print(f"Failed to check sync state for {collection_name}: {e}")
-                                sync_state = 'syncing'
-
-                        collection_data = {
-                            'name': collection_name,
-                            'id': collection_id,
-                            'auto_sync': is_auto_sync,
-                            'sync_state': sync_state
-                        }
-                        # Always include ROM count if auto_sync is enabled
-                        if is_auto_sync and total_roms > 0:
-                            collection_data['downloaded'] = downloaded_roms
-                            collection_data['total'] = total_roms
-                        collections_list.append(collection_data)
-                except Exception as e:
-                    print(f"Failed to fetch collections for status: {e}")
-
-            status = {
-                'running': True,
-                'connected': bool(self.romm_client and self.romm_client.authenticated),
-                'auto_sync': getattr(self, 'autosync_enable_switch', None) and self.autosync_enable_switch.get_active(),
-                'game_count': len(getattr(self, 'available_games', [])),
-                'collections': collections_list,
-                'collection_count': len(collections_list),
-                'actively_syncing_count': len(actively_syncing),
-                'last_update': time.time()
-            }
-
-            try:
-                self.status_file = getattr(self, 'status_file', Path.home() / '.config' / 'romm-retroarch-sync' / 'status.json')
-                self.status_file.parent.mkdir(parents=True, exist_ok=True)
-                with open(self.status_file, 'w') as f:
-                    json.dump(status, f)
-            except:
-                pass
-
-    def create_simple_decky_plugin(self):
-        """Create a simple, debug-friendly Decky plugin"""
-        try:
-            plugin_dest = Path.home() / 'homebrew' / 'plugins' / 'romm-sync-status'
-            plugin_dest.mkdir(parents=True, exist_ok=True)
-            
-            # Create a very simple plugin.json
-            plugin_json = {
-                "name": "RomM Sync Status",
-                "author": "RomM-RetroArch-Sync",
-                "flags": ["_root"],
-                "publish": {
-                    "discord_id": "0"
-                },
-                "tags": ["utility"]
-            }
-            
-            with open(plugin_dest / 'plugin.json', 'w') as f:
-                json.dump(plugin_json, f, indent=2)
-            
-            # Create a simple main.py with extensive logging
-            main_py_content = '''import os
-    import json
-    import logging
-    from pathlib import Path
-
-    # Set up logging to file
-    log_file = Path.home() / '.config' / 'romm-retroarch-sync' / 'decky_debug.log'
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-
-    logging.basicConfig(
-        filename=str(log_file),
-        level=logging.DEBUG,
-        format='%(asctime)s - %(levelname)s - %(message)s'
-    )
-
-    class Plugin:
-        async def _main(self):
-            logging.info("RomM Sync plugin starting...")
-            try:
-                status_file = Path.home() / '.config' / 'romm-retroarch-sync' / 'status.json'
-                logging.info(f"Looking for status file: {status_file}")
-                
-                if status_file.exists():
-                    with open(status_file, 'r') as f:
-                        status = json.load(f)
-                    logging.info(f"Status loaded: {status}")
-                    return "RomM Sync: Connected" if status.get('connected') else "RomM Sync: Disconnected"
-                else:
-                    logging.warning("Status file not found")
-                    return "RomM Sync: Unknown"
-                    
-            except Exception as e:
-                logging.error(f"Plugin error: {e}")
-                return f"RomM Sync: Error - {e}"
-        
-        async def get_status(self):
-            return await self._main()
-    '''
-            
-            with open(plugin_dest / 'main.py', 'w') as f:
-                f.write(main_py_content)
-            
-            # Create package.json
-            package_json = {
-                "name": "romm-sync-status",
-                "version": "1.3.2",
-                "description": "RomM Sync Status Display",
-                "main": "main.py",
-                "scripts": {},
-                "dependencies": {}
-            }
-            
-            with open(plugin_dest / 'package.json', 'w') as f:
-                json.dump(package_json, f, indent=2)
-            
-            # Set proper permissions
-            for root, dirs, files in os.walk(plugin_dest):
-                for d in dirs:
-                    os.chmod(os.path.join(root, d), 0o755)
-                for f in files:
-                    os.chmod(os.path.join(root, f), 0o644)
-            
-            self.log_message("📱 Simple Decky plugin created with debug logging")
-            self.log_message(f"📝 Check logs at: ~/.config/romm-retroarch-sync/decky_debug.log")
-            return True
-            
-        except Exception as e:
-            self.log_message(f"❌ Simple plugin creation failed: {e}")
-            return False
 
     def create_library_section(self):
         """Create the enhanced library section with tree view (moved from quick actions)"""
@@ -8152,19 +7980,16 @@ class SyncWindow(Gtk.ApplicationWindow):
                 self.update_status_dot(self.autosync_status_dot, 'green')
                 
                 self.log_message("🔄 Auto-sync enabled")
-                self.update_status_file()
             else:
                 self.log_message("⚠️ Please connect to RomM before enabling auto-sync")
                 self.autosync_status_row.set_subtitle("Disabled - not connected to RomM")
                 self.update_status_dot(self.autosync_status_dot, 'red')
                 switch_row.set_active(False)
-                self.update_status_file()
         else:
             self.auto_sync.stop_auto_sync()
             self.autosync_status_row.set_subtitle("Disabled")
             self.update_status_dot(self.autosync_status_dot, 'red')
             self.log_message("⏹️ Auto-sync disabled")
-            self.update_status_file()
 
     def get_selected_game(self):
         """Get currently selected game from tree view"""
@@ -8495,7 +8320,7 @@ class SyncWindow(Gtk.ApplicationWindow):
     def log_message(self, message):
         """Add message to log view with buffer limit"""
         
-        # ADD THIS: Also write to file for Steam Deck debugging
+        # ADD THIS: Also write to file for SteamOS debugging
         try:
             log_file = Path.home() / '.config' / 'romm-retroarch-sync' / 'debug.log'
             log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -8763,8 +8588,12 @@ class SyncWindow(Gtk.ApplicationWindow):
         
         self.log_message("RetroArch information updated")
 
-    def refresh_games_list(self):
-        """Smart sync with comprehensive change detection"""
+    def refresh_games_list(self, force_full_refresh=False):
+        """Smart sync with comprehensive change detection
+
+        Args:
+            force_full_refresh: If True, fetch all data regardless of timestamps (default: False)
+        """
         if getattr(self, '_dialog_open', False):
             return
 
@@ -8772,22 +8601,28 @@ class SyncWindow(Gtk.ApplicationWindow):
             if not (self.romm_client and self.romm_client.authenticated):
                 self.handle_offline_mode()
                 return
-                
+
             try:
                 download_dir = Path(self.rom_dir_row.get_text())
                 server_url = self.romm_client.base_url
-                
-                self.log_message(f"🔄 Syncing with server: {server_url}")
-                self.perform_full_sync(download_dir, server_url)
 
-                self.update_status_file()
-                
+                # Determine whether to do incremental or full refresh
+                use_incremental = (
+                    not force_full_refresh and
+                    self._last_full_fetch_time is not None
+                )
+
+                if use_incremental:
+                    self.log_message(f"🔄 Checking for updates from server: {server_url}")
+                    self.perform_incremental_sync(download_dir, server_url)
+                else:
+                    self.log_message(f"🔄 Syncing with server: {server_url}")
+                    self.perform_full_sync(download_dir, server_url)
+
             except Exception as e:
                 self.log_message(f"❌ Sync error: {e}")
                 self.use_cached_data_as_fallback()
 
-                self.update_status_file()
-        
         threading.Thread(target=smart_sync, daemon=True).start()
 
     def perform_full_sync(self, download_dir, server_url):
@@ -8924,7 +8759,10 @@ class SyncWindow(Gtk.ApplicationWindow):
                 GLib.timeout_add(5000, show_connected)  # 3 second delay
 
             GLib.idle_add(final_update)
-            
+
+            # Set timestamp for future incremental updates
+            self._last_full_fetch_time = datetime.datetime.now(timezone.utc).isoformat()
+
             # Save cache in background
             content_hash = hash(str(len(games)) + str(games[0].get('rom_id', '') if games else ''))
             threading.Thread(target=lambda: self.game_cache.save_games_data(games), daemon=True).start()
@@ -8935,6 +8773,183 @@ class SyncWindow(Gtk.ApplicationWindow):
 
         except Exception as e:
             self.log_message(f"Full sync error: {e}")
+
+    def perform_incremental_sync(self, download_dir, server_url):
+        """Perform incremental sync using updated_after parameter"""
+        try:
+            sync_start = time.time()
+
+            # Fetch only ROMs updated since last check
+            updated_after = self._last_full_fetch_time
+            new_roms_data = self.romm_client.get_roms(
+                limit=10000,  # High limit for incremental updates
+                offset=0,
+                updated_after=updated_after
+            )
+
+            if not new_roms_data or len(new_roms_data) != 2:
+                self.log_message("Incremental sync: no data returned")
+                return
+
+            new_roms, _ = new_roms_data
+
+            if not new_roms:
+                self.log_message("✓ No new games found")
+                return
+
+            # Process new/updated ROMs
+            new_count = 0
+            updated_count = 0
+
+            # Create a map for fast lookup by rom_id
+            existing_games_map = {g['rom_id']: g for g in self.available_games if 'rom_id' in g}
+
+            for rom in new_roms:
+                rom_id = rom.get('id')
+                was_existing = rom_id in existing_games_map
+
+                processed_game = self.process_single_rom(rom, download_dir)
+                existing_games_map[rom_id] = processed_game
+
+                if was_existing:
+                    updated_count += 1
+                else:
+                    new_count += 1
+
+            # Update the games list
+            updated_games = list(existing_games_map.values())
+            updated_games = self.library_section.sort_games_consistently(updated_games)
+
+            def update_ui():
+                self.available_games = updated_games
+                if hasattr(self, 'library_section'):
+                    self.library_section.update_games_library(updated_games)
+
+                total_elapsed = time.time() - sync_start
+                if new_count > 0 or updated_count > 0:
+                    msg = f"✓ Found {new_count} new, {updated_count} updated games ({total_elapsed:.2f}s)"
+                    self.log_message(msg)
+                    self.update_connection_ui_with_message(msg)
+
+                    # After 3 seconds, show connected status
+                    def show_connected():
+                        self.update_connection_ui("connected")
+                        return False
+                    GLib.timeout_add(3000, show_connected)
+
+            GLib.idle_add(update_ui)
+
+            # Update timestamp
+            self._last_full_fetch_time = datetime.datetime.now(timezone.utc).isoformat()
+
+            # Save updated cache in background
+            threading.Thread(target=lambda: self.game_cache.save_games_data(updated_games), daemon=True).start()
+
+        except Exception as e:
+            self.log_message(f"Incremental sync error: {e}")
+            # Fall back to full sync on error
+            self.log_message("Falling back to full sync...")
+            self.perform_full_sync(download_dir, server_url)
+
+    def _start_background_polling(self):
+        """Start background polling thread for incremental updates"""
+        if self._polling_thread and self._polling_thread.is_alive():
+            return  # Already running
+
+        self._stop_polling.clear()
+        self._polling_thread = threading.Thread(
+            target=self._polling_loop,
+            daemon=True,
+            name="romm-gtk-polling"
+        )
+        self._polling_thread.start()
+        self.log_message("📡 Background polling started (60s interval)")
+
+    def _stop_background_polling(self):
+        """Stop background polling thread"""
+        if self._polling_thread:
+            self._stop_polling.set()
+            self._polling_thread.join(timeout=2)
+            self._polling_thread = None
+            self.log_message("📡 Background polling stopped")
+
+    def _polling_loop(self):
+        """Background polling loop - checks for new games every 60 seconds"""
+        # Wait a bit before starting to let the initial connection settle
+        time.sleep(10)
+
+        while not self._stop_polling.is_set():
+            # Sleep for 60 seconds (or until stopped)
+            if self._stop_polling.wait(timeout=60):
+                break  # Event was set, exit loop
+
+            try:
+                # Skip if not connected or no timestamp yet
+                if not (self.romm_client and self.romm_client.authenticated):
+                    continue
+                if self._last_full_fetch_time is None:
+                    continue
+
+                # Fetch only ROMs updated since last check
+                download_dir = Path(self.rom_dir_row.get_text())
+                new_roms_data = self.romm_client.get_roms(
+                    limit=1000,
+                    offset=0,
+                    updated_after=self._last_full_fetch_time
+                )
+
+                if not new_roms_data or len(new_roms_data) != 2:
+                    continue
+
+                new_roms, _ = new_roms_data
+
+                if new_roms:
+                    # Process new/updated ROMs
+                    existing_games_map = {g['rom_id']: g for g in self.available_games if 'rom_id' in g}
+                    new_count = 0
+                    updated_count = 0
+
+                    for rom in new_roms:
+                        rom_id = rom.get('id')
+                        was_existing = rom_id in existing_games_map
+
+                        processed_game = self.process_single_rom(rom, download_dir)
+                        existing_games_map[rom_id] = processed_game
+
+                        if was_existing:
+                            updated_count += 1
+                        else:
+                            new_count += 1
+
+                    # Update the games list
+                    updated_games = list(existing_games_map.values())
+                    updated_games = self.library_section.sort_games_consistently(updated_games)
+
+                    def update_ui():
+                        self.available_games = updated_games
+                        if hasattr(self, 'library_section'):
+                            self.library_section.update_games_library(updated_games)
+                        return False
+
+                    GLib.idle_add(update_ui)
+
+                    # Update timestamp
+                    self._last_full_fetch_time = datetime.datetime.now(timezone.utc).isoformat()
+
+                    if new_count > 0 or updated_count > 0:
+                        def log_update():
+                            self.log_message(f"📡 Auto-detected {new_count} new, {updated_count} updated games")
+                            return False
+                        GLib.idle_add(log_update)
+
+            except Exception as e:
+                # Log errors but don't crash the polling thread
+                def log_error():
+                    self.log_message(f"📡 Polling error: {e}")
+                    return False
+                GLib.idle_add(log_error)
+
+        self.log_message("📡 Polling loop exited")
 
     def scan_local_games_only(self, download_dir):
         """Enhanced local game scanning that handles both slug and full platform names"""
@@ -9872,14 +9887,14 @@ class SyncWindow(Gtk.ApplicationWindow):
             return  # Don't start new downloads if bulk operation is cancelled
         
         # Check BIOS requirements first if enabled
-        auto_download_setting = 'false'  # Force disable
+        auto_download_setting = self.settings.get('Download', 'auto_download_bios', fallback='true')
         has_bios_manager = bool(self.retroarch.bios_manager)
-        
+
         self.log_message(f"🔍 BIOS auto-download setting: {auto_download_setting}")
         self.log_message(f"🔍 BIOS manager available: {has_bios_manager}")
-        
-        # FIX: Handle missing/empty setting - default to enabled
-        auto_download_enabled = auto_download_setting in ['true', '', None]  # Default to enabled if not set
+
+        # Default to enabled if not set or empty
+        auto_download_enabled = auto_download_setting in ['true', '', None]
         if (auto_download_enabled and has_bios_manager):
             platform = game.get('platform')
             if platform:

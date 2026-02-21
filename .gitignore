@@ -88,3 +88,6 @@ dmypy.json
 *.tar.gz
 *.zip
 releases/
+
+# Claude Code
+.claude/

@@ -55,3 +55,18 @@ out/*
 cli/
 cli/*
 cli/decky
+
+# Vendored Python dependencies in py_modules
+py_modules/bin/
+py_modules/certifi/
+py_modules/certifi-*.dist-info/
+py_modules/charset_normalizer/
+py_modules/charset_normalizer-*.dist-info/
+py_modules/idna/
+py_modules/idna-*.dist-info/
+py_modules/requests/
+py_modules/requests-*.dist-info/
+py_modules/urllib3/
+py_modules/urllib3-*.dist-info/
+py_modules/watchdog/
+py_modules/watchdog-*.dist-info/

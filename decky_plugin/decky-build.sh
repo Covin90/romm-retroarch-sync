@@ -23,11 +23,22 @@ cp "${SCRIPT_DIR}/LICENSE"                 "${TMP_DIR}/${PLUGIN_NAME}/"
 cp "${SCRIPT_DIR}/main.py"                 "${TMP_DIR}/${PLUGIN_NAME}/"
 cp "${SCRIPT_DIR}/dist/index.js"           "${TMP_DIR}/${PLUGIN_NAME}/dist/"
 cp "${SCRIPT_DIR}/dist/index.js.map"       "${TMP_DIR}/${PLUGIN_NAME}/dist/"
-cp "${SCRIPT_DIR}/py_modules/sync_core.py" "${TMP_DIR}/${PLUGIN_NAME}/py_modules/"
+# Copy all py_modules (sync_core + bundled dependencies like requests, watchdog)
+cp -rL "${SCRIPT_DIR}/py_modules/"* "${TMP_DIR}/${PLUGIN_NAME}/py_modules/"
+# Remove unnecessary files
+rm -rf "${TMP_DIR}/${PLUGIN_NAME}/py_modules/__pycache__" "${TMP_DIR}/${PLUGIN_NAME}/py_modules/bin" "${TMP_DIR}/${PLUGIN_NAME}/py_modules/"*.dist-info
 cp "${SCRIPT_DIR}/assets/logo.png"         "${TMP_DIR}/${PLUGIN_NAME}/assets/"
 
 rm -f "$OUT_ZIP"
 (cd "$TMP_DIR" && zip -r "$OUT_ZIP" "${PLUGIN_NAME}/")
 rm -rf "$TMP_DIR"
+
+# Restore dev symlink if it was replaced during build
+SYMLINK_PATH="${SCRIPT_DIR}/py_modules/sync_core.py"
+if [ ! -L "$SYMLINK_PATH" ]; then
+    echo "==> Restoring sync_core.py symlink..."
+    rm -f "$SYMLINK_PATH"
+    ln -s ../../src/sync_core.py "$SYMLINK_PATH"
+fi
 
 echo "==> Done: ${OUT_ZIP}"

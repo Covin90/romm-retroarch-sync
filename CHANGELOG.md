@@ -46,7 +46,7 @@
 
 ### Added
 
-- Steam Deck & RetroDeck compatibility
+- SteamOS & RetroDeck compatibility
 - Max concurrent downloads
 - Daemon service
 - Tweaked

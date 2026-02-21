@@ -1174,52 +1174,74 @@ class RomMClient:
             pass
         return None
 
-    def get_roms(self, progress_callback=None, limit=500, offset=0):
-        """Get ROMs with pagination support - FIXED to fetch ALL games"""
+    def get_roms(self, progress_callback=None, limit=500, offset=0, updated_after=None):
+        """Get ROMs with pagination support - FIXED to fetch ALL games
+
+        Args:
+            progress_callback: Optional callback for progress updates
+            limit: Number of items per page
+            offset: Offset for pagination
+            updated_after: Optional ISO 8601 datetime string to only fetch ROMs updated after this time
+        """
         if not self.ensure_authenticated():
             return [], 0
-        
+
         try:
             # For backward compatibility, if no specific limit is requested, fetch ALL games
-            if limit == 500 and offset == 0:
+            if limit == 500 and offset == 0 and updated_after is None:
                 return self._fetch_all_games_chunked(progress_callback)
             else:
-                # Specific pagination request
+                # Specific pagination request or filtered by updated_after
+                params = {
+                    'limit': limit,
+                    'offset': offset,
+                    'fields': 'id,name,fs_name,platform_name,platform_slug,files,multi'
+                }
+
+                # Add updated_after filter if provided
+                if updated_after:
+                    params['updated_after'] = updated_after
+
                 response = self.session.get(
                     urljoin(self.base_url, '/api/roms'),
-                    params={
-                        'limit': limit,
-                        'offset': offset,
-                        'fields': 'id,name,fs_name,platform_name,platform_slug,files,multi'
-                    },
+                    params=params,
                     timeout=60
                 )
-                
+
                 if response.status_code != 200:
                     print(f"❌ RomM API error: HTTP {response.status_code}")
                     return [], 0
-                
+
                 data = response.json()
                 items = data.get('items', [])
                 total = data.get('total', 0)
-                
+
                 if progress_callback:
                     progress_callback('batch', {'items': items, 'total': total, 'offset': offset})
-                
+
                 return items, total
-            
+
         except Exception as e:
             print(f"❌ Error fetching ROMs: {e}")
             return [], 0
 
-    def get_collections(self):
-        """Get custom collections from RomM"""
+    def get_collections(self, updated_after=None):
+        """Get custom collections from RomM
+
+        Args:
+            updated_after: Optional ISO 8601 datetime string to only fetch collections updated after this time
+        """
         if not self.ensure_authenticated():
             return []
 
         try:
+            params = {}
+            if updated_after:
+                params['updated_after'] = updated_after
+
             response = self.session.get(
                 urljoin(self.base_url, '/api/collections'),
+                params=params if params else None,
                 timeout=10
             )
             if response.status_code == 200:
@@ -4079,14 +4101,14 @@ class RetroArchInterface:
             config_dir = self.find_retroarch_config_dir()
             if not config_dir:
                 return False, "Config directory not found"
-            
+
             config_file = config_dir / 'retroarch.cfg'
             if not config_file.exists():
                 return False, "retroarch.cfg not found"
-            
+
             network_enabled = False
             network_port = None
-            
+
             with open(config_file, 'r', encoding='utf-8') as f:
                 for line in f:
                     line = line.strip()
@@ -4097,16 +4119,130 @@ class RetroArchInterface:
                             network_port = int(line.split('=')[1].strip().strip('"'))
                         except:
                             pass
-            
+
             if not network_enabled:
                 return False, "Network commands disabled in RA"
             elif network_port != 55355:
                 return False, f"Wrong port: {network_port} (should be 55355)"
             else:
                 return True, "Network commands enabled (port 55355)"
-                
+
         except Exception as e:
             return False, f"Config check failed: {e}"
+
+    def check_savestate_thumbnail_config(self):
+        """Check if RetroArch save state thumbnails are enabled"""
+        try:
+            config_dir = self.find_retroarch_config_dir()
+            if not config_dir:
+                return False, "Config directory not found"
+
+            config_file = config_dir / 'retroarch.cfg'
+            if not config_file.exists():
+                return False, "retroarch.cfg not found"
+
+            thumbnail_enabled = False
+
+            with open(config_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith('savestate_thumbnail_enable = '):
+                        thumbnail_enabled = 'true' in line.lower()
+                        break
+
+            if not thumbnail_enabled:
+                return False, "Save state thumbnails disabled in RA"
+            else:
+                return True, "Save state thumbnails enabled"
+
+        except Exception as e:
+            return False, f"Config check failed: {e}"
+
+    def enable_retroarch_setting(self, setting_type):
+        """Enable a specific RetroArch setting by modifying retroarch.cfg
+
+        Args:
+            setting_type: Either 'network_commands' or 'savestate_thumbnails'
+
+        Returns:
+            (success: bool, message: str)
+        """
+        try:
+            config_dir = self.find_retroarch_config_dir()
+            if not config_dir:
+                return False, "Config directory not found"
+
+            config_file = config_dir / 'retroarch.cfg'
+            if not config_file.exists():
+                return False, "retroarch.cfg not found"
+
+            # Read the entire config file
+            with open(config_file, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+
+            # Track which settings we found and modified
+            modified = False
+            setting_found = False
+
+            if setting_type == 'network_commands':
+                # Modify network_cmd_enable and network_cmd_port
+                network_enable_found = False
+                network_port_found = False
+
+                for i, line in enumerate(lines):
+                    stripped = line.strip()
+                    if stripped.startswith('network_cmd_enable = '):
+                        lines[i] = 'network_cmd_enable = "true"\n'
+                        network_enable_found = True
+                        modified = True
+                    elif stripped.startswith('network_cmd_port = '):
+                        lines[i] = 'network_cmd_port = "55355"\n'
+                        network_port_found = True
+                        modified = True
+
+                # If settings don't exist, append them
+                if not network_enable_found:
+                    lines.append('network_cmd_enable = "true"\n')
+                    modified = True
+                if not network_port_found:
+                    lines.append('network_cmd_port = "55355"\n')
+                    modified = True
+
+                setting_found = True
+
+            elif setting_type == 'savestate_thumbnails':
+                # Modify savestate_thumbnail_enable
+                for i, line in enumerate(lines):
+                    stripped = line.strip()
+                    if stripped.startswith('savestate_thumbnail_enable = '):
+                        lines[i] = 'savestate_thumbnail_enable = "true"\n'
+                        setting_found = True
+                        modified = True
+                        break
+
+                # If setting doesn't exist, append it
+                if not setting_found:
+                    lines.append('savestate_thumbnail_enable = "true"\n')
+                    setting_found = True
+                    modified = True
+
+            else:
+                return False, f"Unknown setting type: {setting_type}"
+
+            if not modified:
+                return True, "Setting already enabled"
+
+            # Write the modified config back
+            with open(config_file, 'w', encoding='utf-8') as f:
+                f.writelines(lines)
+
+            if setting_type == 'network_commands':
+                return True, "Network commands enabled (restart RetroArch to apply)"
+            elif setting_type == 'savestate_thumbnails':
+                return True, "Save state thumbnails enabled (restart RetroArch to apply)"
+
+        except Exception as e:
+            return False, f"Failed to enable setting: {e}"
 
 class AutoSyncManager:
     """Manages automatic synchronization of saves/states between RetroArch and RomM"""
@@ -4329,19 +4465,27 @@ class AutoSyncManager:
                                 self.log(f"🎯 RetroArch content loaded: {Path(current_content).name}")
                                 self.sync_saves_for_rom_file(current_content)
                                 self.last_sync_time[current_content] = current_time
+                                last_network_state = network_responding
                             else:
-                                self.log("🎯 RetroArch network active but no content detected")
+                                self.log("🎯 RetroArch network active but no content detected, retrying...")
+                                # Don't update last_network_state — retry on next iteration
                         else:
                             self.log("🎮 RetroArch content unloaded (network inactive)")
-                        last_network_state = network_responding
+                            last_network_state = network_responding
                     
                     # 4. FALLBACK: History file detection (for initial state and missed events)
                     elif retroarch_running and not network_responding:
                         current_content = self.get_retroarch_current_game()
                         
                         config_dir = self.retroarch.find_retroarch_config_dir()
-                        if config_dir and (config_dir / 'content_history.lpl').exists():
-                            history_path = config_dir / 'content_history.lpl'
+                        history_path = None
+                        if config_dir:
+                            for candidate in [config_dir / 'content_history.lpl',
+                                              config_dir / 'playlists' / 'builtin' / 'content_history.lpl']:
+                                if candidate.exists():
+                                    history_path = candidate
+                                    break
+                        if history_path:
                             current_mtime = history_path.stat().st_mtime
                             
                             if startup_grace_period:
@@ -4457,7 +4601,10 @@ class AutoSyncManager:
                 
             if not config_dir:
                 return None
+            # Check standard location and RetroDECK's playlists/builtin subdirectory
             history_path = config_dir / 'content_history.lpl'
+            if not history_path.exists():
+                history_path = config_dir / 'playlists' / 'builtin' / 'content_history.lpl'
             
             if history_path.exists():
                 with open(history_path, 'r', encoding='utf-8') as f:
@@ -4962,6 +5109,9 @@ class AutoSyncManager:
                     if time_diff > 60:  # Local is more than 1 minute newer
                         self.log(f"     → Local is newer, keeping local")
                         return False, f"Local {file_type} is newer ({time_diff:.1f}s difference)"
+                    elif abs(time_diff) <= 10:  # Within 10s = same file (upload latency)
+                        self.log(f"     → Timestamps within 10s, skipping (likely same file)")
+                        return False, f"{file_type} timestamps are equivalent ({abs(time_diff):.1f}s difference)"
                     else:
                         self.log(f"     → Server is newer, downloading")
                         return True, f"Server {file_type} is newer ({-time_diff:.1f}s newer)"
@@ -5103,8 +5253,10 @@ class AutoSyncManager:
                                                 temp_path.rename(final_path)
                                             downloads_successful += 1
                                             self.log(f"  ✅ Save ready: {retroarch_filename}")
-                                            if hasattr(self.parent_window, 'auto_sync') and self.parent_window.auto_sync:
-                                                # Skip auto-upload for recently downloaded files
+                                            # Skip auto-upload for recently downloaded files
+                                            if hasattr(self, 'upload_debounce'):
+                                                self.upload_debounce[str(final_path)] = time.time() + 30
+                                            elif hasattr(self, 'parent_window') and hasattr(self.parent_window, 'auto_sync') and self.parent_window.auto_sync:
                                                 self.parent_window.auto_sync.upload_debounce[str(final_path)] = time.time() + 30
                                             self.retroarch.send_notification(f"Save downloaded: {game_name}")
                                         except Exception as e:
@@ -5180,8 +5332,10 @@ class AutoSyncManager:
                                                 temp_path.rename(final_path)
                                             downloads_successful += 1
                                             self.log(f"  ✅ State ready: {retroarch_filename}")
-                                            if hasattr(self.parent_window, 'auto_sync') and self.parent_window.auto_sync:
-                                                # Skip auto-upload for recently downloaded files
+                                            # Skip auto-upload for recently downloaded files
+                                            if hasattr(self, 'upload_debounce'):
+                                                self.upload_debounce[str(final_path)] = time.time() + 30
+                                            elif hasattr(self, 'parent_window') and hasattr(self.parent_window, 'auto_sync') and self.parent_window.auto_sync:
                                                 self.parent_window.auto_sync.upload_debounce[str(final_path)] = time.time() + 30
                                             self.retroarch.send_notification(f"Save state downloaded: {game_name}")
 
@@ -5359,12 +5513,13 @@ def is_path_validly_downloaded(path):
 
 
 def build_sync_status(romm_client, collection_sync, auto_sync, available_games,
-                      known_collections=None, disabled_collection_counts=None):
+                      known_collections=None, disabled_collection_counts=None, retroarch=None,
+                      bios_tracking=None):
     """Build the current status dict from live sync object state.
 
     Args:
         romm_client:        authenticated RomMClient (or None if disconnected)
-        collection_sync:    DaemonCollectionSync instance (or None)
+        collection_sync:    CollectionSyncManager instance (or None)
         auto_sync:          AutoSyncManager instance (or None)
         available_games:    list of game dicts loaded on connect
         known_collections:  pre-fetched list of collection dicts from RomM.
@@ -5373,6 +5528,8 @@ def build_sync_status(romm_client, collection_sync, auto_sync, available_games,
                             rebuilds where low latency matters).  When None the
                             list is fetched from the API (used for periodic
                             deep refreshes).
+        retroarch:          RetroArchInterface instance for config checks (optional)
+        bios_tracking:      BiosTrackingManager instance (or None)
 
     Returns a new status dict ready to write into the shared status dict.
     """
@@ -5401,7 +5558,7 @@ def build_sync_status(romm_client, collection_sync, auto_sync, available_games,
                 _dl_pct         = None
 
                 if is_auto_sync:
-                    # Read counts from DaemonCollectionSync's cache (no extra API calls)
+                    # Read counts from CollectionSyncManager's cache (no extra API calls)
                     if collection_sync and hasattr(collection_sync, 'collection_caches'):
                         cached_rom_ids = collection_sync.collection_caches.get(collection_name)
                         if cached_rom_ids:
@@ -5459,7 +5616,28 @@ def build_sync_status(romm_client, collection_sync, auto_sync, available_games,
             if name in collection_sync.last_removals:
                 collection_data['last_removal'] = collection_sync.last_removals[name]
 
-    return {
+    # Check RetroArch configuration warnings
+    warnings = []
+    if retroarch:
+        try:
+            network_ok, network_msg = retroarch.check_network_commands_config()
+            if not network_ok:
+                warnings.append({
+                    'type': 'network_commands',
+                    'message': network_msg
+                })
+
+            thumbnail_ok, thumbnail_msg = retroarch.check_savestate_thumbnail_config()
+            if not thumbnail_ok:
+                warnings.append({
+                    'type': 'savestate_thumbnails',
+                    'message': thumbnail_msg
+                })
+        except Exception as e:
+            logging.debug(f"RetroArch config check failed: {e}")
+
+    # Build status dict
+    status = {
         'running':                True,
         'connected':              bool(romm_client and romm_client.authenticated),
         'auto_sync':              bool(auto_sync and auto_sync.enabled),
@@ -5468,10 +5646,17 @@ def build_sync_status(romm_client, collection_sync, auto_sync, available_games,
         'collection_count':       len(collections_list),
         'actively_syncing_count': len(actively_syncing),
         'last_update':            time.time(),
+        'warnings':               warnings,
     }
 
-class DaemonCollectionSync:
-    """Simplified collection sync for daemon mode"""
+    # Include BIOS status if tracking manager available
+    if bios_tracking:
+        status['bios_status'] = bios_tracking.get_status()
+
+    return status
+
+class CollectionSyncManager:
+    """Manages collection synchronization"""
     
     def __init__(self, romm_client, settings, selected_collections, sync_interval, available_games, log_callback):
         self.romm_client = romm_client
@@ -5702,6 +5887,15 @@ class DaemonCollectionSync:
 
             # Download the ROM
             self.log(f"  ⬇️ Downloading {rom.get('name')}...")
+
+            # Update progress immediately to show we're starting this ROM
+            # (don't wait for first chunk callback)
+            # Use a tiny fraction (0.01) to show we've started without jumping to the next whole number
+            if collection_name in self.download_progress:
+                self.download_progress[collection_name]['downloaded'] = _completed_before_this + 1
+                self.download_progress[collection_name]['downloaded_pct'] = round((_completed_before_this + 0.01) / total_collection_size * 100.0, 1) if total_collection_size > 0 else 0.0
+                self.download_progress[collection_name]['speed'] = 0.0
+
             success, message = self.romm_client.download_rom(
                 rom.get('id'),
                 rom.get('name', 'Unknown'),
@@ -5784,3 +5978,511 @@ class DaemonCollectionSync:
 
         self.set_removal_event(collection_name, len(removed_rom_ids), deleted_count)
 
+
+# ==============================================================================
+# GameListPollingManager
+# ==============================================================================
+
+class GameListPollingManager:
+    """Manages lightweight polling for game list updates using updated_after timestamps.
+
+    Polls RomM every 30 seconds for games added/updated since last check, enabling
+    near-real-time game library updates without full data fetches.
+    """
+
+    def __init__(self, romm_client, settings, available_games_list,
+                 platform_slug_to_name, log_callback, update_callback=None):
+        """Initialize polling manager.
+
+        Args:
+            romm_client: Authenticated RomMClient instance
+            settings: SettingsManager instance for download directory
+            available_games_list: Reference to the shared available_games list (modified in-place)
+            platform_slug_to_name: dict mapping platform slugs to names
+            log_callback: Function for logging messages
+            update_callback: Optional callable(new_count, updated_count, total) called after successful poll
+        """
+        self.romm_client = romm_client
+        self.settings = settings
+        self.available_games = available_games_list
+        self.platform_slug_to_name = platform_slug_to_name
+        self.log = log_callback
+        self.on_update = update_callback
+
+        # Threading state
+        self.running = False
+        self.thread = None
+        self._stop_event = threading.Event()
+
+        # Polling state
+        self.last_poll_time = None  # ISO 8601 timestamp string
+        self.poll_interval = 30  # seconds
+        self.initial_delay = 10  # Wait 10s after start before first poll
+
+    def start(self):
+        """Start polling thread."""
+        if self.running:
+            return
+
+        self.running = True
+        self._stop_event.clear()
+
+        def polling_worker():
+            # Initial delay to let connection settle
+            self._stop_event.wait(self.initial_delay)
+
+            while self.running:
+                self._stop_event.wait(self.poll_interval)
+                if self._stop_event.is_set():
+                    break
+
+                try:
+                    self._poll_for_updates()
+                except Exception as e:
+                    self.log(f"Polling error: {e}")
+                    import traceback
+                    self.log(traceback.format_exc())
+
+        self.thread = threading.Thread(target=polling_worker, daemon=True, name="game-polling")
+        self.thread.start()
+        self.log(f"Game polling started (interval: {self.poll_interval}s)")
+
+    def stop(self):
+        """Stop polling thread."""
+        self.running = False
+        self._stop_event.set()
+        if self.thread:
+            self.thread.join(timeout=5)
+        self.log("Game polling stopped")
+
+    def set_last_poll_time(self, iso_timestamp):
+        """Set the timestamp for next incremental poll.
+
+        Args:
+            iso_timestamp: ISO 8601 datetime string (e.g., from datetime.now(timezone.utc).isoformat())
+        """
+        self.last_poll_time = iso_timestamp
+
+    def _poll_for_updates(self):
+        """Poll RomM for new/updated games."""
+        if not (self.romm_client and self.romm_client.authenticated):
+            return  # Skip if not connected
+
+        if self.last_poll_time is None:
+            return  # Skip if no baseline timestamp set
+
+        # Fetch only ROMs updated since last poll
+        roms_result = self.romm_client.get_roms(
+            limit=1000,
+            offset=0,
+            updated_after=self.last_poll_time
+        )
+
+        if not roms_result or len(roms_result) != 2:
+            return
+
+        new_roms, _ = roms_result
+
+        if not new_roms:
+            return  # No updates
+
+        # Process updates
+        download_dir = Path(self.settings.get('Download', 'rom_directory',
+                                              '~/RomMSync/roms')).expanduser()
+
+        # Create fast lookup map
+        existing_games_map = {g['rom_id']: g for g in self.available_games if 'rom_id' in g}
+
+        new_count = 0
+        updated_count = 0
+
+        for rom in new_roms:
+            rom_id = rom.get('id')
+            was_existing = rom_id in existing_games_map
+
+            platform_slug = rom.get('platform_slug', 'Unknown')
+            file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
+            local_path = download_dir / platform_slug / file_name
+            is_downloaded = is_path_validly_downloaded(local_path)
+            local_size = 0
+
+            if is_downloaded and local_path.exists():
+                if local_path.is_dir():
+                    local_size = sum(f.stat().st_size for f in local_path.rglob('*') if f.is_file())
+                else:
+                    local_size = local_path.stat().st_size
+
+            game_data = {
+                'name': Path(file_name).stem if file_name else rom.get('name', 'Unknown'),
+                'rom_id': rom_id,
+                'platform': rom.get('platform_name', 'Unknown'),
+                'platform_slug': platform_slug,
+                'file_name': file_name,
+                'is_downloaded': is_downloaded,
+                'local_path': str(local_path) if is_downloaded else None,
+                'local_size': local_size,
+                'romm_data': {
+                    'fs_name': rom.get('fs_name'),
+                    'fs_name_no_ext': rom.get('fs_name_no_ext'),
+                    'fs_size_bytes': rom.get('fs_size_bytes', 0),
+                    'platform_id': rom.get('platform_id'),
+                    'platform_slug': rom.get('platform_slug'),
+                },
+            }
+
+            existing_games_map[rom_id] = game_data
+
+            if was_existing:
+                updated_count += 1
+            else:
+                new_count += 1
+
+        # Update the shared list reference (in-place modification)
+        self.available_games.clear()
+        self.available_games.extend(existing_games_map.values())
+
+        # Update timestamp
+        from datetime import datetime, timezone
+        self.last_poll_time = datetime.now(timezone.utc).isoformat()
+
+        if new_count > 0 or updated_count > 0:
+            self.log(f"Poll: {new_count} new, {updated_count} updated games "
+                    f"(total: {len(self.available_games)})")
+
+            # Notify callback
+            if self.on_update:
+                self.on_update(new_count, updated_count, len(self.available_games))
+
+
+
+
+# ==============================================================================
+# BiosTrackingManager
+# ==============================================================================
+
+class BiosTrackingManager:
+    """Manages BIOS download tracking and orchestration for synced collections.
+
+    Scans for missing BIOS files and triggers parallel downloads from RomM.
+    Tracks download status per platform and exposes status for build_sync_status().
+    """
+
+    def __init__(self, retroarch, romm_client, collection_sync, available_games_list,
+                 platform_slug_to_name, log_callback):
+        """Initialize BIOS tracking manager.
+
+        Args:
+            retroarch: RetroArchInterface instance with bios_manager
+            romm_client: Authenticated RomMClient instance
+            collection_sync: CollectionSyncManager instance (or None)
+            available_games_list: Reference to shared available_games list
+            platform_slug_to_name: dict mapping platform slugs to names
+            log_callback: Function for logging messages
+        """
+        self.retroarch = retroarch
+        self.romm_client = romm_client
+        self.collection_sync = collection_sync
+        self.available_games = available_games_list
+        self.platform_slug_to_name = platform_slug_to_name
+        self.log = log_callback
+
+        # BIOS tracking state (protected by lock)
+        self._lock = threading.Lock()
+        self.downloads_in_progress = set()  # Platform slugs currently downloading
+        self.platforms_ready = set()  # Platform slugs with all required BIOS
+        self.download_failures = {}  # {platform_slug: error_message}
+        self.platform_status = {}  # {platform_slug: status_dict}
+
+        # Threading state for background scan
+        self.running = False
+        self.scan_thread = None
+
+    def scan_library_bios(self):
+        """Scan BIOS status for all platforms in library (background thread).
+
+        Updates platform_status cache. Should be called once after initial game fetch.
+        """
+        if not self.retroarch or not self.retroarch.bios_manager:
+            self.log("BIOS manager not available, skipping scan")
+            return
+
+        if not self.available_games:
+            self.log("No games in library, skipping BIOS scan")
+            return
+
+        def scan_worker():
+            try:
+                # Collect unique platforms from all games
+                platforms_in_library = {}
+                for game in self.available_games:
+                    platform_slug = game.get('platform_slug')
+                    platform_name = game.get('platform')
+                    if not platform_name or platform_name == 'Unknown':
+                        platform_name = self.platform_slug_to_name.get(platform_slug)
+                    if platform_slug and platform_name:
+                        platforms_in_library[platform_slug] = platform_name
+
+                if not platforms_in_library:
+                    self.log("No platforms found in library")
+                    return
+
+                self.log(f"Scanning BIOS status for {len(platforms_in_library)} platforms...")
+                bios_manager = self.retroarch.bios_manager
+
+                platform_status = {}
+                for platform_slug, platform_name in platforms_in_library.items():
+                    try:
+                        normalized_platform = bios_manager.normalize_platform_name(platform_name)
+                        present, missing = bios_manager.check_platform_bios(normalized_platform)
+                        required_missing = [b for b in missing if b.get('required', False)]
+                        total_required = len(present) + len(required_missing)
+
+                        # Skip platforms with no BIOS requirements
+                        if total_required == 0:
+                            continue
+
+                        is_ready = len(required_missing) == 0
+
+                        platform_status[platform_slug] = {
+                            'name': platform_name,
+                            'ready': is_ready,
+                            'present': len(present),
+                            'missing': len(required_missing),
+                            'total_required': total_required,
+                        }
+
+                        if is_ready:
+                            with self._lock:
+                                self.platforms_ready.add(platform_slug)
+
+                    except Exception as e:
+                        self.log(f"Error scanning BIOS for {platform_name}: {e}")
+                        platform_status[platform_slug] = {
+                            'name': platform_name,
+                            'ready': False,
+                            'present': 0,
+                            'missing': 0,
+                            'total_required': 0,
+                            'error': str(e),
+                        }
+
+                # Update cache atomically
+                with self._lock:
+                    self.platform_status = platform_status
+
+                ready_count = sum(1 for p in platform_status.values() if p.get('ready', False))
+                self.log(f"BIOS scan complete: {ready_count}/{len(platform_status)} platforms ready")
+
+            except Exception as e:
+                self.log(f"Error scanning BIOS for library: {e}")
+                import traceback
+                self.log(traceback.format_exc())
+
+        # Run scan in background
+        self.scan_thread = threading.Thread(target=scan_worker, daemon=True, name="bios-scan")
+        self.scan_thread.start()
+
+    def download_bios_for_platform(self, platform_slug, platform_name):
+        """Download BIOS for a single platform (runs in background thread).
+
+        Args:
+            platform_slug: Platform slug (e.g., 'sony-playstation')
+            platform_name: Human-readable platform name (e.g., 'Sony - PlayStation')
+        """
+        try:
+            if not self.retroarch or not self.retroarch.bios_manager:
+                self.log(f"BIOS manager not available")
+                return
+
+            bios_manager = self.retroarch.bios_manager
+            bios_manager.romm_client = self.romm_client  # Set client for downloads
+
+            normalized_platform = bios_manager.normalize_platform_name(platform_name)
+
+            # Check if already present
+            present, missing = bios_manager.check_platform_bios(normalized_platform)
+            required_missing = [b for b in missing if b.get('required', False)]
+
+            if not required_missing:
+                self.log(f"✅ All required BIOS already present for {platform_name}")
+                with self._lock:
+                    self.platforms_ready.add(platform_slug)
+                return
+
+            self.log(f"📥 Downloading BIOS for {platform_name} ({len(required_missing)} files)...")
+
+            # Download
+            success = bios_manager.auto_download_missing_bios(normalized_platform)
+
+            if success:
+                self.log(f"✅ BIOS download complete for {platform_name}")
+                # Re-check to get accurate present count
+                present_after, missing_after = bios_manager.check_platform_bios(normalized_platform)
+                required_missing_after = [b for b in missing_after if b.get('required', False)]
+                with self._lock:
+                    self.platforms_ready.add(platform_slug)
+                    self.download_failures.pop(platform_slug, None)
+                    if platform_slug in self.platform_status:
+                        self.platform_status[platform_slug]['ready'] = True
+                        self.platform_status[platform_slug]['present'] = len(present_after)
+                        self.platform_status[platform_slug]['missing'] = len(required_missing_after)
+                        self.platform_status[platform_slug]['total_required'] = len(present_after) + len(required_missing_after)
+            else:
+                error_msg = "unavailable_on_server"
+                self.log(f"⚠️ BIOS unavailable on server for {platform_name}")
+                with self._lock:
+                    self.download_failures[platform_slug] = error_msg
+
+        except Exception as e:
+            error_msg = str(e)
+            self.log(f"❌ BIOS download error for {platform_name}: {e}")
+            import traceback
+            self.log(traceback.format_exc())
+            with self._lock:
+                self.download_failures[platform_slug] = error_msg
+
+        finally:
+            with self._lock:
+                self.downloads_in_progress.discard(platform_slug)
+
+    def trigger_downloads_for_games(self, games):
+        """Trigger parallel BIOS downloads for platforms in game list.
+
+        Args:
+            games: List of game dicts with 'platform' and 'platform_slug' keys
+        """
+        if not games:
+            return
+
+        # Collect unique platforms
+        platforms_needed = {}
+        for game in games:
+            platform_slug = game.get('platform_slug') or game.get('platform', {}).get('slug')
+            platform_name = game.get('platform_name') or game.get('platform', {}).get('name')
+
+            if platform_slug and platform_name:
+                platforms_needed[platform_slug] = platform_name
+
+        # Start downloads for platforms not already handled
+        for platform_slug, platform_name in platforms_needed.items():
+            with self._lock:
+                if (platform_slug in self.downloads_in_progress or
+                    platform_slug in self.platforms_ready):
+                    continue
+
+                self.downloads_in_progress.add(platform_slug)
+
+            # Start download thread
+            threading.Thread(
+                target=self.download_bios_for_platform,
+                args=(platform_slug, platform_name),
+                daemon=True,
+                name=f"bios-{platform_slug}"
+            ).start()
+            self.log(f"🎮 Started BIOS download for {platform_name}")
+
+    def download_for_collection(self, collection_name):
+        """Fetch collection ROMs and trigger BIOS downloads (background thread).
+
+        Args:
+            collection_name: Name of collection being enabled
+        """
+        def download_worker():
+            try:
+                if not (self.romm_client and self.romm_client.authenticated):
+                    self.log("Cannot start BIOS downloads: not connected to RomM")
+                    return
+
+                # Get collection ID from RomM
+                collections = self.romm_client.get_collections()
+                collection_id = None
+                for col in collections:
+                    if col.get('name') == collection_name:
+                        collection_id = col.get('id')
+                        break
+
+                if collection_id is None:
+                    self.log(f"Collection '{collection_name}' not found")
+                    return
+
+                # Fetch ROMs
+                collection_roms = self.romm_client.get_collection_roms(collection_id)
+                self.log(f"Checking BIOS requirements for {len(collection_roms)} games "
+                        f"in '{collection_name}'")
+
+                # Enrich with platform names from mapping
+                for rom in collection_roms:
+                    if 'platform_name' not in rom or not rom['platform_name']:
+                        slug = rom.get('platform_slug')
+                        if slug and slug in self.platform_slug_to_name:
+                            rom['platform_name'] = self.platform_slug_to_name[slug]
+
+                # Trigger downloads
+                self.trigger_downloads_for_games(collection_roms)
+
+            except Exception as e:
+                self.log(f"Error starting BIOS downloads for collection {collection_name}: {e}")
+                import traceback
+                self.log(traceback.format_exc())
+
+        threading.Thread(target=download_worker, daemon=True,
+                        name=f"bios-collection-{collection_name}").start()
+
+    def get_platforms_in_synced_collections(self):
+        """Get set of platform slugs in actively syncing collections.
+
+        Returns:
+            set: Platform slugs that have games in synced collections
+        """
+        if not self.collection_sync:
+            return set()
+
+        synced_platforms = set()
+        collection_caches = getattr(self.collection_sync, 'collection_caches', {})
+
+        for collection_name, rom_ids in collection_caches.items():
+            for game in (self.available_games or []):
+                if game.get('rom_id') in rom_ids:
+                    platform_slug = game.get('platform_slug')
+                    if platform_slug:
+                        synced_platforms.add(platform_slug)
+
+        return synced_platforms
+
+    def get_status(self):
+        """Get current BIOS status (filtered to synced collections).
+
+        Returns:
+            dict with BIOS status summary
+        """
+        with self._lock:
+            synced_platforms = self.get_platforms_in_synced_collections()
+
+            # Filter to synced collections
+            platforms_in_sync = {
+                slug: p for slug, p in self.platform_status.items()
+                if slug in synced_platforms
+            }
+
+            # Lenient: ready if at least 1 BIOS file present
+            platforms_ready = sum(
+                1 for p in platforms_in_sync.values()
+                if p.get('present', 0) > 0
+            )
+            total_platforms = len(platforms_in_sync)
+
+            # Filter downloading/failures to synced collections only
+            synced_downloading = [s for s in self.downloads_in_progress if s in synced_platforms]
+            synced_failures = {s: msg for s, msg in self.download_failures.items() if s in synced_platforms}
+
+            return {
+                'downloading_count': len(synced_downloading),
+                'ready_count': len(self.platforms_ready),
+                'failed_count': len(synced_failures),
+                'downloading': synced_downloading,
+                'ready': list(self.platforms_ready),
+                'failures': synced_failures,
+                'platforms': dict(platforms_in_sync),
+                'total_platforms': total_platforms,
+                'platforms_ready': platforms_ready,
+            }

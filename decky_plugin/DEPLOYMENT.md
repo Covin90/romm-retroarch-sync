@@ -48,6 +48,9 @@ Decky Loader's installer validates all of these. **Any missing file causes silen
 | `dist/index.js` | YES | Compiled frontend |
 | `dist/index.js.map` | YES | Source map |
 | `py_modules/sync_core.py` | YES | Sync daemon logic |
+| `py_modules/requests/` | YES | Bundled dependency (not on SteamOS) |
+| `py_modules/watchdog/` | YES | Bundled dependency (not on SteamOS) |
+| `py_modules/urllib3/`, `certifi/`, `charset_normalizer/`, `idna/` | YES | Transitive deps of requests |
 | `assets/logo.png` | NO | Plugin icon |
 
 ### ZIP structure
@@ -79,13 +82,23 @@ romm-sync-monitor/
 
 ---
 
-## Installation on Steam Deck
+## Installation on SteamOS
 
-1. Transfer `romm-sync-monitor.zip` to the Steam Deck
+1. Transfer `romm-sync-monitor.zip` to the SteamOS device
 2. In Decky Loader: **gear icon → "Install plugin from ZIP"**
 3. Select the zip file
 
 Do **not** restart Decky Loader after installation — use the Decky QAM reload button if needed.
+
+### Optional: Send to Steam Deck via SSH
+
+If `sshpass` is installed and the Deck is reachable, you can send the zip directly:
+
+```bash
+sshpass -p "<password>" scp romm-sync-monitor.zip deck@<deck-ip>:~/
+```
+
+Then install from `~/romm-sync-monitor.zip` on the Deck via Decky Loader.
 
 ---
 

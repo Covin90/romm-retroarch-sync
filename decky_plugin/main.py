@@ -3,6 +3,7 @@ import logging
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Add py_modules to path so sync_core is importable
@@ -11,7 +12,8 @@ sys.path.insert(0, str(Path(__file__).parent / "py_modules"))
 try:
     from sync_core import (
         SettingsManager, RomMClient, RetroArchInterface,
-        AutoSyncManager, DaemonCollectionSync,
+        AutoSyncManager, CollectionSyncManager,
+        GameListPollingManager, BiosTrackingManager,
         build_sync_status, is_path_validly_downloaded, detect_retrodeck,
     )
     SYNC_CORE_AVAILABLE = True
@@ -96,6 +98,16 @@ class Plugin:
     # Cleared when deletion completes or the collection is re-enabled.
     _disabled_collection_counts: dict = {}
 
+    # Platform mapping (slug -> name)
+    _platform_slug_to_name: dict = None  # {'psx': 'Sony - PlayStation', ...}
+
+    # Timestamp for efficient polling with updated_after parameter
+    _last_full_fetch_time: str = None  # ISO 8601 datetime of last full data fetch
+
+    # New manager instances (handle polling and BIOS tracking)
+    _game_polling: 'GameListPollingManager' = None
+    _bios_tracking: 'BiosTrackingManager' = None
+
     # -----------------------------------------------------------------------
     # Lifecycle
     # -----------------------------------------------------------------------
@@ -104,6 +116,7 @@ class Plugin:
         self._available_games = []
         self._romm_collections = None
         self._connection_attempted = False
+        self._platform_slug_to_name = {}
         logging.info("RomM Sync Monitor starting...")
         self._start_sync()
         return await self.get_service_status()
@@ -125,6 +138,9 @@ class Plugin:
 
         self._settings = SettingsManager()
         self._retroarch = RetroArchInterface()
+        logging.info(f"RetroArch interface created, has bios_manager: {hasattr(self._retroarch, 'bios_manager')}")
+        if hasattr(self._retroarch, 'bios_manager'):
+            logging.info(f"bios_manager value: {self._retroarch.bios_manager}")
         if self._available_games is None:
             self._available_games = []
         self._connection_attempted = False
@@ -136,13 +152,22 @@ class Plugin:
             name="romm-sync-retry",
         )
         self._retry_thread.start()
-        logging.info("Sync started")
+
+        logging.info("Sync started (retry thread only, managers start on connect)")
 
     def _stop_sync(self):
         if self._stop_event:
             self._stop_event.set()
         if self._retry_thread:
             self._retry_thread.join(timeout=5)
+
+        # Stop managers
+        if self._game_polling:
+            self._game_polling.stop()
+            self._game_polling = None
+        if self._bios_tracking:
+            # No explicit stop needed (downloads run to completion)
+            self._bios_tracking = None
 
         if self._auto_sync and self._auto_sync.enabled:
             try:
@@ -163,6 +188,7 @@ class Plugin:
         self._romm_collections = None
         self._connection_attempted = False
         self._disabled_collection_counts.clear()
+
         logging.info("Sync stopped")
 
     def _connect_to_romm(self):
@@ -185,6 +211,19 @@ class Plugin:
                 return False
 
             logging.info("Connected to RomM successfully")
+
+            # Fetch and cache platform mappings (slug -> name)
+            try:
+                platforms = self._romm_client.get_platforms()
+                self._platform_slug_to_name.clear()
+                for platform in platforms:
+                    slug = platform.get('slug')
+                    name = platform.get('name')
+                    if slug and name:
+                        self._platform_slug_to_name[slug] = name
+                logging.info(f"Cached {len(self._platform_slug_to_name)} platform mappings")
+            except Exception as e:
+                logging.warning(f"Failed to fetch platforms: {e}")
 
             # Cache collection list for zero-latency heartbeat rebuilds
             self._romm_collections = self._romm_client.get_collections()
@@ -233,6 +272,32 @@ class Plugin:
                     })
                 logging.info(f"Loaded {len(self._available_games)} games")
 
+                # Set initial timestamp for efficient future polling
+                self._last_full_fetch_time = datetime.now(timezone.utc).isoformat()
+
+                # Initialize GameListPollingManager
+                self._game_polling = GameListPollingManager(
+                    romm_client=self._romm_client,
+                    settings=self._settings,
+                    available_games_list=self._available_games,
+                    platform_slug_to_name=self._platform_slug_to_name,
+                    log_callback=lambda msg: logging.info(f"[POLLING] {msg}"),
+                    update_callback=None,  # Optional: add callback if needed
+                )
+                self._game_polling.set_last_poll_time(self._last_full_fetch_time)
+                self._game_polling.start()
+
+                # Initialize BiosTrackingManager
+                self._bios_tracking = BiosTrackingManager(
+                    retroarch=self._retroarch,
+                    romm_client=self._romm_client,
+                    collection_sync=self._collection_sync,  # May be None initially
+                    available_games_list=self._available_games,
+                    platform_slug_to_name=self._platform_slug_to_name,
+                    log_callback=lambda msg: logging.info(f"[BIOS] {msg}"),
+                )
+                self._bios_tracking.scan_library_bios()
+
             # AutoSyncManager (save/state sync)
             if self._auto_sync is None:
                 self._auto_sync = AutoSyncManager(
@@ -267,7 +332,7 @@ class Plugin:
             return False
 
     def _init_collection_sync(self):
-        """Create and start DaemonCollectionSync from current settings."""
+        """Create and start CollectionSyncManager from current settings."""
         if not (self._romm_client and self._romm_client.authenticated):
             return
 
@@ -286,7 +351,7 @@ class Plugin:
 
         selected_collections = {c for c in selected_str.split('|') if c}
         logging.info(f"Starting collection sync for: {selected_collections}")
-        self._collection_sync = DaemonCollectionSync(
+        self._collection_sync = CollectionSyncManager(
             romm_client=self._romm_client,
             settings=self._settings,
             selected_collections=selected_collections,
@@ -295,6 +360,10 @@ class Plugin:
             log_callback=lambda msg: logging.info(f"[COLLECTION-SYNC] {msg}"),
         )
         self._collection_sync.start()
+
+        # Update BIOS tracking manager's collection_sync reference
+        if self._bios_tracking:
+            self._bios_tracking.collection_sync = self._collection_sync
 
     def _fetch_disabled_counts(self):
         """Fetch ROM counts for collections that are not currently being auto-synced.
@@ -314,7 +383,7 @@ class Plugin:
                 if not (name and col_id):
                     continue
                 if name in actively_syncing:
-                    continue  # enabled — count comes from DaemonCollectionSync cache
+                    continue  # enabled — count comes from CollectionSyncManager cache
                 if name in self._disabled_collection_counts:
                     continue  # already populated (e.g. from a live toggle this session)
                 roms = self._romm_client.get_collection_roms(col_id)
@@ -326,10 +395,24 @@ class Plugin:
 
     def _retry_loop(self):
         """Connect on startup, then every 5 minutes refresh the collection list
-        or retry the connection if disconnected.  No status building — that happens
-        on-demand in get_service_status()."""
-        self._connect_to_romm()
+        or retry the connection if disconnected. Uses updated_after for efficiency.
+
+        On initial startup, retries every 15s until connected (handles DNS not
+        ready after boot). Once connected, switches to 5-minute refresh interval.
+        """
+        connected = self._connect_to_romm()
         self._connection_attempted = True
+
+        # If initial connection failed, retry quickly (DNS may not be ready yet)
+        if not connected:
+            for attempt in range(24):  # up to ~2 minutes of retries
+                self._stop_event.wait(5)
+                if self._stop_event.is_set():
+                    break
+                logging.info(f"Startup retry {attempt + 1}/24: attempting to connect...")
+                if self._connect_to_romm():
+                    logging.info("Startup retry succeeded")
+                    break
 
         while not self._stop_event.is_set():
             self._stop_event.wait(300)  # sleep 5 minutes (or until _stop_sync wakes us)
@@ -337,8 +420,21 @@ class Plugin:
                 break
             try:
                 if self._romm_client and self._romm_client.authenticated:
-                    self._romm_collections = self._romm_client.get_collections()
-                    logging.debug(f"Refreshed collection list: {len(self._romm_collections)} collections")
+                    # Use updated_after for efficient collection refresh if we have a timestamp
+                    updated_after = self._last_full_fetch_time
+                    new_collections = self._romm_client.get_collections(updated_after=updated_after)
+
+                    if updated_after and new_collections:
+                        # Merge updated collections with existing ones
+                        existing_map = {c['id']: c for c in (self._romm_collections or [])}
+                        for col in new_collections:
+                            existing_map[col['id']] = col
+                        self._romm_collections = list(existing_map.values())
+                        logging.debug(f"5-min poll: merged {len(new_collections)} updated collections")
+                    elif new_collections or not updated_after:
+                        # Full refresh or first fetch
+                        self._romm_collections = new_collections
+                        logging.debug(f"5-min poll: loaded {len(new_collections)} collections")
                 else:
                     logging.info("Attempting to reconnect to RomM...")
                     if self._connect_to_romm():
@@ -390,14 +486,21 @@ class Plugin:
                 available_games=self._available_games or [],
                 known_collections=self._romm_collections,
                 disabled_collection_counts=self._disabled_collection_counts,
+                retroarch=self._retroarch,
+                bios_tracking=self._bios_tracking,
             )
 
             game_count             = status.get('game_count', 0)
             collections            = status.get('collections', [])
             collection_count       = status.get('collection_count', 0)
             actively_syncing_count = status.get('actively_syncing_count', 0)
+            bios_status            = status.get('bios_status', {})
 
-            message = f"{game_count} games, {collection_count} collections"
+            # Show "Fetching games..." until initial fetch completes
+            if self._last_full_fetch_time is None:
+                message = "Fetching games..."
+            else:
+                message = f"{game_count} games, {collection_count} collections"
 
             return {
                 'status':                  'connected',
@@ -406,6 +509,7 @@ class Plugin:
                 'collections':             collections,
                 'collection_count':        collection_count,
                 'actively_syncing_count':  actively_syncing_count,
+                'bios_status':             bios_status,
             }
 
         except Exception as e:
@@ -416,6 +520,181 @@ class Plugin:
                 'details':          {},
                 'collections':      [],
                 'collection_count': 0,
+            }
+
+    async def refresh_from_romm(self, force_full_refresh: bool = False):
+        """Refresh data from RomM server (collections and games).
+
+        Uses updated_after parameter for efficient incremental updates unless
+        force_full_refresh is True.
+
+        Args:
+            force_full_refresh: If True, fetch all data regardless of timestamps
+
+        Returns:
+            dict with status and updated game/collection info
+        """
+        try:
+            if not (self._romm_client and self._romm_client.authenticated):
+                return {
+                    'success': False,
+                    'message': 'Not connected to RomM',
+                    'status': await self.get_service_status()
+                }
+
+            # Get current timestamp in ISO 8601 format with timezone
+            current_time = datetime.now(timezone.utc).isoformat()
+
+            # Determine whether to do incremental or full refresh
+            use_incremental = (
+                not force_full_refresh and
+                self._last_full_fetch_time is not None
+            )
+
+            updated_after = self._last_full_fetch_time if use_incremental else None
+
+            logging.info(f"Refreshing from RomM (incremental={use_incremental}, "
+                        f"updated_after={updated_after})")
+
+            # Fetch collections (with updated_after if available)
+            new_collections = self._romm_client.get_collections(updated_after=updated_after)
+
+            if use_incremental and new_collections:
+                # Merge new collections with existing ones
+                existing_map = {c['id']: c for c in (self._romm_collections or [])}
+                for col in new_collections:
+                    existing_map[col['id']] = col
+                self._romm_collections = list(existing_map.values())
+                logging.info(f"Incremental: merged {len(new_collections)} updated collections")
+            elif new_collections or not use_incremental:
+                # Full refresh or first fetch
+                self._romm_collections = new_collections
+                logging.info(f"Full refresh: loaded {len(new_collections)} collections")
+
+            # Fetch ROMs
+            if use_incremental:
+                # Incremental fetch - only get updated ROMs
+                new_roms_data = self._romm_client.get_roms(
+                    limit=10000,  # High limit for incremental updates
+                    offset=0,
+                    updated_after=updated_after
+                )
+
+                if new_roms_data and len(new_roms_data) == 2:
+                    new_roms, _ = new_roms_data
+
+                    if new_roms:
+                        # Update existing games list
+                        download_dir = Path(self._settings.get('Download', 'rom_directory',
+                                                                '~/RomMSync/roms')).expanduser()
+
+                        # Create a map for fast lookup by rom_id
+                        existing_games_map = {g['rom_id']: g for g in self._available_games if 'rom_id' in g}
+
+                        for rom in new_roms:
+                            rom_id = rom.get('id')
+                            platform_slug = rom.get('platform_slug', 'Unknown')
+                            file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
+                            local_path = download_dir / platform_slug / file_name
+                            is_downloaded = is_path_validly_downloaded(local_path)
+                            local_size = 0
+
+                            if is_downloaded and local_path.exists():
+                                if local_path.is_dir():
+                                    local_size = sum(f.stat().st_size
+                                                   for f in local_path.rglob('*') if f.is_file())
+                                else:
+                                    local_size = local_path.stat().st_size
+
+                            game_data = {
+                                'name': Path(file_name).stem if file_name else rom.get('name', 'Unknown'),
+                                'rom_id': rom_id,
+                                'platform': rom.get('platform_name', 'Unknown'),
+                                'platform_slug': platform_slug,
+                                'file_name': file_name,
+                                'is_downloaded': is_downloaded,
+                                'local_path': str(local_path) if is_downloaded else None,
+                                'local_size': local_size,
+                                'romm_data': {
+                                    'fs_name': rom.get('fs_name'),
+                                    'fs_name_no_ext': rom.get('fs_name_no_ext'),
+                                    'fs_size_bytes': rom.get('fs_size_bytes', 0),
+                                    'platform_id': rom.get('platform_id'),
+                                    'platform_slug': rom.get('platform_slug'),
+                                },
+                            }
+
+                            # Update or add the game
+                            existing_games_map[rom_id] = game_data
+
+                        self._available_games = list(existing_games_map.values())
+                        logging.info(f"Incremental: processed {len(new_roms)} updated ROMs, "
+                                   f"total games: {len(self._available_games)}")
+                    else:
+                        logging.info("Incremental: no new/updated ROMs found")
+            else:
+                # Full refresh - fetch all games
+                roms_result = self._romm_client.get_roms()
+                if roms_result and len(roms_result) == 2:
+                    raw_games, _ = roms_result
+                    self._available_games.clear()
+                    download_dir = Path(self._settings.get('Download', 'rom_directory',
+                                                            '~/RomMSync/roms')).expanduser()
+
+                    for rom in raw_games:
+                        platform_slug = rom.get('platform_slug', 'Unknown')
+                        file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
+                        local_path = download_dir / platform_slug / file_name
+                        is_downloaded = is_path_validly_downloaded(local_path)
+                        local_size = 0
+
+                        if is_downloaded and local_path.exists():
+                            if local_path.is_dir():
+                                local_size = sum(f.stat().st_size
+                                               for f in local_path.rglob('*') if f.is_file())
+                            else:
+                                local_size = local_path.stat().st_size
+
+                        self._available_games.append({
+                            'name': Path(file_name).stem if file_name else rom.get('name', 'Unknown'),
+                            'rom_id': rom.get('id'),
+                            'platform': rom.get('platform_name', 'Unknown'),
+                            'platform_slug': platform_slug,
+                            'file_name': file_name,
+                            'is_downloaded': is_downloaded,
+                            'local_path': str(local_path) if is_downloaded else None,
+                            'local_size': local_size,
+                            'romm_data': {
+                                'fs_name': rom.get('fs_name'),
+                                'fs_name_no_ext': rom.get('fs_name_no_ext'),
+                                'fs_size_bytes': rom.get('fs_size_bytes', 0),
+                                'platform_id': rom.get('platform_id'),
+                                'platform_slug': rom.get('platform_slug'),
+                            },
+                        })
+                    logging.info(f"Full refresh: loaded {len(self._available_games)} games")
+
+            # Update timestamp for both local tracking and polling manager
+            self._last_full_fetch_time = current_time
+            if self._game_polling:
+                self._game_polling.set_last_poll_time(current_time)
+
+            # Get updated status
+            status = await self.get_service_status()
+
+            return {
+                'success': True,
+                'message': f"Refreshed: {status.get('message', '')}",
+                'incremental': use_incremental,
+                'status': status
+            }
+
+        except Exception as e:
+            logging.error(f"refresh_from_romm error: {e}", exc_info=True)
+            return {
+                'success': False,
+                'message': f'Refresh failed: {str(e)[:100]}',
+                'status': await self.get_service_status()
             }
 
     async def toggle_collection_sync(self, collection_name: str, enabled: bool):
@@ -440,6 +719,10 @@ class Plugin:
                 logging.info(f"Enabling auto-sync for: {collection_name}")
                 # Clear any stale disabled-count so build_sync_status uses live cache
                 self._disabled_collection_counts.pop(collection_name, None)
+
+                # Trigger BIOS downloads for this collection's platforms
+                if self._bios_tracking:
+                    self._bios_tracking.download_for_collection(collection_name)
             else:
                 sync_set.discard(collection_name)
                 logging.info(f"Disabling auto-sync for: {collection_name}")
@@ -473,13 +756,16 @@ class Plugin:
                     # on join while check_for_changes() finishes its API call).
                     old_sync = self._collection_sync
                     self._collection_sync = None
+                    # Update BIOS tracking manager's collection_sync reference
+                    if self._bios_tracking:
+                        self._bios_tracking.collection_sync = None
                     threading.Thread(
                         target=old_sync.stop,
                         daemon=True,
                         name="romm-collection-stop",
                     ).start()
             elif enabled and self._romm_client and self._romm_client.authenticated:
-                # First collection enabled — create DaemonCollectionSync now
+                # First collection enabled — create CollectionSyncManager now
                 threading.Thread(target=self._init_collection_sync,
                                  daemon=True, name="romm-collection-init").start()
 
@@ -595,6 +881,7 @@ class Plugin:
 
             rom_directory  = settings.get('Download', 'rom_directory')
             save_directory = settings.get('Download', 'save_directory')
+            bios_directory = settings.get('BIOS', 'custom_path', '')
 
             _default_rom  = str(Path.home() / 'RomMSync' / 'roms')
             _default_save = str(Path.home() / 'RomMSync' / 'saves')
@@ -607,17 +894,21 @@ class Plugin:
                 if not save_directory or save_directory == _default_save:
                     save_directory = retrodeck['save_directory']
                     needs_save     = True
+                if not bios_directory:
+                    bios_directory = str(Path.home() / 'retrodeck' / 'bios')
+                    settings.set('BIOS', 'custom_path', bios_directory)
+                    needs_save = True
             if needs_save:
                 settings.set('Download', 'rom_directory',  rom_directory)
                 settings.set('Download', 'save_directory', save_directory)
                 logging.info(f"Auto-configured RetroDECK paths: ROMs={rom_directory}, "
-                             f"saves={save_directory}")
+                             f"saves={save_directory}, BIOS={bios_directory}")
 
             import socket
             try:
-                hostname = socket.gethostname() or 'Steam Deck'
+                hostname = socket.gethostname() or 'SteamOS'
             except Exception:
-                hostname = 'Steam Deck'
+                hostname = 'SteamOS'
 
             ds = load_decky_settings()
             needs_onboarding = ds.get('needs_onboarding', False)
@@ -628,6 +919,7 @@ class Plugin:
                 'has_password':       has_password,
                 'rom_directory':      rom_directory,
                 'save_directory':     save_directory,
+                'bios_directory':     bios_directory,
                 'device_name':        settings.get('Device', 'device_name'),
                 'device_name_default': hostname,
                 'configured':         bool(url and username and has_password) and not needs_onboarding,
@@ -638,7 +930,8 @@ class Plugin:
             return {'configured': False, 'error': str(e)}
 
     async def save_config(self, url: str, username: str, password: str,
-                          rom_directory: str, save_directory: str, device_name: str):
+                          rom_directory: str, save_directory: str, device_name: str,
+                          bios_directory: str = ''):
         """Save RomM configuration and restart sync to pick up new settings."""
         try:
             if not SYNC_CORE_AVAILABLE:
@@ -656,6 +949,7 @@ class Plugin:
                 settings.set('Download', 'save_directory', save_directory.strip())
             if device_name:
                 settings.set('Device', 'device_name', device_name.strip())
+            settings.set('BIOS', 'custom_path', bios_directory.strip() if bios_directory else '')
 
             ds = load_decky_settings()
             ds.pop('needs_onboarding', None)
@@ -706,13 +1000,18 @@ class Plugin:
             return True
 
     async def reset_all_settings(self):
-        """Delete all downloaded ROMs from synced collections and reset sync state.
-        Credentials (URL/username/password) are preserved."""
+        """Delete all downloaded ROMs from ALL collections, delete downloaded
+        BIOS files, and reset sync state.  Credentials are preserved."""
         import configparser, shutil
         config_dir   = Path.home() / '.config' / 'romm-retroarch-sync'
         ini_path     = config_dir / 'settings.ini'
 
         try:
+            # Grab BIOS system_dir before stopping sync (needs retroarch ref)
+            bios_system_dir = None
+            if self._retroarch and hasattr(self._retroarch, 'bios_manager') and self._retroarch.bios_manager:
+                bios_system_dir = self._retroarch.bios_manager.system_dir
+
             self._stop_sync()
             logging.info("Reset: sync stopped")
 
@@ -721,11 +1020,10 @@ class Plugin:
 
             download_dir = Path(config.get('Download', 'rom_directory',
                                            fallback='~/RomMSync/roms')).expanduser()
-            actively_syncing_str = config.get('Collections', 'actively_syncing', fallback='')
-            synced_collections   = [c for c in actively_syncing_str.split('|') if c]
 
+            # Delete ROMs from ALL collections (not just actively syncing)
             deleted_roms = 0
-            if synced_collections and SYNC_CORE_AVAILABLE and download_dir.exists():
+            if SYNC_CORE_AVAILABLE and download_dir.exists():
                 romm_url = config.get('RomM', 'url',      fallback='')
                 username = config.get('RomM', 'username', fallback='')
                 password = config.get('RomM', 'password', fallback='')
@@ -734,9 +1032,9 @@ class Plugin:
                         client = RomMClient(romm_url, username, password)
                         if client.authenticated:
                             all_collections = client.get_collections()
-                            col_id_map      = {c.get('name'): c.get('id') for c in all_collections}
-                            for col_name in synced_collections:
-                                col_id = col_id_map.get(col_name)
+                            for col in all_collections:
+                                col_id   = col.get('id')
+                                col_name = col.get('name', '')
                                 if col_id is None:
                                     continue
                                 for rom in client.get_collection_roms(col_id):
@@ -760,6 +1058,35 @@ class Plugin:
                     except Exception as e:
                         logging.error(f"Reset: ROM deletion error: {e}", exc_info=True)
 
+            # Delete downloaded BIOS files from the system directory
+            deleted_bios = 0
+            if bios_system_dir and bios_system_dir.exists():
+                try:
+                    from bios_manager import BIOS_DATABASE
+                    known_bios_files = set()
+                    for platform_info in BIOS_DATABASE.values():
+                        for bios_entry in platform_info.get('bios_files', []):
+                            fname = bios_entry.get('file')
+                            if fname:
+                                known_bios_files.add(fname)
+
+                    for bios_file in known_bios_files:
+                        bios_path = bios_system_dir / bios_file
+                        if bios_path.exists():
+                            try:
+                                bios_path.unlink()
+                                deleted_bios += 1
+                                logging.info(f"Reset: deleted BIOS file {bios_file}")
+                            except Exception as e:
+                                logging.error(f"Reset: failed to delete BIOS {bios_file}: {e}")
+
+                    logging.info(f"Reset: deleted {deleted_bios} BIOS file(s)")
+                except ImportError:
+                    logging.warning("Reset: bios_manager module not available, skipping BIOS deletion")
+                except Exception as e:
+                    logging.error(f"Reset: BIOS deletion error: {e}", exc_info=True)
+
+            # Clear all collection settings (disable all sync collections)
             if config.has_section('Collections'):
                 config.set('Collections', 'actively_syncing',  '')
                 config.set('Collections', 'selected_for_sync', '')
@@ -777,8 +1104,8 @@ class Plugin:
             ds['needs_onboarding'] = True
             save_decky_settings(ds)
 
-            logging.info(f"Reset complete: {deleted_roms} ROM file(s) deleted")
-            return {'success': True, 'deleted_roms': deleted_roms}
+            logging.info(f"Reset complete: {deleted_roms} ROM(s), {deleted_bios} BIOS file(s) deleted")
+            return {'success': True, 'deleted_roms': deleted_roms, 'deleted_bios': deleted_bios}
 
         except Exception as e:
             logging.error(f"reset_all_settings error: {e}", exc_info=True)
@@ -813,3 +1140,58 @@ class Plugin:
         except Exception as e:
             logging.error(f"set_logging_enabled error: {e}")
             return False
+
+    async def enable_retroarch_setting(self, setting_type: str):
+        """Enable a RetroArch setting (network_commands or savestate_thumbnails)."""
+        try:
+            if not SYNC_CORE_AVAILABLE:
+                return {'success': False, 'message': 'sync_core not available'}
+
+            if not self._retroarch:
+                return {'success': False, 'message': 'RetroArch interface not initialized'}
+
+            success, message = self._retroarch.enable_retroarch_setting(setting_type)
+            logging.info(f"enable_retroarch_setting({setting_type}): {message}")
+            return {'success': success, 'message': message}
+
+        except Exception as e:
+            logging.error(f"enable_retroarch_setting error: {e}", exc_info=True)
+            return {'success': False, 'message': f'Error: {str(e)}'}
+
+    async def get_bios_status(self):
+        """Get detailed BIOS download status for all platforms.
+
+        Returns:
+            dict with BIOS status including downloading, ready, and failed platforms
+        """
+        try:
+            if self._bios_tracking:
+                return self._bios_tracking.get_status()
+            else:
+                return {
+                    'downloading_count': 0,
+                    'ready_count': 0,
+                    'failed_count': 0,
+                    'downloading': [],
+                    'ready': [],
+                    'failures': {},
+                    'platforms': {},
+                    'total_platforms': 0,
+                    'platforms_ready': 0,
+                    'manual_platforms': 0,
+                }
+        except Exception as e:
+            logging.error(f"get_bios_status error: {e}", exc_info=True)
+            return {
+                'downloading_count': 0,
+                'ready_count': 0,
+                'failed_count': 0,
+                'downloading': [],
+                'ready': [],
+                'failures': {},
+                'platforms': {},
+                'total_platforms': 0,
+                'platforms_ready': 0,
+                'manual_platforms': 0,
+                'error': str(e)
+            }
