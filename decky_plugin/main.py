@@ -1111,6 +1111,27 @@ class Plugin:
             logging.error(f"reset_all_settings error: {e}", exc_info=True)
             return {'success': False, 'error': str(e)}
 
+    async def delete_device(self):
+        """Unregister the current device from the server and clear local device ID."""
+        try:
+            device_id = self._settings.get('Device', 'device_id', '') if self._settings else ''
+            if not device_id:
+                return {'success': False, 'message': 'No device registered'}
+
+            if not self._romm_client or not self._romm_client.authenticated:
+                return {'success': False, 'message': 'Not connected to RomM'}
+
+            if self._romm_client.delete_device(device_id):
+                self._settings.set('Device', 'device_id', '')
+                logging.info(f"Device {device_id} unregistered")
+                return {'success': True, 'message': f'Device {device_id} deleted'}
+            else:
+                return {'success': False, 'message': 'Server rejected device deletion'}
+
+        except Exception as e:
+            logging.error(f"delete_device error: {e}", exc_info=True)
+            return {'success': False, 'message': str(e)}
+
     async def set_logging_enabled(self, enabled: bool):
         try:
             settings = load_decky_settings()
