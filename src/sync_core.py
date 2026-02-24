@@ -1938,6 +1938,71 @@ class RomMClient:
             logging.warning(f"Error confirming download: {e}")
             return False
 
+    def download_save_by_id(self, save_id, save_type, download_path, device_id=None, fallback_url=None):
+        """Download a specific save/state by its ID.
+
+        Args:
+            save_id: The save/state ID to download
+            save_type: 'saves' or 'states'
+            download_path: Path where to save the downloaded file
+            device_id: Optional device ID for optimistic download confirmation
+            fallback_url: Optional fallback download_path URL from metadata
+        Returns:
+            True if download succeeded, False otherwise
+        """
+        if not self.ensure_authenticated() or not save_id:
+            return False
+
+        try:
+            download_url = urljoin(self.base_url, f"/api/{save_type}/{save_id}/content")
+            if device_id:
+                download_url += f"?device_id={device_id}&optimistic=true"
+
+            response = self.session.get(download_url, stream=True, timeout=30)
+            used_device_id = True
+
+            # Retry without device_id on 404
+            if response.status_code == 404 and device_id:
+                download_url = urljoin(self.base_url, f"/api/{save_type}/{save_id}/content")
+                response = self.session.get(download_url, stream=True, timeout=30)
+                used_device_id = False
+
+            # Try fallback URL (download_path from metadata)
+            if response.status_code != 200 and fallback_url:
+                full_fallback = urljoin(self.base_url, fallback_url)
+                logging.debug(f"Trying fallback URL for {save_type} {save_id}: {fallback_url}")
+                response = self.session.get(full_fallback, stream=True, timeout=30)
+                used_device_id = False
+
+            if response.status_code != 200:
+                logging.warning(f"Failed to download {save_type} {save_id}: HTTP {response.status_code}")
+                return False
+
+            content_type = response.headers.get('content-type', '')
+            if 'text/html' in content_type.lower():
+                logging.warning(f"Got HTML response instead of binary for {save_type} {save_id}")
+                return False
+
+            download_path.parent.mkdir(parents=True, exist_ok=True)
+            actual_bytes = 0
+            with open(download_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        actual_bytes += len(chunk)
+
+            if download_path.exists() and download_path.stat().st_size > 0:
+                if device_id and used_device_id:
+                    self.confirm_save_downloaded(save_id, save_type, device_id)
+                return True
+
+            logging.warning(f"Download failed or empty for {save_type} {save_id}")
+            return False
+
+        except Exception as e:
+            logging.warning(f"Error downloading {save_type} {save_id}: {e}")
+            return False
+
     def track_save(self, save_id, save_type, device_id):
         """Re-enable sync tracking for a save/state on this device
 
@@ -2113,12 +2178,6 @@ class RomMClient:
             (slot, autocleanup, autocleanup_limit) tuple
         """
         import re
-        name = Path(file_path).name.lower()
-
-        # Auto save state: .state.auto (Path.suffix returns .auto, so check name)
-        if name.endswith('.state.auto'):
-            return "auto", True, 5
-
         suffix = Path(file_path).suffix.lower()
 
         # Battery saves — no slot, no cleanup
@@ -2130,8 +2189,8 @@ class RomMClient:
         if match:
             return f"slot{match.group(1)}", True, 5
 
-        # Quick save state: .state
-        if suffix == '.state':
+        # Quick/auto save state: .state (also covers .auto.state since Path.suffix returns .state)
+        if 'state' in suffix:
             return "quicksave", True, 10
 
         return None, False, None
@@ -3832,7 +3891,10 @@ class RetroArchInterface:
 
     def convert_to_retroarch_filename(self, original_filename, save_type, target_directory, slot=None):
         """
-        Convert RomM filename with timestamp to RetroArch expected format
+        Convert RomM filename with timestamp to RetroArch expected format.
+
+        For states, the slot parameter (e.g. "quicksave", "slot5") determines the
+        correct extension (.state, .state5, etc.).
         """
         import re
         from pathlib import Path
@@ -3840,14 +3902,6 @@ class RetroArchInterface:
         # Extract the base filename by removing timestamp brackets
         # Pattern matches: [YYYY-MM-DD HH-MM-SS-mmm] or similar timestamp formats
         timestamp_pattern = r'\s*\[[\d\-\s:]+\]'
-
-        # Handle .state.auto compound extension (Path.stem strips only .auto)
-        if original_filename.lower().endswith('.state.auto'):
-            # Strip .state.auto, then remove timestamp from the game name
-            game_name = original_filename[:-len('.state.auto')]
-            game_name = re.sub(timestamp_pattern, '', game_name)
-            return f"{game_name}.state.auto"
-
         base_name = re.sub(timestamp_pattern, '', Path(original_filename).stem)
 
         # Get the original extension
@@ -3862,18 +3916,33 @@ class RetroArchInterface:
                 target_filename = f"{base_name}.srm"
 
         elif save_type == 'states':
-            # If slot is "auto", produce .state.auto
-            if slot == 'auto':
-                target_filename = f"{base_name}.state.auto"
+            # Use slot info to determine correct state extension
+            if slot:
+                target_filename = self._state_filename_from_slot(base_name, slot)
             else:
-                # For save states, determine the slot from existing files
                 target_filename = self.determine_state_filename(base_name, target_directory)
-        
+
         else:
             # Unknown save type, keep original
             target_filename = original_filename
-        
+
         return target_filename
+
+    def _state_filename_from_slot(self, base_name, slot):
+        """Map a RomM slot name back to the RetroArch state filename.
+
+        Slot mapping (mirrors get_slot_info upload logic):
+          "quicksave" → .state
+          "slot1"     → .state1
+          "slot5"     → .state5
+          etc.
+        """
+        import re
+        match = re.match(r'slot(\d+)$', slot)
+        if match:
+            return f"{base_name}.state{match.group(1)}"
+        # quicksave or any other slot name → default .state
+        return f"{base_name}.state"
 
     def determine_state_filename(self, base_name, target_directory):
         """
@@ -4435,23 +4504,13 @@ class AutoSyncManager:
                     # 1. Check if RetroArch process is running
                     retroarch_running = self.is_retroarch_running()
 
-                    # 2. Check if RetroArch network is responding
-                    network_responding = self.is_retroarch_network_active()
+                    # 2. Check if RetroArch network is responding (also returns content path)
+                    network_responding, network_content_path = self.is_retroarch_network_active()
 
                     # Log state changes
                     if retroarch_running != retroarch_was_running:
                         if retroarch_running:
                             self.log("🎮 RetroArch launched")
-                            # Pre-launch sync: download saves before content loads
-                            # RetroArch needs .srm and .state.auto before it finishes loading
-                            try:
-                                current_content = self.get_retroarch_current_game()
-                                if current_content:
-                                    self.log(f"📥 Pre-launch sync for: {Path(current_content).name}")
-                                    self.sync_saves_for_rom_file(current_content)
-                                    self.last_sync_time[current_content] = current_time
-                            except Exception as e:
-                                logging.debug(f"Pre-launch sync error: {e}")
                         else:
                             self.log("🎮 RetroArch closed")
                             network_retry_count = 0  # Reset on close
@@ -4463,16 +4522,15 @@ class AutoSyncManager:
                     # 3. PRIORITY: Network state detection (content loaded/unloaded)
                     if network_responding != last_network_state:
                         if network_responding:
-                            current_content = self.get_retroarch_current_game()
+                            # Use content path from GET_STATUS (instant, no race condition)
+                            # Fall back to history file if GET_STATUS didn't include a path
+                            current_content = network_content_path or self.get_retroarch_current_game()
                             if current_content:
-                                # Skip if pre-launch sync already handled this content
-                                last_synced = self.last_sync_time.get(current_content, 0)
-                                if current_time - last_synced < 30:
-                                    self.log(f"🎯 RetroArch content loaded: {Path(current_content).name} (already synced)")
-                                else:
-                                    self.log(f"🎯 RetroArch content loaded: {Path(current_content).name}")
-                                    self.sync_saves_for_rom_file(current_content)
-                                    self.last_sync_time[current_content] = current_time
+                                # For display: use filename if path, strip CRC if content label
+                                display_name = Path(current_content).name if '/' in current_content else current_content.split(',crc32=')[0]
+                                self.log(f"🎯 RetroArch content loaded: {display_name}")
+                                self.sync_saves_for_rom_file(current_content)
+                                self.last_sync_time[current_content] = current_time
                                 last_network_state = network_responding
                                 network_retry_count = 0
                             elif network_retry_count < 3:
@@ -4570,38 +4628,74 @@ class AutoSyncManager:
                 return False
 
     def is_retroarch_network_active(self):
-        """Check if RetroArch has content loaded via network commands"""
+        """Check if RetroArch has content loaded via network commands.
+
+        Returns:
+            tuple: (network_responding: bool, content_path: str or None)
+            - (False, None) — network not responding
+            - (True, None) — network active but no content loaded (menu/contentless)
+            - (True, path) — network active with content loaded
+        """
         try:
             import socket
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.settimeout(0.5)
-            
+
             # Send GET_STATUS command
             sock.sendto(b'GET_STATUS', ('127.0.0.1', 55355))
-            
+
             # Try to receive response
             try:
-                response, _ = sock.recvfrom(1024)
+                response, _ = sock.recvfrom(4096)
                 response_text = response.decode('utf-8', errors='ignore').strip()
-                
-                # Check if response indicates content is loaded
-                # RetroArch returns different status when content is loaded vs just menu
-                content_loaded = (
-                    'CONTENTLESS' not in response_text.upper() and
-                    'MENU' not in response_text.upper() and 
-                    len(response_text) > 0 and
-                    response_text != 'N/A'
-                )
-                
+
                 sock.close()
-                return content_loaded
-                
+
+                if not response_text or response_text == 'N/A':
+                    return (False, None)
+
+                # Check if content is loaded vs just menu/contentless
+                upper = response_text.upper()
+                if 'CONTENTLESS' in upper or 'MENU' in upper:
+                    return (True, None)
+
+                # Parse content path from GET_STATUS response
+                # Format: "GET_STATUS PLAYING corename,/path/to/content"
+                # or:     "GET_STATUS PAUSED corename,/path/to/content"
+                content_path = self._parse_content_path_from_status(response_text)
+                return (True, content_path)
+
             except socket.timeout:
                 sock.close()
-                return False
-                
+                return (False, None)
+
         except Exception:
-            return False
+            return (False, None)
+
+    def _parse_content_path_from_status(self, status_response):
+        """Parse the content path from a GET_STATUS response.
+
+        Expected format: "GET_STATUS PLAYING corename,/path/to/content"
+        """
+        try:
+            # Split into parts: ["GET_STATUS", "PLAYING", "corename,/path/to/content"]
+            parts = status_response.split(' ', 2)
+            if len(parts) < 3:
+                return None
+
+            core_and_path = parts[2]
+            # Split on first comma: core name vs content path
+            comma_idx = core_and_path.find(',')
+            if comma_idx < 0:
+                return None
+
+            content_path = core_and_path[comma_idx + 1:].strip()
+            if not content_path or content_path == 'N/A':
+                return None
+
+            return content_path
+        except Exception:
+            return None
 
     def get_retroarch_current_game(self):
         """Get currently loaded game from RetroArch history playlist (JSON format)"""
@@ -4642,14 +4736,30 @@ class AutoSyncManager:
                                 return rom_path
                             
         except Exception as e:
-            logging.debug(f"History parsing error: {e}")
+            print(f"❌ History parsing error: {e}")
         return None
 
     def sync_saves_for_rom_file(self, rom_path):
-        """Sync saves for a specific ROM file that's being launched"""
+        """Sync saves for a specific ROM file or content identifier.
+
+        rom_path can be:
+        - A file path: /path/to/Star Wars - Shadows of the Empire (Europe).zip
+        - An archive path: /path/to/file.zip#internal.rom
+        - A GET_STATUS content label: Star Wars - Shadows of the Empire (Europe),crc32=f0a191bf
+        """
         try:
-            # Handle archive paths (ZIP files with # separator)
-            if '#' in rom_path:
+            # Detect GET_STATUS content label (not a file path)
+            # Format: "Game Name,crc32=XXXXXXXX" or "Game Name"
+            is_content_label = not ('/' in rom_path or '\\' in rom_path)
+
+            if is_content_label:
+                # Strip CRC suffix if present: "Game Name,crc32=abc123" → "Game Name"
+                content_name = rom_path.split(',crc32=')[0].strip()
+                self.log(f"🎯 Detected content: {content_name} - syncing saves...")
+                rom_filename = None
+                rom_stem = content_name
+            elif '#' in rom_path:
+                # Handle archive paths (ZIP files with # separator)
                 archive_path, internal_file = rom_path.split('#', 1)
                 rom_filename = Path(archive_path).name  # Use archive filename
                 rom_stem = Path(archive_path).stem
@@ -4658,17 +4768,21 @@ class AutoSyncManager:
                 rom_filename = Path(rom_path).name
                 rom_stem = Path(rom_path).stem
                 self.log(f"🎯 Detected ROM: {rom_filename} - syncing saves...")
-            
+
             # Find matching game in library
             games = self.get_games()
             matching_game = None
-            
+
             for game in games:
                 game_filename = game.get('file_name', '')
-                if game_filename == rom_filename or Path(game_filename).stem == rom_stem:
+                game_stem = Path(game_filename).stem if game_filename else ''
+                if rom_filename and (game_filename == rom_filename or game_stem == rom_stem):
                     matching_game = game
                     break
-            
+                elif is_content_label and (game_stem == rom_stem or game.get('name', '') == rom_stem):
+                    matching_game = game
+                    break
+
             if matching_game:
                 self.log(f"📥 Syncing saves for: {matching_game.get('name')}")
                 self.download_saves_for_specific_game(matching_game)
@@ -4938,6 +5052,9 @@ class AutoSyncManager:
                         limit=50
                     )
                     device_saves_to_skip = {s.get('id') for s in device_saves if s.get('id')}
+                    self.log(f"🔍 DEBUG: Found {len(device_saves_to_skip)} saves from this device")
+                    for save in device_saves:
+                        self.log(f"   Save ID: {save.get('id')}, file: {save.get('file_name')}, updated: {save.get('updated_at')}")
 
                     device_states = self.romm_client.get_saves_by_device(
                         self.parent_window.device_id,
@@ -4946,11 +5063,14 @@ class AutoSyncManager:
                         limit=50
                     )
                     device_states_to_skip = {s.get('id') for s in device_states if s.get('id')}
+                    self.log(f"🔍 DEBUG: Found {len(device_states_to_skip)} states from this device")
+                    for state in device_states:
+                        self.log(f"   State ID: {state.get('id')}, file: {state.get('file_name')}, updated: {state.get('updated_at')}")
 
                     if device_saves_to_skip or device_states_to_skip:
                         self.log(f"🔄 Optimistic sync: {len(device_saves_to_skip)} saves, {len(device_states_to_skip)} states already on device")
                 except Exception as e:
-                    logging.debug(f"Could not query device saves: {e}")
+                    print(f"Could not query device saves: {e}")
                     # Continue without optimistic sync
 
             # Get user preference for overwrite behavior
@@ -4970,6 +5090,7 @@ class AutoSyncManager:
             downloads_successful = 0
             downloads_attempted = 0
             conflicts_detected = 0
+            skipped_count = 0
             
             # Helper function to safely parse timestamps
             def parse_timestamp(timestamp_str):
@@ -5200,9 +5321,11 @@ class AutoSyncManager:
                         if device_has_current:
                             self.log(f"  ⏭️ Skipping save (device has current version): {latest_save.get('file_name', 'unknown')}")
                             skip = True
+                            skipped_count += 1
                         elif save_id in device_saves_to_skip:
                             self.log(f"  ⏭️ Skipping save (already on device): {latest_save.get('file_name', 'unknown')}")
                             skip = True
+                            skipped_count += 1
 
                     if not skip and original_filename and emulator_save_dir and final_path:
                         downloads_attempted += 1
@@ -5246,19 +5369,50 @@ class AutoSyncManager:
                                 except Exception as e:
                                     self.log(f"  ❌ Failed to rename save: {e}")
 
-            # Process states
+            # Process states — download latest state from each slot
             if 'states' in self.retroarch.save_dirs:
                 state_base_dir = self.retroarch.save_dirs['states']
-                user_states = rom_details.get('user_states', [])
 
-                latest_state = get_latest_file(user_states, "state")
+                # Use summary endpoint to get latest state per slot
+                states_summary = self.romm_client.get_saves_summary(rom_id, save_type='states')
+                slot_states = []
+                if states_summary and isinstance(states_summary, dict):
+                    for slot_info in states_summary.get('slots', []):
+                        latest = slot_info.get('latest')
+                        if latest:
+                            slot_states.append(latest)
 
-                if latest_state:
+                # Fallback: if summary unavailable, group user_states by slot locally
+                if not slot_states:
+                    user_states = rom_details.get('user_states', [])
+                    if user_states:
+                        slot_groups = {}
+                        for state in user_states:
+                            if not isinstance(state, dict):
+                                continue
+                            slot = state.get('slot')
+                            if not slot and state.get('file_name'):
+                                slot, _, _ = RomMClient.get_slot_info(state['file_name'])
+                            slot_key = slot or 'quicksave'
+                            if slot_key not in slot_groups:
+                                slot_groups[slot_key] = []
+                            slot_groups[slot_key].append(state)
+                        for slot_key, states in slot_groups.items():
+                            latest = get_latest_file(states, f"state/{slot_key}")
+                            if latest:
+                                slot_states.append(latest)
+
+                for latest_state in slot_states:
                     state_id = latest_state.get('id')
                     original_filename = latest_state.get('file_name', '')
                     romm_emulator = latest_state.get('emulator', 'unknown')
+                    state_slot = latest_state.get('slot')
 
-                    # Compute local path to check if file exists before skipping
+                    # Infer slot from filename extension if not provided by API
+                    if not state_slot and original_filename:
+                        state_slot, _, _ = RomMClient.get_slot_info(original_filename)
+
+                    # Compute local path
                     final_path = None
                     emulator_state_dir = None
                     if original_filename:
@@ -5271,11 +5425,11 @@ class AutoSyncManager:
                             emulator_state_dir = state_base_dir / retroarch_emulator_dir
                         if emulator_state_dir:
                             retroarch_filename = self.retroarch.convert_to_retroarch_filename(
-                                original_filename, 'states', emulator_state_dir
+                                original_filename, 'states', emulator_state_dir, slot=state_slot
                             )
                             final_path = emulator_state_dir / retroarch_filename
 
-                    # Only skip download if the local file actually exists
+                    # Skip logic
                     skip = False
                     if final_path and final_path.exists():
                         device_id = self.settings.get('Device', 'device_id', '') or None
@@ -5289,15 +5443,17 @@ class AutoSyncManager:
                         if device_has_current:
                             self.log(f"  ⏭️ Skipping state (device has current version): {latest_state.get('file_name', 'unknown')}")
                             skip = True
+                            skipped_count += 1
                         elif state_id in device_states_to_skip:
                             self.log(f"  ⏭️ Skipping state (already on device): {latest_state.get('file_name', 'unknown')}")
                             skip = True
+                            skipped_count += 1
 
                     if not skip and original_filename and emulator_state_dir and final_path:
                         downloads_attempted += 1
                         emulator_state_dir.mkdir(parents=True, exist_ok=True)
 
-                        # Enhanced conflict detection
+                        # Conflict detection
                         should_download, reason = should_download_file(final_path, latest_state, "state")
 
                         if not should_download:
@@ -5317,10 +5473,10 @@ class AutoSyncManager:
                             temp_path = emulator_state_dir / original_filename
                             self.log(f"  📥 {reason} - downloading: {original_filename} → {retroarch_filename}")
 
-                            # Get device_id from settings
                             device_id = self.settings.get('Device', 'device_id', '') or None
 
-                            if self.romm_client.download_save(rom_id, 'states', temp_path, device_id):
+                            fallback_url = latest_state.get('download_path')
+                            if self.romm_client.download_save_by_id(state_id, 'states', temp_path, device_id, fallback_url=fallback_url):
                                 try:
                                     if temp_path != final_path:
                                         temp_path.rename(final_path)
@@ -5374,71 +5530,8 @@ class AutoSyncManager:
 
                                 except Exception as e:
                                     self.log(f"  ❌ Failed to process state: {e}")
-            
-            # Process auto save state (.state.auto) separately
-            if 'states' in self.retroarch.save_dirs:
-                state_base_dir = self.retroarch.save_dirs['states']
-                user_states = rom_details.get('user_states', [])
-
-                # Find latest state with slot="auto"
-                auto_states = [s for s in user_states if isinstance(s, dict) and s.get('slot') == 'auto']
-                if auto_states:
-                    latest_auto = max(auto_states, key=lambda x: x.get('updated_at', ''))
-                    auto_id = latest_auto.get('id')
-                    auto_filename = latest_auto.get('file_name', '')
-                    auto_emulator = latest_auto.get('emulator', 'unknown')
-
-                    if auto_filename:
-                        # Compute local path
-                        folder_structure = self.retroarch.detect_save_folder_structure()
-                        if folder_structure == 'platform_slugs':
-                            platform_slug = self.get_platform_slug_from_emulator(auto_emulator)
-                            auto_state_dir = state_base_dir / platform_slug
-                        else:
-                            retroarch_emulator_dir = self.retroarch.get_retroarch_directory_name(auto_emulator)
-                            auto_state_dir = state_base_dir / retroarch_emulator_dir
-
-                        if auto_state_dir:
-                            retroarch_filename = self.retroarch.convert_to_retroarch_filename(
-                                auto_filename, 'states', auto_state_dir, slot='auto'
-                            )
-                            auto_final_path = auto_state_dir / retroarch_filename
-
-                            # Check if we should skip
-                            auto_skip = False
-                            if auto_final_path.exists():
-                                device_id = self.settings.get('Device', 'device_id', '') or None
-                                if device_id and latest_auto.get('device_syncs'):
-                                    for sync in latest_auto['device_syncs']:
-                                        if sync.get('device_id') == device_id and sync.get('is_current'):
-                                            auto_skip = True
-                                            break
-                                if not auto_skip and auto_id in device_states_to_skip:
-                                    auto_skip = True
-
-                            if auto_skip:
-                                self.log(f"  ⏭️ Skipping auto state (already on device): {auto_filename}")
                             else:
-                                auto_state_dir.mkdir(parents=True, exist_ok=True)
-                                temp_path = auto_state_dir / auto_filename
-                                device_id = self.settings.get('Device', 'device_id', '') or None
-
-                                self.log(f"  📥 Downloading auto state: {auto_filename} → {retroarch_filename}")
-                                if self.romm_client.download_save(rom_id, 'states', temp_path, device_id):
-                                    try:
-                                        if temp_path != auto_final_path:
-                                            if auto_final_path.exists():
-                                                auto_final_path.unlink()
-                                            temp_path.rename(auto_final_path)
-                                        downloads_successful += 1
-                                        self.log(f"  ✅ Auto state ready: {retroarch_filename}")
-                                        # Skip auto-upload for recently downloaded files
-                                        if hasattr(self, 'upload_debounce'):
-                                            self.upload_debounce[str(auto_final_path)] = time.time() + 30
-                                        elif hasattr(self, 'parent_window') and hasattr(self.parent_window, 'auto_sync') and self.parent_window.auto_sync:
-                                            self.parent_window.auto_sync.upload_debounce[str(auto_final_path)] = time.time() + 30
-                                    except Exception as e:
-                                        self.log(f"  ❌ Failed to process auto state: {e}")
+                                self.log(f"  ❌ download_save_by_id failed for state {state_id}")
 
             # Enhanced summary
             if downloads_attempted > 0:
@@ -5459,6 +5552,8 @@ class AutoSyncManager:
                     self.log(f"🛡️ {game_name} local saves/states protected from overwrite")
                 else:
                     self.log(f"✅ {game_name} saves/states already up to date")
+            elif skipped_count > 0:
+                self.log(f"✅ {game_name} saves/states already up to date")
             else:
                 self.log(f"📭 No saves/states found on server for {game_name}")
                     
@@ -5536,9 +5631,6 @@ class SaveFileHandler(FileSystemEventHandler):
         """Check if the file is a save file we should monitor"""
         try:
             path = Path(file_path)
-            # Handle .state.auto (compound extension — Path.suffix returns .auto)
-            if path.name.lower().endswith('.state.auto'):
-                return self.save_type == 'states'
             return path.suffix.lower() in self.extensions
         except:
             return False

@@ -2426,26 +2426,26 @@ class EnhancedLibrarySection:
         except:
             return False
 
-    def cache_collections_data(self):
+    def cache_collections_data(self, force_refresh=False):
         """Cache collections with full processed game caching"""
         if not (self.parent.romm_client and self.parent.romm_client.authenticated):
             return
-        
+
         def load_collections_optimized():
             try:
                 import time, json
                 start_time = time.time()
-                
+
                 # Cache file paths
                 cache_dir = Path.home() / '.cache' / 'romm_launcher'
                 cache_dir.mkdir(parents=True, exist_ok=True)
                 server_hash = self.parent.romm_client.base_url.replace('http://', '').replace('https://', '').replace(':', '_').replace('/', '_')
-                
+
                 roms_cache_file = cache_dir / f'collections_{server_hash}.json'
                 games_cache_file = cache_dir / f'games_{server_hash}.json'
-                
+
                 # Try to load processed games cache first (fastest path)
-                if games_cache_file.exists():
+                if not force_refresh and games_cache_file.exists():
                     try:
                         cache_age = time.time() - games_cache_file.stat().st_mtime
                         if cache_age < 3600:  # 1 hour
@@ -2491,7 +2491,10 @@ class EnhancedLibrarySection:
                         pass
                 
                 # Load ROM cache if no games cache
-                if roms_cache_file.exists():
+                if force_refresh:
+                    self._collections_rom_cache = {}
+                    print(f"🔄 Force refresh: bypassing ROM cache")
+                elif roms_cache_file.exists():
                     try:
                         with open(roms_cache_file, 'r') as f:
                             self._collections_rom_cache = json.load(f)
@@ -2500,7 +2503,7 @@ class EnhancedLibrarySection:
                         self._collections_rom_cache = {}
                 else:
                     self._collections_rom_cache = {}
-                
+
                 # Get current collections and fetch any new ones
                 all_collections = self.parent.romm_client.get_collections()
                 custom_collections = [c for c in all_collections if not c.get('is_auto_generated', False)]
@@ -7786,10 +7789,11 @@ class SyncWindow(Gtk.ApplicationWindow):
                         self.log_message(f"⚠️ Could not fetch platform names: {e}")
 
                     # Move this right after authentication success, before other operations
+                    auto_refresh_on_startup = self.settings.get('RomM', 'auto_refresh') == 'true'
                     def preload_collections_smart():
                         if hasattr(self, 'library_section'):
-                            # Always cache collections data to ensure instant loading
-                            self.library_section.cache_collections_data()
+                            # Skip disk cache when auto-refresh is enabled to get fresh data
+                            self.library_section.cache_collections_data(force_refresh=auto_refresh_on_startup)
 
                     # Call immediately, not as thread
                     GLib.timeout_add(100, lambda: (threading.Thread(target=preload_collections_smart, daemon=True).start(), False)[1])
@@ -7875,6 +7879,11 @@ class SyncWindow(Gtk.ApplicationWindow):
                                                 self.update_connection_ui_with_message(f"⟳ Cache outdated ({count_diff} games difference) - auto-refreshing...")
                                                 self.log_message(f"📊 Auto-refreshing: {count_diff} games difference detected")
                                                 self.refresh_games_list()
+                                                # Invalidate collections cache so collection view gets fresh data
+                                                if hasattr(self, 'library_section'):
+                                                    self.library_section.collections_cache_time = 0
+                                                    if self.library_section.current_view_mode == 'collection':
+                                                        self.library_section.load_collections_view()
                                             GLib.idle_add(auto_refresh)
                                         else:
                                             def show_outdated():
@@ -7908,9 +7917,6 @@ class SyncWindow(Gtk.ApplicationWindow):
                             # Auto-refresh disabled, show cache info
                             self.update_connection_ui_with_message(f"🟢 Connected - {cached_count:,} games cached")
                             self.log_message(f"📂 Showing {cached_count:,} cached games (auto-refresh disabled)")
-                        
-                        # Check cache freshness in background
-                        threading.Thread(target=check_cache_freshness, daemon=True).start()
                         
                     else:
                         # Always fetch on first startup (no cached games)
@@ -9798,7 +9804,7 @@ class SyncWindow(Gtk.ApplicationWindow):
         logging.info(f"Launching game: {game.get('name')}")
         logging.debug(f"ROM path: {rom_path}, Platform: {platform_name}")
 
-        # Pre-launch sync is handled by AutoSyncManager when RetroArch process is detected
+        # Pre-launch sync is handled by AutoSyncManager when RetroArch content is detected
 
         # Let RetroArch interface handle the actual launching
         success, message = self.retroarch.launch_game(rom_path, platform_name)
@@ -10735,6 +10741,8 @@ class SyncWindow(Gtk.ApplicationWindow):
         # Decrement bulk download counter if it exists
         if hasattr(self, '_bulk_download_remaining'):
             self._bulk_download_remaining -= 1
+
+    # NOTE: download_saves_for_game() removed — pre-launch sync handled by AutoSyncManager
 
     def on_sync_to_romm(self, button):
         """Upload local saves from RetroArch to RomM using NEW method."""
