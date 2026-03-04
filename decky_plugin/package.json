@@ -1,7 +1,7 @@
 {
-  "name": "romm-sync-monitor",
-  "version": "1.0.0",
-  "description": "RomM Sync Service Monitor",
+  "name": "romm-retroarch-sync",
+  "version": "1.4.0",
+  "description": "Sync ROMs, saves and states between RomM and RetroArch on Steam Deck",
   "type": "module",
   "scripts": {
     "build": "rollup -c",
@@ -13,7 +13,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/SteamDeckHomebrew/decky-plugin-template.git"
+    "url": "git+https://github.com/Covin90/romm-retroarch-sync.git"
   },
   "keywords": [
     "decky",
@@ -22,12 +22,12 @@
     "steam-deck",
     "deck"
   ],
-  "author": "You <you@you.tld>",
-  "license": "BSD-3-Clause",
+  "author": "Hector Eduardo \"Covin\" Silveri",
+  "license": "GPL-3.0-or-later",
   "bugs": {
-    "url": "https://github.com/SteamDeckHomebrew/decky-plugin-template/issues"
+    "url": "https://github.com/Covin90/romm-retroarch-sync/issues"
   },
-  "homepage": "https://github.com/SteamDeckHomebrew/decky-plugin-template#readme",
+  "homepage": "https://github.com/Covin90/romm-retroarch-sync#readme",
   "devDependencies": {
     "@decky/rollup": "^1.0.1",
     "@decky/ui": "^4.7.2",

@@ -1055,7 +1055,7 @@ class EnhancedLibrarySection:
         self.completed_sync_collections = set()  # Collections that have completed sync (shows green immediately)
         self.collection_auto_sync_enabled = False
         self.collection_sync_thread = None
-        self.collection_sync_interval = 120
+        self.collection_sync_interval = 30
         self.load_selected_collections()
 
     def is_path_validly_downloaded(self, path):
@@ -1403,17 +1403,29 @@ class EnhancedLibrarySection:
         else:
             return 'partial'
         
-    def refresh_collection_checkboxes(self):
-        """Refresh collection display after auto-sync state changes"""
+    def refresh_collection_checkboxes(self, specific_collection=None):
+        """Refresh collection display after auto-sync state changes
+        
+        Args:
+            specific_collection: If provided, only refresh this specific collection.
+                                  Otherwise, refresh all collections.
+        """
         if hasattr(self, 'current_view_mode') and self.current_view_mode == 'collection':
-            # Force rebind of all collection rows
             model = self.library_model.tree_model
             if model:
+                # Only trigger property notifications, not items_changed
+                # This prevents affecting other collections' expansion states
                 for i in range(model.get_n_items()):
                     tree_item = model.get_item(i)
                     if tree_item and tree_item.get_depth() == 0:
-                        # Trigger name cell rebind
-                        self.library_model.root_store.items_changed(i, 1, 1)
+                        platform = tree_item.get_item()
+                        if isinstance(platform, PlatformItem):
+                            # If specific_collection is provided, only update that one
+                            if specific_collection is None or platform.platform_name == specific_collection:
+                                # Trigger property notifications to refresh the UI
+                                # without affecting the tree structure or other collections
+                                platform.notify('name')
+                                platform.notify('sync-status-text')
 
     def save_selected_collections(self):
         """Save both UI selection and active sync states"""
@@ -1440,7 +1452,7 @@ class EnhancedLibrarySection:
             self.selected_collections_for_sync = set()
             
             # Load other settings
-            interval = int(self.parent.settings.get('Collections', 'sync_interval', '120'))
+            interval = int(self.parent.settings.get('Collections', 'sync_interval', '30'))
             self.collection_sync_interval = interval
             
             auto_sync_enabled = self.parent.settings.get('Collections', 'auto_sync_enabled', 'false') == 'true'
@@ -1805,6 +1817,8 @@ class EnhancedLibrarySection:
                             # Update UI to show download completed (game already exists in tree)
                             def update_download_status():
                                 self.update_single_game(processed_game)
+                                # Also update the collection's sync status to reflect the new download
+                                self.update_collection_sync_status(current_collection)
                                 return False
 
                             GLib.idle_add(update_download_status)
@@ -2007,6 +2021,9 @@ class EnhancedLibrarySection:
 
                         threading.Thread(target=wait_and_update, daemon=True).start()
                     else:
+                        # Remove from currently_downloading since no downloads are needed
+                        self.currently_downloading_collections.discard(collection_name)
+                        
                         GLib.idle_add(lambda: self.parent.log_message(
                             f"✅ Collection '{collection_name}': all games already downloaded"))
                         # Update status to 'synced' (green) since all games are already downloaded
@@ -5225,10 +5242,7 @@ class EnhancedLibrarySection:
                             platform_item.notify('status-text')
                             platform_item.notify('size-text')
                             updated = True
-                            break
-
-                if updated:
-                    break
+                    # Don't break - continue to update all collections containing this game
 
         # If in-place update failed, fall back to full refresh
         if not updated:
@@ -5577,9 +5591,7 @@ class EnhancedLibrarySection:
             # ENABLE: Add collection to sync
             self.selected_collections_for_sync.add(collection_name)
             self.actively_syncing_collections.add(collection_name)
-            # Add to currently_downloading to show orange immediately
-            self.currently_downloading_collections.add(collection_name)
-            # Remove from completed (if it was there) so it shows orange, not green
+            # Remove from completed (if it was there) so it shows correct status
             if hasattr(self, 'completed_sync_collections'):
                 self.completed_sync_collections.discard(collection_name)
             self.parent.log_message(f"[DEBUG] Added to collections ({time.time() - toggle_start:.3f}s)")
@@ -5636,8 +5648,8 @@ class EnhancedLibrarySection:
         # Save the selection
         self.save_selected_collections()
 
-        # Refresh the checkbox display
-        self.refresh_collection_checkboxes()
+        # Refresh the checkbox display for this specific collection only
+        self.refresh_collection_checkboxes(specific_collection=collection_name)
 
     def preserve_selections_during_update(self, update_func):
         """Wrapper to preserve selections during tree updates"""
@@ -6853,9 +6865,9 @@ class SyncWindow(Gtk.ApplicationWindow):
             transient_for=self,
             application_name="RomM - RetroArch Sync",
             application_icon="com.romm.retroarch.sync",
-            version="1.3.2",
+            version="1.4",
             developer_name='Hector Eduardo "Covin" Silveri',
-            copyright="© 2025 Hector Eduardo Silveri",
+            copyright="© 2025-2026 Hector Eduardo Silveri",
             license_type=Gtk.License.GPL_3_0
         )
         about.set_website("https://github.com/Covin90/romm-retroarch-sync")
@@ -7617,7 +7629,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             device_name = self.settings.get('Device', 'device_name', socket.gethostname())
             platform = self.settings.get('Device', 'device_platform', 'Linux')
             client = self.settings.get('Device', 'client', 'RomM-RetroArch-Sync')
-            client_version = self.settings.get('Device', 'client_version', '1.3.2')
+            client_version = self.settings.get('Device', 'client_version', '1.4')
 
             device_id = self.romm_client.register_device(
                 device_name=device_name,
@@ -8133,9 +8145,9 @@ class SyncWindow(Gtk.ApplicationWindow):
         collection_sync_row = Adw.SpinRow()
         collection_sync_row.set_title("Collection Sync Interval")
         collection_sync_row.set_subtitle("Seconds between collection updates (minimum 30s)")
-        adjustment = Gtk.Adjustment(value=120, lower=30, upper=600, step_increment=30)  # 30s to 10min
+        adjustment = Gtk.Adjustment(value=30, lower=30, upper=600, step_increment=30)  # 30s to 10min
         collection_sync_row.set_adjustment(adjustment)
-        collection_sync_row.set_value(int(self.settings.get('Collections', 'sync_interval', '120')))
+        collection_sync_row.set_value(int(self.settings.get('Collections', 'sync_interval', '30')))
         collection_sync_row.connect('notify::value', self.on_collection_sync_interval_changed)
         self.autosync_expander.add_row(collection_sync_row)
 
@@ -8924,7 +8936,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             name="romm-gtk-polling"
         )
         self._polling_thread.start()
-        self.log_message("📡 Background polling started (60s interval)")
+        self.log_message("📡 Background polling started (30s interval)")
 
     def _stop_background_polling(self):
         """Stop background polling thread"""
@@ -8935,13 +8947,13 @@ class SyncWindow(Gtk.ApplicationWindow):
             self.log_message("📡 Background polling stopped")
 
     def _polling_loop(self):
-        """Background polling loop - checks for new games every 60 seconds"""
+        """Background polling loop - checks for new games every 30 seconds"""
         # Wait a bit before starting to let the initial connection settle
         time.sleep(10)
 
         while not self._stop_polling.is_set():
-            # Sleep for 60 seconds (or until stopped)
-            if self._stop_polling.wait(timeout=60):
+            # Sleep for 30 seconds (or until stopped)
+            if self._stop_polling.wait(timeout=30):
                 break  # Event was set, exit loop
 
             try:
@@ -10510,26 +10522,23 @@ class SyncWindow(Gtk.ApplicationWindow):
                                     return False
 
                                 GLib.timeout_add(200, update_platform_items)
-
-                                # If we updated any collection games, reload the entire collections view
-                                if updated_any:
-                                    def reload_collections():
-                                        self.library_section.library_model.update_library(
-                                            self.library_section.collections_games, 
-                                            group_by='collection'
-                                        )
-                                        return False
-                                    
-                                    GLib.timeout_add(100, reload_collections)
                             
-                            # Update the GameItem directly
+                            # Update the GameItem directly with proper notifications
                             model = self.library_section.library_model.tree_model
                             for i in range(model.get_n_items() if model else 0):
                                 tree_item = model.get_item(i)
                                 if tree_item and tree_item.get_depth() == 1:
                                     item = tree_item.get_item()
                                     if isinstance(item, GameItem) and item.game_data.get('rom_id') == game.get('rom_id'):
-                                        item.game_data.update(game)
+                                        import copy
+                                        item.game_data = copy.deepcopy(game)
+                                        # Rebuild children for multi-disc games to update disc status
+                                        if item.game_data.get('is_multi_disc', False):
+                                            item.rebuild_children()
+                                        # Trigger property notifications to refresh UI
+                                        item.notify('name')
+                                        item.notify('is-downloaded')
+                                        item.notify('size-text')
 
                             # Clear selections after download completes
                             # Don't clear selections during bulk downloads - wait until all complete
@@ -10547,6 +10556,16 @@ class SyncWindow(Gtk.ApplicationWindow):
                                 GLib.timeout_add(1000, lambda: (clear_selections(), False)[1])
 
                         GLib.idle_add(update_ui)
+
+                        # Update collection sync status if this game is part of a collection
+                        if not is_bulk_operation and hasattr(self.library_section, 'current_view_mode') and self.library_section.current_view_mode == 'collection':
+                            def update_collection_status():
+                                # Find which collection this game belongs to
+                                collection_name = game.get('collection')
+                                if collection_name and hasattr(self.library_section, 'update_collection_sync_status'):
+                                    self.library_section.update_collection_sync_status(collection_name)
+                                return False
+                            GLib.idle_add(update_collection_status)
 
                         # Bulk operation handling
                         if is_bulk_operation and hasattr(self, 'library_section'):

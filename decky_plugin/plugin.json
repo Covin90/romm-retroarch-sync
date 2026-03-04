@@ -1,11 +1,11 @@
 {
-  "name": "RomM Sync Monitor",
-  "author": "Your Name",
+  "name": "RomM RetroArch Sync",
+  "author": "Hector Eduardo \"Covin\" Silveri",
   "flags": [],
   "api_version": 2,
   "publish": {
     "tags": ["utility", "romm"],
-    "description": "Monitor RomM-RetroArch Sync service status",
+    "description": "Sync ROMs, saves and states between RomM and RetroArch on Steam Deck",
     "image": "https://opengraph.githubassets.com/1/SteamDeckHomebrew/PluginLoader"
   }
 }

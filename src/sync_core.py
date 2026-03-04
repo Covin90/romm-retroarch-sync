@@ -751,7 +751,7 @@ class SettingsManager:
                 'device_name': socket.gethostname(),
                 'device_platform': 'Linux',
                 'client': 'RomM-RetroArch-Sync',
-                'client_version': '1.3.2',
+                'client_version': '1.4',
                 'sync_enabled': 'true'
             }
 
@@ -771,7 +771,7 @@ class SettingsManager:
             'device_name': socket.gethostname(),
             'device_platform': 'Linux',
             'client': 'RomM-RetroArch-Sync',
-            'client_version': '1.3.2',
+            'client_version': '1.4',
             'sync_enabled': 'true'
         }
 
@@ -1076,7 +1076,7 @@ class RomMClient:
                 'name': device_name or socket.gethostname(),
                 'platform': platform or sys_platform.system(),
                 'client': client or 'RomM-RetroArch-Sync',
-                'client_version': client_version or '1.3.2',
+                'client_version': client_version or '1.4',
                 'hostname': socket.gethostname(),
                 'allow_existing': True,
                 'allow_duplicate': False
