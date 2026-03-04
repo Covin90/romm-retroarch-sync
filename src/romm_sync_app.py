@@ -1664,11 +1664,26 @@ class EnhancedLibrarySection:
                     if added_rom_ids:
                         # Don't log here - let handle_added_games decide if logging is appropriate
                         self.handle_added_games(collection_roms, added_rom_ids, collection_name)
-                    
+
                     if removed_rom_ids:
-                        GLib.idle_add(lambda name=collection_name, count=len(removed_rom_ids): 
+                        GLib.idle_add(lambda name=collection_name, count=len(removed_rom_ids):
                             self.parent.log_message(f"🗑️ Collection '{name}': {count} games removed"))
                         self.handle_removed_games(removed_rom_ids, collection_name)
+
+                    # Sync Steam shortcuts if enabled for this collection
+                    steam = self.parent.steam_manager
+                    if steam and steam.is_available():
+                        steam_collections = steam.get_steam_sync_collections()
+                        if collection_name in steam_collections:
+                            download_dir = self.parent.settings.get('Download', 'rom_directory')
+                            try:
+                                added_sc, removed_sc = steam.sync_collection_shortcuts(
+                                    collection_name, collection_roms, download_dir)
+                                if added_sc or removed_sc:
+                                    GLib.idle_add(self.parent.log_message,
+                                                  f"🎮 Steam shortcuts for '{collection_name}': +{added_sc} -{removed_sc}")
+                            except Exception as e:
+                                logging.debug(f"Steam sync error for '{collection_name}': {e}")
                     
                 # MAKE SURE THIS LINE IS OUTSIDE THE IF BLOCKS AND ALWAYS EXECUTES:
                 setattr(self, cache_key, current_rom_ids)  # This must happen after handling changes
@@ -3354,7 +3369,7 @@ class EnhancedLibrarySection:
         checkbox_factory.connect('setup', self.setup_checkbox_cell)
         checkbox_factory.connect('bind', self.bind_checkbox_cell)
         checkbox_column = Gtk.ColumnViewColumn.new("", checkbox_factory)
-        checkbox_column.set_fixed_width(60)  # Increased width to accommodate toggle switches
+        checkbox_column.set_fixed_width(75)  # Increased width to accommodate both switch and steam button
         self.column_view.append_column(checkbox_column)
         
         # Name column with TreeExpander
@@ -5256,6 +5271,7 @@ class EnhancedLibrarySection:
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         box.set_halign(Gtk.Align.CENTER)
         box.set_valign(Gtk.Align.CENTER)
+        box.set_spacing(4)  # Add spacing between switch and steam button to prevent truncation
 
         # We'll add the checkbox/switch dynamically in bind_checkbox_cell
         # since we need to know if it's a collection or a game
@@ -5397,6 +5413,29 @@ class EnhancedLibrarySection:
                 if not hasattr(switch, '_sync_handler_connected'):
                     switch.connect('notify::active', on_collection_sync_toggle)
                     switch._sync_handler_connected = True
+
+                # Steam shortcut toggle button (only if Steam integration is enabled)
+                if (self.parent.settings.get('Steam', 'enabled', 'false') == 'true'
+                        and self.parent.steam_manager.is_available()):
+                    steam_btn = Gtk.ToggleButton()
+                    steam_btn.set_icon_name('input-gaming-symbolic')
+                    steam_btn.set_valign(Gtk.Align.CENTER)
+                    steam_btn.add_css_class('flat')
+                    steam_btn.add_css_class('compact-switch')
+                    steam_collections = self.parent.steam_manager.get_steam_sync_collections()
+                    steam_btn.set_active(collection_name in steam_collections)
+                    steam_btn.set_tooltip_text(
+                        f"Steam shortcuts {'enabled' if collection_name in steam_collections else 'disabled'} for {collection_name}"
+                    )
+
+                    def on_steam_toggle(btn, name=collection_name):
+                        if getattr(btn, '_updating', False):
+                            return
+                        self._toggle_steam_sync(name, btn.get_active())
+
+                    steam_btn.connect('toggled', on_steam_toggle)
+                    box.append(steam_btn)
+
                 return
             else:
                 # For platform view, use checkboxes
@@ -5650,6 +5689,47 @@ class EnhancedLibrarySection:
 
         # Refresh the checkbox display for this specific collection only
         self.refresh_collection_checkboxes(specific_collection=collection_name)
+
+    def _toggle_steam_sync(self, collection_name, enabled):
+        """Toggle Steam shortcut sync for a collection (runs in background thread)."""
+        steam = self.parent.steam_manager
+        if not steam or not steam.is_available():
+            self.parent.log_message("Steam userdata not found")
+            return
+
+        def do_toggle():
+            try:
+                steam_collections = steam.get_steam_sync_collections()
+                if enabled:
+                    steam_collections.add(collection_name)
+                else:
+                    steam_collections.discard(collection_name)
+                steam.set_steam_sync_collections(steam_collections)
+
+                if enabled:
+                    # Fetch collection ROMs and create shortcuts
+                    all_collections = self.parent.romm_client.get_collections()
+                    collection_id = None
+                    for col in all_collections:
+                        if col.get('name') == collection_name:
+                            collection_id = col.get('id')
+                            break
+                    if collection_id is None:
+                        GLib.idle_add(self.parent.log_message,
+                                      f"Collection '{collection_name}' not found")
+                        return
+                    roms = self.parent.romm_client.get_collection_roms(collection_id)
+                    download_dir = self.parent.settings.get('Download', 'rom_directory')
+                    added, msg = steam.add_collection_shortcuts(collection_name, roms, download_dir)
+                    GLib.idle_add(self.parent.log_message,
+                                  f"🎮 {msg} — restart Steam to see changes")
+                else:
+                    removed, msg = steam.remove_collection_shortcuts(collection_name)
+                    GLib.idle_add(self.parent.log_message, f"🎮 {msg}")
+            except Exception as e:
+                GLib.idle_add(self.parent.log_message, f"Steam sync error: {e}")
+
+        threading.Thread(target=do_toggle, daemon=True).start()
 
     def preserve_selections_during_update(self, update_func):
         """Wrapper to preserve selections during tree updates"""
@@ -5944,7 +6024,13 @@ class SyncWindow(Gtk.ApplicationWindow):
 
         self.retroarch = RetroArchInterface(self.settings)
 
-        self.game_cache = GameDataCache(self.settings)        
+        self.steam_manager = SteamShortcutManager(
+            retroarch_interface=self.retroarch,
+            settings=self.settings,
+            log_callback=lambda msg: GLib.idle_add(self.log_message, msg),
+        )
+
+        self.game_cache = GameDataCache(self.settings)
         
         # Progress tracking
         self.download_queue = []
@@ -6371,17 +6457,6 @@ class SyncWindow(Gtk.ApplicationWindow):
             # Save setting
             self.settings.set('System', 'autostart', 'true')
             
-            # Try to install Decky plugin (optional - don't fail if it doesn't work)
-            decky_plugins_dir = Path.home() / 'homebrew' / 'plugins'
-            if decky_plugins_dir.exists():
-                try:
-                    if os.access(decky_plugins_dir, os.W_OK):
-                        self.install_decky_plugin()
-                    else:
-                        self.log_message("📱 Decky plugin skipped - no write permission")
-                except Exception as e:
-                    self.log_message(f"📱 Decky plugin install skipped: {e}")
-            
             return True
             
         except Exception as e:
@@ -6406,12 +6481,6 @@ class SyncWindow(Gtk.ApplicationWindow):
                 service_file.unlink()
             
             subprocess.run(['systemctl', '--user', 'daemon-reload'], capture_output=True)
-            
-            # Try to remove Decky plugin (optional - don't fail if it doesn't work)
-            try:
-                self.remove_decky_plugin()
-            except Exception as e:
-                self.log_message(f"📱 Decky plugin removal skipped: {e}")
             
             # Save setting
             self.settings.set('System', 'autostart', 'false')
@@ -6463,17 +6532,6 @@ class SyncWindow(Gtk.ApplicationWindow):
         except Exception as e:
             self.log_message(f"❌ Service update check failed: {e}")
             return False
-
-    def install_decky_plugin(self):
-        """Install companion Decky plugin - DISABLED"""
-        # Plugin installation disabled - install manually
-        self.log_message("📱 Decky plugin installation disabled (install manually)")
-        return False
-
-    def remove_decky_plugin(self):
-        """Remove companion Decky plugin - DISABLED"""
-        # Plugin removal disabled  
-        return False
 
     def check_autostart_status(self):
         """Check if autostart is currently enabled"""
@@ -7128,6 +7186,12 @@ class SyncWindow(Gtk.ApplicationWindow):
             switch.collection-not-synced {
                 transform: scale(0.65);
                 margin: -8px;
+            }
+
+            /* Steam button in collection view - ensure proper padding to prevent truncation */
+            button.flat.compact-switch {
+                padding: 4px;
+                margin: 0;
             }
             """)
             Gtk.StyleContext.add_provider_for_display(
@@ -8256,6 +8320,23 @@ class SyncWindow(Gtk.ApplicationWindow):
         download_sync_group.add(self.autosync_expander)
         self.preferences_page.add(download_sync_group)
 
+        # Steam Integration group
+        steam_group = Adw.PreferencesGroup()
+        steam_group.set_title("Steam Integration")
+
+        steam_enable_row = Adw.SwitchRow()
+        steam_enable_row.set_title("Add Collections to Steam")
+        steam_enable_row.set_subtitle(
+            "Steam shortcuts detected" if self.steam_manager.is_available()
+            else "Steam userdata not found"
+        )
+        steam_enable_row.set_active(self.settings.get('Steam', 'enabled', 'false') == 'true')
+        steam_enable_row.set_sensitive(self.steam_manager.is_available())
+        steam_enable_row.connect('notify::active', self.on_steam_enable_toggle)
+        steam_group.add(steam_enable_row)
+
+        self.preferences_page.add(steam_group)
+
     def on_autosync_toggle(self, switch_row, pspec):
         """Handle auto-sync enable/disable"""
         if switch_row.get_active():
@@ -8280,6 +8361,15 @@ class SyncWindow(Gtk.ApplicationWindow):
             self.autosync_status_row.set_subtitle("Disabled")
             self.update_status_dot(self.autosync_status_dot, 'red')
             self.log_message("⏹️ Auto-sync disabled")
+
+    def on_steam_enable_toggle(self, switch_row, pspec):
+        """Handle Steam integration enable/disable"""
+        enabled = switch_row.get_active()
+        self.settings.set('Steam', 'enabled', str(enabled).lower())
+        if enabled:
+            self.log_message("Steam integration enabled — toggle Steam sync per-collection in the Collections view")
+        else:
+            self.log_message("Steam integration disabled")
 
     def on_collection_sync_interval_changed(self, spin_row, pspec):
         """Save collection sync interval in seconds"""

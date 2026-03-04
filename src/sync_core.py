@@ -754,6 +754,11 @@ class SettingsManager:
                 'client_version': '1.4',
                 'sync_enabled': 'true'
             }
+            self.config['Steam'] = {
+                'enabled': 'false',
+                'userdata_path': '',
+                'collections': '',
+            }
 
             self.save_settings()
 
@@ -779,6 +784,21 @@ class SettingsManager:
         for key, default_value in device_defaults.items():
             if key not in self.config['Device']:
                 self.config['Device'][key] = default_value
+                modified = True
+
+        # Ensure Steam section exists (added in v1.5+)
+        if 'Steam' not in self.config:
+            self.config['Steam'] = {}
+            modified = True
+
+        steam_defaults = {
+            'enabled': 'false',
+            'userdata_path': '',
+            'collections': '',
+        }
+        for key, default_value in steam_defaults.items():
+            if key not in self.config['Steam']:
+                self.config['Steam'][key] = default_value
                 modified = True
 
         # Save if any migrations were applied
@@ -1582,43 +1602,60 @@ class RomMClient:
                 # For folders, download as zip then extract
                 import io
                 import zipfile
+                import tempfile
 
                 # Check for cancellation before starting folder download
                 if cancellation_checker and cancellation_checker():
                     raise DownloadCancelledException(f"Download cancelled: {rom_name}")
 
-                # Download with progress tracking
-                content_chunks = []
-                for chunk in response.iter_content(chunk_size=8192):
-                    # Check for cancellation
-                    if cancellation_checker and cancellation_checker():
-                        raise DownloadCancelledException(f"Download cancelled: {rom_name}")
+                # Download to temporary file instead of memory to avoid OOM crashes
+                temp_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.zip') as temp_file:
+                        temp_path = temp_file.name
+                        
+                        # Stream download directly to temporary file
+                        for chunk in response.iter_content(chunk_size=8192):
+                            # Check for cancellation
+                            if cancellation_checker and cancellation_checker():
+                                raise DownloadCancelledException(f"Download cancelled: {rom_name}")
 
-                    if chunk:
-                        content_chunks.append(chunk)
-                        actual_downloaded += len(chunk)
+                            if chunk:
+                                temp_file.write(chunk)
+                                actual_downloaded += len(chunk)
 
-                        # Update progress
-                        if progress_callback and total_size > 0:
-                            progress_info = progress.update(len(chunk))
-                            progress_callback(progress_info)
-
-                # Combine chunks
-                content = b''.join(content_chunks)
-
+                                # Update progress
+                                if progress_callback and total_size > 0:
+                                    progress_info = progress.update(len(chunk))
+                                    progress_callback(progress_info)
+                
+                except DownloadCancelledException:
+                    # Clean up temp file on cancellation
+                    if temp_path and os.path.exists(temp_path):
+                        os.unlink(temp_path)
+                    raise
+                
                 # Check for cancellation before extraction
                 if cancellation_checker and cancellation_checker():
+                    if temp_path and os.path.exists(temp_path):
+                        os.unlink(temp_path)
                     raise DownloadCancelledException(f"Download cancelled: {rom_name}")
+                
+                # Extract from temporary file
+                try:
+                    with zipfile.ZipFile(temp_path, 'r') as zip_ref:
+                        # Filter out .m3u files (playlist files that don't exist in RomM)
+                        # and other non-ROM files that might cause download errors
+                        excluded_extensions = {'.m3u', '.m3u8'}
 
-                with zipfile.ZipFile(io.BytesIO(content)) as zip_ref:
-                    # Filter out .m3u files (playlist files that don't exist in RomM)
-                    # and other non-ROM files that might cause download errors
-                    excluded_extensions = {'.m3u', '.m3u8'}
-
-                    for member in zip_ref.namelist():
-                        # Skip files with excluded extensions
-                        if not any(member.lower().endswith(ext) for ext in excluded_extensions):
-                            zip_ref.extract(member, download_path)
+                        for member in zip_ref.namelist():
+                            # Skip files with excluded extensions
+                            if not any(member.lower().endswith(ext) for ext in excluded_extensions):
+                                zip_ref.extract(member, download_path)
+                finally:
+                    # Clean up temporary file
+                    if temp_path and os.path.exists(temp_path):
+                        os.unlink(temp_path)
             else:
                 with open(download_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
@@ -5652,7 +5689,7 @@ def is_path_validly_downloaded(path):
 
 def build_sync_status(romm_client, collection_sync, auto_sync, available_games,
                       known_collections=None, disabled_collection_counts=None, retroarch=None,
-                      bios_tracking=None):
+                      bios_tracking=None, steam_manager=None):
     """Build the current status dict from live sync object state.
 
     Args:
@@ -5741,6 +5778,14 @@ def build_sync_status(romm_client, collection_sync, auto_sync, available_games,
                     collection_data['speed'] = _dl_speed
                 if sync_state == 'syncing' and _dl_pct is not None:
                     collection_data['downloaded_pct'] = _dl_pct
+
+                # Steam sync status per collection
+                if steam_manager:
+                    steam_collections = steam_manager.get_steam_sync_collections()
+                    collection_data['steam_sync'] = collection_name in steam_collections
+                    if collection_data['steam_sync']:
+                        collection_data['steam_shortcut_count'] = steam_manager.get_collection_shortcut_count(collection_name)
+
                 collections_list.append(collection_data)
 
         except Exception as e:
@@ -5791,12 +5836,16 @@ def build_sync_status(romm_client, collection_sync, auto_sync, available_games,
     if bios_tracking:
         status['bios_status'] = bios_tracking.get_status()
 
+    # Include Steam integration availability
+    if steam_manager:
+        status['steam_available'] = steam_manager.is_available()
+
     return status
 
 class CollectionSyncManager:
     """Manages collection synchronization"""
     
-    def __init__(self, romm_client, settings, selected_collections, sync_interval, available_games, log_callback):
+    def __init__(self, romm_client, settings, selected_collections, sync_interval, available_games, log_callback, steam_manager=None):
         self.romm_client = romm_client
         self.settings = settings
         self.selected_collections = selected_collections
@@ -5811,6 +5860,8 @@ class CollectionSyncManager:
         self.download_progress = {}  # {collection_name: {'downloaded': int, 'downloaded_pct': float, 'total': int, 'speed': float}}
         # Last removal event per collection — for frontend notification
         self.last_removals = {}  # {collection_name: {'removed_count': int, 'deleted_count': int, 'timestamp': float}}
+        # Steam shortcut manager (optional)
+        self.steam_manager = steam_manager
 
     def start(self):
         """Start collection monitoring"""
@@ -6068,7 +6119,10 @@ class CollectionSyncManager:
 
         if downloaded_count > 0:
             self.log(f"Auto-downloaded {downloaded_count} new games from '{collection_name}'")
-    
+
+        # Sync Steam shortcuts if enabled for this collection
+        self._sync_steam_if_enabled(collection_name, collection_roms, download_dir)
+
     def handle_removed_games(self, removed_rom_ids, collection_name):
         """Handle removed games - simplified for daemon"""
         # Track removal event for UI notification (even if auto-delete is disabled)
@@ -6115,6 +6169,34 @@ class CollectionSyncManager:
             self.log(f"Auto-deleted {deleted_count} games removed from '{collection_name}'")
 
         self.set_removal_event(collection_name, len(removed_rom_ids), deleted_count)
+
+        # Sync Steam shortcuts if enabled for this collection
+        download_dir = Path(self.settings.get('Download', 'rom_directory'))
+        # Re-fetch current collection ROMs for accurate sync
+        try:
+            if self.romm_client and collection_name in self.collection_caches:
+                cached_rom_ids = self.collection_caches[collection_name]
+                # Build current rom list from available_games
+                current_roms = [g for g in self.available_games
+                                if g.get('rom_id') in cached_rom_ids]
+                self._sync_steam_if_enabled(collection_name, current_roms, download_dir)
+        except Exception as e:
+            logging.debug(f"Steam sync after removal failed: {e}")
+
+    def _sync_steam_if_enabled(self, collection_name, collection_roms, download_dir):
+        """Sync Steam shortcuts if steam_manager is set and collection has Steam sync enabled."""
+        if not self.steam_manager:
+            return
+        steam_collections = self.steam_manager.get_steam_sync_collections()
+        if collection_name not in steam_collections:
+            return
+        try:
+            added, removed = self.steam_manager.sync_collection_shortcuts(
+                collection_name, collection_roms, download_dir)
+            if added or removed:
+                self.log(f"Steam shortcuts updated for '{collection_name}': +{added} -{removed}")
+        except Exception as e:
+            self.log(f"Steam shortcut sync error: {e}")
 
 
 # ==============================================================================
@@ -6624,3 +6706,796 @@ class BiosTrackingManager:
                 'total_platforms': total_platforms,
                 'platforms_ready': platforms_ready,
             }
+
+
+# ==============================================================================
+# Steam Shortcut Integration
+# ==============================================================================
+
+import struct
+import zlib
+import tempfile
+
+class SteamVDFHandler:
+    """Minimal binary VDF parser/writer for Steam's shortcuts.vdf.
+
+    The binary VDF format used by shortcuts.vdf:
+      0x00 <key>\0  — start of sub-dict
+      0x01 <key>\0 <value>\0  — string field
+      0x02 <key>\0 <int32_le>  — 32-bit integer field
+      0x08  — end of current dict
+    """
+
+    # Type markers
+    TYPE_DICT   = 0x00
+    TYPE_STRING = 0x01
+    TYPE_INT32  = 0x02
+    TYPE_END    = 0x08
+
+    @staticmethod
+    def read_shortcuts(file_path):
+        """Parse shortcuts.vdf into a list of shortcut dicts.
+
+        Returns an empty list if the file doesn't exist or is empty.
+        """
+        file_path = Path(file_path)
+        if not file_path.exists():
+            return []
+
+        try:
+            data = file_path.read_bytes()
+        except (OSError, IOError) as e:
+            logging.error(f"Failed to read shortcuts.vdf: {e}")
+            return []
+
+        if len(data) < 3:
+            return []
+
+        shortcuts = []
+        try:
+            pos = [0]  # mutable for nested reads
+
+            def read_string():
+                end = data.index(b'\x00', pos[0])
+                s = data[pos[0]:end].decode('utf-8', errors='replace')
+                pos[0] = end + 1
+                return s
+
+            def read_int32():
+                val = struct.unpack_from('<i', data, pos[0])[0]
+                pos[0] += 4
+                return val
+
+            def read_dict():
+                result = {}
+                while pos[0] < len(data):
+                    type_byte = data[pos[0]]
+                    pos[0] += 1
+
+                    if type_byte == SteamVDFHandler.TYPE_END:
+                        break
+                    elif type_byte == SteamVDFHandler.TYPE_DICT:
+                        key = read_string()
+                        result[key] = read_dict()
+                    elif type_byte == SteamVDFHandler.TYPE_STRING:
+                        key = read_string()
+                        result[key] = read_string()
+                    elif type_byte == SteamVDFHandler.TYPE_INT32:
+                        key = read_string()
+                        result[key] = read_int32()
+                    else:
+                        logging.warning(f"Unknown VDF type byte 0x{type_byte:02x} at pos {pos[0]-1}")
+                        break
+                return result
+
+            root = read_dict()
+            # Root is usually {'shortcuts': {'0': {...}, '1': {...}, ...}}
+            shortcuts_dict = root.get('shortcuts', root)
+            for key in sorted(shortcuts_dict.keys(), key=lambda k: int(k) if k.isdigit() else 0):
+                shortcuts.append(shortcuts_dict[key])
+
+        except Exception as e:
+            logging.error(f"Failed to parse shortcuts.vdf: {e}")
+            return []
+
+        return shortcuts
+
+    @staticmethod
+    def write_shortcuts(file_path, shortcuts):
+        """Write a list of shortcut dicts to shortcuts.vdf.
+
+        Creates a backup before writing and uses atomic rename.
+        """
+        file_path = Path(file_path)
+
+        # Backup existing file
+        if file_path.exists():
+            backup_path = file_path.with_suffix('.vdf.bak')
+            try:
+                shutil.copy2(str(file_path), str(backup_path))
+            except (OSError, IOError) as e:
+                logging.warning(f"Failed to backup shortcuts.vdf: {e}")
+
+        def write_string(buf, key, value):
+            buf.append(struct.pack('B', SteamVDFHandler.TYPE_STRING))
+            buf.append(key.encode('utf-8') + b'\x00')
+            buf.append(str(value).encode('utf-8') + b'\x00')
+
+        def write_int32(buf, key, value):
+            buf.append(struct.pack('B', SteamVDFHandler.TYPE_INT32))
+            buf.append(key.encode('utf-8') + b'\x00')
+            buf.append(struct.pack('<i', value))
+
+        def write_dict_start(buf, key):
+            buf.append(struct.pack('B', SteamVDFHandler.TYPE_DICT))
+            buf.append(key.encode('utf-8') + b'\x00')
+
+        def write_dict_end(buf):
+            buf.append(struct.pack('B', SteamVDFHandler.TYPE_END))
+
+        def write_shortcut(buf, index, shortcut):
+            write_dict_start(buf, str(index))
+            for key, value in shortcut.items():
+                if key == 'tags':
+                    write_dict_start(buf, 'tags')
+                    if isinstance(value, dict):
+                        for tag_key, tag_val in value.items():
+                            write_string(buf, str(tag_key), tag_val)
+                    elif isinstance(value, list):
+                        for i, tag_val in enumerate(value):
+                            write_string(buf, str(i), tag_val)
+                    write_dict_end(buf)
+                elif isinstance(value, int):
+                    write_int32(buf, key, value)
+                else:
+                    write_string(buf, key, str(value))
+            write_dict_end(buf)
+
+        buf = []
+        write_dict_start(buf, 'shortcuts')
+        for i, shortcut in enumerate(shortcuts):
+            write_shortcut(buf, i, shortcut)
+        write_dict_end(buf)  # Close 'shortcuts' dict
+        write_dict_end(buf)  # Close root/file
+
+        binary_data = b''.join(buf)
+
+        # Atomic write via temp file
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=str(file_path.parent), suffix='.vdf.tmp')
+        try:
+            os.write(fd, binary_data)
+            os.close(fd)
+            os.replace(tmp_path, str(file_path))
+        except Exception:
+            os.close(fd) if not os.get_inheritable(fd) else None
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
+
+    @staticmethod
+    def calculate_appid(exe, app_name):
+        """Calculate Steam shortcut appid from exe and app name.
+
+        Steam uses: crc32(utf8(exe + app_name)) | 0x80000000, stored as signed int32.
+        """
+        crc = zlib.crc32((exe + app_name).encode('utf-8')) & 0xFFFFFFFF
+        unsigned = crc | 0x80000000
+        # Convert to signed int32
+        if unsigned >= 0x80000000:
+            return unsigned - 0x100000000
+        return unsigned
+
+
+class SteamShortcutManager:
+    """High-level manager for adding/removing Steam shortcuts for ROM collections.
+
+    Works with both GTK app and Decky plugin via sync_core.py.
+    """
+
+    MANAGED_TAG = 'romm-sync'  # Tag used to identify our shortcuts
+
+    def __init__(self, retroarch_interface, settings, log_callback=None):
+        self.retroarch = retroarch_interface
+        self.settings = settings
+        self.log = log_callback or (lambda msg: logging.info(msg))
+        self._userdata_path_cache = None
+
+    def is_available(self):
+        """Check if Steam userdata is accessible."""
+        return self.find_steam_userdata_path() is not None
+
+    def find_steam_userdata_path(self):
+        """Find the Steam userdata directory containing shortcuts.vdf.
+
+        Checks settings for manual override first, then auto-detects.
+        Returns the path to the specific user's config dir, or None.
+        """
+        if self._userdata_path_cache is not None:
+            return self._userdata_path_cache
+
+        # Check settings for manual override
+        manual_path = self.settings.get('Steam', 'userdata_path', '').strip()
+        if manual_path:
+            p = Path(manual_path)
+            if p.exists():
+                self._userdata_path_cache = p
+                return p
+
+        # Auto-detect Steam userdata
+        steam_roots = [
+            Path.home() / '.steam' / 'steam' / 'userdata',
+            Path.home() / '.local' / 'share' / 'Steam' / 'userdata',
+            Path.home() / '.var' / 'app' / 'com.valvesoftware.Steam' / 'data' / 'Steam' / 'userdata',
+        ]
+
+        for root in steam_roots:
+            if not root.exists():
+                continue
+            # Find user directories (numeric IDs)
+            user_dirs = [d for d in root.iterdir() if d.is_dir() and d.name.isdigit()]
+            if not user_dirs:
+                continue
+
+            # Pick the one with the most recent shortcuts.vdf
+            best = None
+            best_mtime = 0
+            for user_dir in user_dirs:
+                shortcuts_file = user_dir / 'config' / 'shortcuts.vdf'
+                config_dir = user_dir / 'config'
+                if shortcuts_file.exists():
+                    mtime = shortcuts_file.stat().st_mtime
+                    if mtime > best_mtime:
+                        best = config_dir
+                        best_mtime = mtime
+                elif config_dir.exists():
+                    # Config dir exists but no shortcuts.vdf yet — valid target
+                    if best is None:
+                        best = config_dir
+
+            if best:
+                self._userdata_path_cache = best
+                self.log(f"Found Steam userdata: {best}")
+                return best
+
+        return None
+
+    def _get_shortcuts_path(self):
+        """Get the full path to shortcuts.vdf."""
+        userdata = self.find_steam_userdata_path()
+        if not userdata:
+            return None
+        return userdata / 'shortcuts.vdf'
+
+    def _build_launch_command(self, rom_path, platform_name):
+        """Build the exe and launch options for a ROM.
+
+        Returns (exe, launch_options) tuple, or (None, None) if no core found.
+        """
+        if not self.retroarch or not self.retroarch.retroarch_executable:
+            return None, None
+
+        exe = self.retroarch.retroarch_executable
+
+        # RetroDECK: different launch pattern
+        if 'retrodeck' in exe.lower():
+            return 'flatpak', f'run net.retrodeck.retrodeck --pass-args "{rom_path}"'
+
+        # Find the right core
+        core_name, core_path = self.retroarch.suggest_core_for_platform(platform_name)
+        if not core_name:
+            return None, None
+
+        # Build based on install type
+        if 'flatpak' in exe:
+            return 'flatpak', f'run org.libretro.RetroArch -L "{core_path}" "{rom_path}"'
+        elif 'snap' in exe:
+            return 'snap', f'run retroarch -L "{core_path}" "{rom_path}"'
+        else:
+            return f'"{exe}"', f'-L "{core_path}" "{rom_path}"'
+
+    def build_shortcut_entry(self, rom_name, rom_path, platform_name, collection_name):
+        """Build a single shortcut dict for a ROM.
+
+        Creates a shortcut even if no core is found (with placeholder launch command).
+        Returns the shortcut dict.
+        """
+        exe, launch_options = self._build_launch_command(rom_path, platform_name)
+
+        # If no core found, create placeholder shortcut
+        if not exe:
+            self.log(f"  ⚠️  No core for {rom_name} ({platform_name}) - creating placeholder shortcut")
+            # Use a simple placeholder that will show an error when launched
+            exe = '/usr/bin/echo'
+            launch_options = f'No RetroArch core found for platform: {platform_name}. Please install a compatible core.'
+            # Add a tag to identify shortcuts missing cores
+            missing_core_tag = 'romm-sync-missing-core'
+        else:
+            missing_core_tag = None
+
+        app_name = f"{rom_name}"
+        appid = SteamVDFHandler.calculate_appid(exe, app_name)
+
+        # StartDir: directory containing the ROM
+        start_dir = str(Path(rom_path).parent)
+
+        # Build tags list
+        tags = [self.MANAGED_TAG, collection_name, platform_name]
+        if missing_core_tag:
+            tags.append(missing_core_tag)
+
+        shortcut = {
+            'appid': appid,
+            'AppName': app_name,
+            'Exe': exe,
+            'StartDir': start_dir,
+            'icon': '',
+            'ShortcutPath': '',
+            'LaunchOptions': launch_options,
+            'IsHidden': 0,
+            'AllowDesktopConfig': 1,
+            'AllowOverlay': 1,
+            'OpenVR': 0,
+            'Devkit': 0,
+            'DevkitGameID': '',
+            'DevkitOverrideAppID': 0,
+            'LastPlayTime': 0,
+            'FlatpakAppID': '',
+            'tags': tags,
+        }
+        return shortcut
+
+    def _is_managed_shortcut(self, shortcut, collection_name=None):
+        """Check if a shortcut was created by us (optionally for a specific collection)."""
+        tags = shortcut.get('tags', {})
+        if isinstance(tags, dict):
+            tag_values = set(tags.values())
+        elif isinstance(tags, list):
+            tag_values = set(tags)
+        else:
+            return False
+
+        if self.MANAGED_TAG not in tag_values:
+            return False
+        if collection_name and collection_name not in tag_values:
+            return False
+        return True
+
+    def _detect_multi_disc_from_api(self, rom):
+        """Detect if a ROM is multi-disc and extract disc files from raw API data.
+        
+        This is a simplified version of the multi-disc detection logic from romm_sync_app.py
+        that works with raw API data without requiring full game processing.
+        
+        Args:
+            rom: ROM dict from RomM API
+            
+        Returns:
+            (is_multi, disc_files) tuple where:
+            - is_multi: True if this is a multi-disc game
+            - disc_files: List of disc file dicts or strings
+        """
+        # First check if already processed (has is_multi_disc and discs)
+        if rom.get('is_multi_disc', False):
+            discs = rom.get('discs', [])
+            if discs:
+                return True, discs
+        
+        # Check for multi flag
+        if rom.get('multi', False):
+            files = rom.get('files', [])
+            if files:
+                return True, files
+        
+        # Analyze files array for disc patterns
+        files = rom.get('files', [])
+        if len(files) <= 1:
+            return False, []
+        
+        disc_pattern = re.compile(r'(\(|\[|_|-|\s)(disc|disk|cd|dvd)(\s|_|-)?(\d+)(\)|\]|_|-|\s)', re.IGNORECASE)
+        track_pattern = re.compile(r'(track|tr)(\s|_|-)?(\d+)', re.IGNORECASE)
+        
+        # Extract disc numbers from filenames (only count files, not tracks)
+        disc_numbers = set()
+        disc_files_map = {}  # Map disc number to file
+        
+        for file_obj in files:
+            # Handle both string filenames and dict objects
+            if isinstance(file_obj, str):
+                file_name = file_obj
+            elif isinstance(file_obj, dict):
+                file_name = file_obj.get('filename', file_obj.get('file_name', file_obj.get('name', '')))
+            else:
+                continue
+            
+            # Skip if this is a track indicator (not a disc)
+            if track_pattern.search(file_name):
+                continue
+            
+            # Check if this file has a disc indicator
+            match = disc_pattern.search(file_name)
+            if match:
+                disc_num = match.group(4)  # The disc number
+                disc_numbers.add(disc_num)
+                if disc_num not in disc_files_map:
+                    disc_files_map[disc_num] = file_obj
+        
+        # Only treat as multi-disc if we have multiple different disc numbers
+        if len(disc_numbers) > 1:
+            # Return disc files sorted by disc number
+            disc_files = [disc_files_map[num] for num in sorted(disc_numbers, key=int)]
+            return True, disc_files
+        
+        return False, []
+
+    def add_collection_shortcuts(self, collection_name, roms, download_dir):
+        """Add Steam shortcuts for all downloaded ROMs in a collection.
+
+        Args:
+            collection_name: Name of the RomM collection
+            roms: List of ROM dicts from RomM API
+            download_dir: Path to ROM download directory
+
+        Returns:
+            (added_count, message)
+        """
+        shortcuts_path = self._get_shortcuts_path()
+        if not shortcuts_path:
+            return 0, "Steam userdata not found"
+
+        # Load existing shortcuts
+        shortcuts = SteamVDFHandler.read_shortcuts(shortcuts_path)
+
+        # Remove any existing shortcuts for this collection first
+        shortcuts = [s for s in shortcuts if not self._is_managed_shortcut(s, collection_name)]
+
+        added = 0
+        download_dir = Path(download_dir)
+
+        for rom in roms:
+            rom_name = rom.get('name', rom.get('fs_name', 'Unknown'))
+            platform_name = rom.get('platform_name', rom.get('platform_slug', 'Unknown'))
+            platform_slug = rom.get('platform_slug', 'Unknown')
+            
+            # Detect multi-disc game from API data
+            is_multi, disc_files = self._detect_multi_disc_from_api(rom)
+
+            if is_multi and disc_files:
+                # Multi-disc: one shortcut per disc
+                for disc_idx, disc_file in enumerate(disc_files, 1):
+                    # Handle both string filenames and dict objects
+                    if isinstance(disc_file, str):
+                        disc_name = disc_file
+                    elif isinstance(disc_file, dict):
+                        disc_name = disc_file.get('filename', disc_file.get('file_name', f'disc_{disc_idx}'))
+                    else:
+                        disc_name = f'disc_{disc_idx}'
+                    
+                    local_path = download_dir / platform_slug / rom.get('fs_name', rom_name) / disc_name
+                    if not is_path_validly_downloaded(local_path):
+                        continue
+                    disc_display = f"{rom_name} (Disc {disc_idx})"
+                    entry = self.build_shortcut_entry(disc_display, str(local_path), platform_name, collection_name)
+                    if entry:
+                        shortcuts.append(entry)
+                        added += 1
+            else:
+                # Single ROM
+                file_name = rom.get('fs_name') or f"{rom_name}.rom"
+                local_path = download_dir / platform_slug / file_name
+                if not is_path_validly_downloaded(local_path):
+                    continue
+                entry = self.build_shortcut_entry(rom_name, str(local_path), platform_name, collection_name)
+                if entry:
+                    shortcuts.append(entry)
+                    added += 1
+
+        # Write back
+        try:
+            SteamVDFHandler.write_shortcuts(shortcuts_path, shortcuts)
+
+            # Collect appids of the shortcuts we just added for Steam collections
+            appids_added = []
+            for s in shortcuts:
+                if self._is_managed_shortcut(s, collection_name):
+                    appids_added.append(s['appid'])
+
+            # Add to Steam collection (category)
+            if appids_added:
+                self.update_steam_collections(collection_name, appids_added)
+
+            msg = f"Added {added} shortcuts for '{collection_name}'"
+            self.log(msg)
+            return added, msg
+        except Exception as e:
+            msg = f"Failed to write shortcuts.vdf: {e}"
+            self.log(msg)
+            return 0, msg
+
+    def remove_collection_shortcuts(self, collection_name):
+        """Remove all Steam shortcuts for a collection.
+
+        Returns:
+            (removed_count, message)
+        """
+        shortcuts_path = self._get_shortcuts_path()
+        if not shortcuts_path:
+            return 0, "Steam userdata not found"
+
+        shortcuts = SteamVDFHandler.read_shortcuts(shortcuts_path)
+        original_count = len(shortcuts)
+        shortcuts = [s for s in shortcuts if not self._is_managed_shortcut(s, collection_name)]
+        removed = original_count - len(shortcuts)
+
+        if removed == 0:
+            return 0, f"No shortcuts found for '{collection_name}'"
+
+        try:
+            SteamVDFHandler.write_shortcuts(shortcuts_path, shortcuts)
+            msg = f"Removed {removed} shortcuts for '{collection_name}'"
+            self.log(msg)
+            return removed, msg
+        except Exception as e:
+            msg = f"Failed to write shortcuts.vdf: {e}"
+            self.log(msg)
+            return 0, msg
+
+    def sync_collection_shortcuts(self, collection_name, current_roms, download_dir):
+        """Sync Steam shortcuts to match the current state of a collection.
+
+        Compares existing managed shortcuts with current ROM list,
+        adds missing ones and removes stale ones.
+
+        Returns:
+            (added_count, removed_count)
+        """
+        shortcuts_path = self._get_shortcuts_path()
+        if not shortcuts_path:
+            return 0, 0
+
+        shortcuts = SteamVDFHandler.read_shortcuts(shortcuts_path)
+        download_dir = Path(download_dir)
+
+        # Separate our shortcuts from user's shortcuts
+        user_shortcuts = [s for s in shortcuts if not self._is_managed_shortcut(s, collection_name)]
+        managed_shortcuts = [s for s in shortcuts if self._is_managed_shortcut(s, collection_name)]
+
+        # Build set of existing managed AppNames for comparison
+        existing_names = {s.get('AppName', '') for s in managed_shortcuts}
+
+        # Build desired shortcuts from current ROM list
+        desired = []
+        desired_names = set()
+
+        for rom in current_roms:
+            rom_name = rom.get('name', rom.get('fs_name', 'Unknown'))
+            platform_name = rom.get('platform_name', rom.get('platform_slug', 'Unknown'))
+            platform_slug = rom.get('platform_slug', 'Unknown')
+            
+            # Detect multi-disc game from API data
+            is_multi, disc_files = self._detect_multi_disc_from_api(rom)
+
+            if is_multi and disc_files:
+                for disc_idx, disc_file in enumerate(disc_files, 1):
+                    # Handle both string filenames and dict objects
+                    if isinstance(disc_file, str):
+                        disc_name = disc_file
+                    elif isinstance(disc_file, dict):
+                        disc_name = disc_file.get('filename', disc_file.get('file_name', f'disc_{disc_idx}'))
+                    else:
+                        disc_name = f'disc_{disc_idx}'
+                    
+                    local_path = download_dir / platform_slug / rom.get('fs_name', rom_name) / disc_name
+                    if not is_path_validly_downloaded(local_path):
+                        continue
+                    disc_display = f"{rom_name} (Disc {disc_idx})"
+                    entry = self.build_shortcut_entry(disc_display, str(local_path), platform_name, collection_name)
+                    if entry:
+                        desired.append(entry)
+                        desired_names.add(entry['AppName'])
+            else:
+                file_name = rom.get('fs_name') or f"{rom_name}.rom"
+                local_path = download_dir / platform_slug / file_name
+                if not is_path_validly_downloaded(local_path):
+                    continue
+                entry = self.build_shortcut_entry(rom_name, str(local_path), platform_name, collection_name)
+                if entry:
+                    desired.append(entry)
+                    desired_names.add(entry['AppName'])
+
+        # Calculate delta
+        to_add = [s for s in desired if s['AppName'] not in existing_names]
+        to_keep = [s for s in managed_shortcuts if s.get('AppName', '') in desired_names]
+        removed_count = len(managed_shortcuts) - len(to_keep)
+
+        # Rebuild full list
+        new_shortcuts = user_shortcuts + to_keep + to_add
+
+        if to_add or removed_count > 0:
+            try:
+                SteamVDFHandler.write_shortcuts(shortcuts_path, new_shortcuts)
+                if to_add:
+                    self.log(f"Steam: added {len(to_add)} shortcuts for '{collection_name}'")
+                if removed_count > 0:
+                    self.log(f"Steam: removed {removed_count} shortcuts for '{collection_name}'")
+            except Exception as e:
+                self.log(f"Steam: failed to sync shortcuts: {e}")
+                return 0, 0
+
+        return len(to_add), removed_count
+
+    def get_collection_shortcut_count(self, collection_name):
+        """Get the number of Steam shortcuts for a collection."""
+        shortcuts_path = self._get_shortcuts_path()
+        if not shortcuts_path:
+            return 0
+        shortcuts = SteamVDFHandler.read_shortcuts(shortcuts_path)
+        return sum(1 for s in shortcuts if self._is_managed_shortcut(s, collection_name))
+
+    def get_steam_sync_collections(self):
+        """Get the set of collection names that have Steam sync enabled."""
+        raw = self.settings.get('Steam', 'collections', '').strip()
+        if not raw:
+            return set()
+        return set(c.strip() for c in raw.split('|') if c.strip())
+
+    def set_steam_sync_collections(self, collections):
+        """Save the set of collection names that have Steam sync enabled."""
+        value = '|'.join(sorted(collections))
+        if not self.settings.config.has_section('Steam'):
+            self.settings.config.add_section('Steam')
+        self.settings.config.set('Steam', 'collections', value)
+        self.settings.save_settings()
+
+    def _get_sharedconfig_path(self):
+        """Get the path to Steam's sharedconfig.vdf (text VDF with collections)."""
+        userdata = self.find_steam_userdata_path()
+        if not userdata:
+            return None
+        # Navigate up from config/ to userdata/USERID/, then to 7/remote/
+        user_id_dir = userdata.parent
+        sharedconfig = user_id_dir / '7' / 'remote' / 'sharedconfig.vdf'
+        return sharedconfig if sharedconfig.exists() else None
+
+    def update_steam_collections(self, collection_name, shortcut_appids):
+        """Add shortcuts to a Steam collection (category).
+
+        Args:
+            collection_name: Name of the RomM collection (will be the Steam category name)
+            shortcut_appids: List of appids to add to this collection
+        """
+        import json
+        import hashlib
+
+        # Get paths (find_steam_userdata_path returns the config directory)
+        config_path = self.find_steam_userdata_path()
+        if not config_path:
+            self.log("Steam userdata not found - collections not updated")
+            return False
+
+        localconfig_path = config_path / 'localconfig.vdf'
+        cloud_storage_path = config_path / 'cloudstorage' / 'cloud-storage-namespace-1.json'
+
+        if not localconfig_path.exists():
+            self.log("localconfig.vdf not found - collections not updated")
+            return False
+
+        try:
+            # Convert appids to unsigned
+            unsigned_appids = [
+                appid if appid >= 0 else appid + 0x100000000
+                for appid in shortcut_appids
+            ]
+
+            # Generate a deterministic collection ID based on collection name
+            collection_id = f"romm-{hashlib.md5(collection_name.encode()).hexdigest()[:12]}"
+
+            # Update localconfig.vdf
+            with open(localconfig_path, 'r', encoding='utf-8', errors='replace') as f:
+                content = f.read()
+
+            # Find the user-collections line
+            import re
+            # Match the full line - VDF format is "key"\t\t"value"
+            match = re.search(r'(\s*)"user-collections"(\s+)"([^"\\]*(?:\\.[^"\\]*)*)"', content)
+            if match:
+                indent = match.group(1)
+                whitespace = match.group(2)
+                json_str = match.group(3)
+                # Unescape the JSON (VDF escapes quotes as \" and backslashes as \\)
+                json_str = json_str.replace('\\\\', '\x00')  # Temporarily replace \\ with null byte
+                json_str = json_str.replace('\\"', '"')      # Replace \" with "
+                json_str = json_str.replace('\x00', '\\')    # Restore \\ as \
+                collections = json.loads(json_str)
+
+                # Add or update our collection
+                collections[collection_id] = {
+                    'id': collection_id,
+                    'added': unsigned_appids,
+                    'removed': []
+                }
+
+                # Re-serialize
+                new_json = json.dumps(collections, separators=(',', ':'))
+                # Escape for VDF
+                new_json_escaped = new_json.replace('\\', '\\\\').replace('"', '\\"')
+
+                # Replace in content
+                new_line = f'{indent}"user-collections"{whitespace}"{new_json_escaped}"'
+                content = re.sub(
+                    r'\s*"user-collections"\s+"[^"\\]*(?:\\.[^"\\]*)*"',
+                    new_line,
+                    content
+                )
+
+                # Backup and write
+                backup_path = localconfig_path.with_suffix('.vdf.bak')
+                shutil.copy2(localconfig_path, backup_path)
+
+                with open(localconfig_path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+
+                self.log(f"Updated localconfig.vdf with {len(unsigned_appids)} games in collection '{collection_name}'")
+            else:
+                self.log("user-collections not found in localconfig.vdf")
+                return False
+
+            # Update cloud storage (if exists)
+            if cloud_storage_path.exists():
+                try:
+                    with open(cloud_storage_path, 'r', encoding='utf-8') as f:
+                        cloud_data = json.load(f)
+
+                    # Find existing entry or create new one
+                    collection_entry = None
+                    for i, entry in enumerate(cloud_data):
+                        if entry[0] == f'user-collections.{collection_id}':
+                            collection_entry = entry
+                            break
+
+                    # Create collection metadata
+                    timestamp = int(time.time())
+                    collection_value = {
+                        'id': collection_id,
+                        'name': collection_name,
+                        'added': unsigned_appids,
+                        'removed': []
+                    }
+
+                    new_entry = [
+                        f'user-collections.{collection_id}',
+                        {
+                            'key': f'user-collections.{collection_id}',
+                            'timestamp': timestamp,
+                            'value': json.dumps(collection_value),
+                            'version': str(timestamp),
+                            'conflictResolutionMethod': 'custom',
+                            'strMethodId': 'union-collections'
+                        }
+                    ]
+
+                    if collection_entry:
+                        # Update existing
+                        idx = cloud_data.index(collection_entry)
+                        cloud_data[idx] = new_entry
+                    else:
+                        # Add new
+                        cloud_data.append(new_entry)
+
+                    # Backup and write
+                    backup_cloud = cloud_storage_path.with_suffix('.json.bak')
+                    shutil.copy2(cloud_storage_path, backup_cloud)
+
+                    with open(cloud_storage_path, 'w', encoding='utf-8') as f:
+                        json.dump(cloud_data, f, separators=(',', ':'))
+
+                    self.log(f"Updated cloud storage with collection '{collection_name}'")
+                except Exception as e:
+                    self.log(f"Failed to update cloud storage (non-fatal): {e}")
+
+            return True
+
+        except Exception as e:
+            self.log(f"Failed to update Steam collections: {e}")
+            logging.error(f"Steam collection update error: {e}", exc_info=True)
+            return False

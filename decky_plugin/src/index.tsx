@@ -10,7 +10,7 @@ import {
 } from "@decky/ui";
 import { callable, definePlugin, toaster, routerHook, openFilePicker, FileSelectionType } from "@decky/api";
 import { useState, useEffect, useRef, ChangeEvent } from "react";
-import { FaSync, FaTrash, FaCog } from "react-icons/fa";
+import { FaSync, FaTrash, FaCog, FaSteam } from "react-icons/fa";
 import { BsGearFill } from "react-icons/bs";
 
 // Call backend methods
@@ -25,6 +25,7 @@ const resetAllSettings = callable<[], any>("reset_all_settings");
 const saveConfig = callable<[string, string, string, string, string, string, string], any>("save_config");
 const testRommConnection = callable<[string, string, string], any>("test_connection");
 const enableRetroArchSetting = callable<[string], any>("enable_retroarch_setting");
+const toggleCollectionSteamSync = callable<[string, boolean], any>("toggle_collection_steam_sync");
 
 const formatSpeed = (bytesPerSec: number): string => {
   if (bytesPerSec >= 1024 * 1024) return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`;
@@ -34,14 +35,14 @@ const formatSpeed = (bytesPerSec: number): string => {
 
 // Background monitoring - runs independently of UI
 let backgroundInterval: any = null;
-const previousSyncStates = new Map<string, {sync_state: string, downloaded?: number, total?: number}>();
+const previousSyncStates = new Map<string, { sync_state: string, downloaded?: number, total?: number }>();
 
 const checkForNotifications = async () => {
   try {
     const result = await getServiceStatus();
 
     // Collect all collections that need notifications
-    const notificationsToShow: Array<{name: string, downloaded: number, total: number, type: string}> = [];
+    const notificationsToShow: Array<{ name: string, downloaded: number, total: number, type: string }> = [];
 
     // Detect sync completion
     result.collections?.forEach((col: any) => {
@@ -53,7 +54,7 @@ const checkForNotifications = async () => {
       // 'syncing' -> 'synced': Normal case
       // 'not_synced' -> 'synced': Fast sync where we missed the 'syncing' state
       if (previousData && currentState === 'synced' &&
-          (previousData.sync_state === 'syncing' || previousData.sync_state === 'not_synced')) {
+        (previousData.sync_state === 'syncing' || previousData.sync_state === 'not_synced')) {
         console.log(`[BACKGROUND NOTIFICATION] Collection '${col.name}' completed syncing: ${col.downloaded}/${col.total} ROMs (prev state: ${previousData.sync_state})`);
         notificationsToShow.push({
           name: col.name,
@@ -147,7 +148,7 @@ function ConfigPage() {
   const [loading, setLoading] = useState(true);
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [testResult, setTestResult] = useState<{success: boolean; message: string} | null>(null);
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
 
   useEffect(() => {
     const load = async () => {
@@ -304,7 +305,7 @@ function ConfigPage() {
             try {
               const res = await openFilePicker(FileSelectionType.FOLDER, romDir || '/home/deck', false, true);
               if (res?.realpath) setRomDir(res.realpath);
-            } catch {}
+            } catch { }
           }}>
             Browse…
           </ButtonItem>
@@ -322,7 +323,7 @@ function ConfigPage() {
             try {
               const res = await openFilePicker(FileSelectionType.FOLDER, saveDir || '/home/deck', false, true);
               if (res?.realpath) setSaveDir(res.realpath);
-            } catch {}
+            } catch { }
           }}>
             Browse…
           </ButtonItem>
@@ -340,7 +341,7 @@ function ConfigPage() {
             try {
               const res = await openFilePicker(FileSelectionType.FOLDER, biosDir || '/home/deck', false, true);
               if (res?.realpath) setBiosDir(res.realpath);
-            } catch {}
+            } catch { }
           }}>
             Browse…
           </ButtonItem>
@@ -498,7 +499,7 @@ function Content() {
   const [configured, setConfigured] = useState<boolean | null>(null);
   const configuredRef = useRef<boolean | null>(null);
   const intervalRef = useRef<any>(null);
-  const optimisticOverrides = useRef<Map<string, {auto_sync: boolean, sync_state: string, downloaded?: number, total?: number}>>(new Map());
+  const optimisticOverrides = useRef<Map<string, { auto_sync: boolean, sync_state: string, downloaded?: number, total?: number }>>(new Map());
   const [biosExpanded, setBiosExpanded] = useState(false);
 
   const getStatusColor = () => {
@@ -671,6 +672,28 @@ function Content() {
     }
   };
 
+  const handleToggleSteamSync = async (collectionName: string, enabled: boolean) => {
+    try {
+      const result = await toggleCollectionSteamSync(collectionName, enabled);
+      if (result?.success) {
+        toaster.toast({
+          title: enabled ? "Added to Steam" : "Removed from Steam",
+          body: result.message + (enabled ? "\nRestart Steam to see changes" : ""),
+          duration: 4000,
+        });
+      } else {
+        toaster.toast({
+          title: "Steam Sync Error",
+          body: result?.message || "Unknown error",
+          duration: 4000,
+        });
+      }
+      await refreshStatus();
+    } catch (error) {
+      console.error('Failed to toggle Steam sync:', error);
+    }
+  };
+
   const handleEnableWarning = async (warningType: string) => {
     if (enablingWarning) return; // Already processing
 
@@ -838,102 +861,102 @@ function Content() {
         status.bios_status.failed_count > 0 ||
         status.bios_status.platforms_ready < status.bios_status.total_platforms
       ) && (
-        <>
-          {/* BIOS Container - includes both summary and expanded list */}
-          <div
-            style={{
-              margin: '4px 0',
-              padding: '8px 12px',
-              background: status.bios_status.platforms_ready === status.bios_status.total_platforms
-                ? 'rgba(74, 222, 128, 0.12)'
-                : 'rgba(251, 191, 36, 0.12)',
-              border: status.bios_status.platforms_ready === status.bios_status.total_platforms
-                ? '1px solid rgba(74, 222, 128, 0.4)'
-                : '1px solid rgba(251, 191, 36, 0.4)',
-              borderRadius: '6px',
-              fontSize: '13px',
-              color: status.bios_status.platforms_ready === status.bios_status.total_platforms
-                ? '#4ade80'
-                : '#fbbf24',
-              lineHeight: '1.5',
-            }}
-          >
-            {/* Summary header - clickable */}
+          <>
+            {/* BIOS Container - includes both summary and expanded list */}
             <div
-              onClick={() => setBiosExpanded(!biosExpanded)}
               style={{
-                cursor: 'pointer',
+                margin: '4px 0',
+                padding: '8px 12px',
+                background: status.bios_status.platforms_ready === status.bios_status.total_platforms
+                  ? 'rgba(74, 222, 128, 0.12)'
+                  : 'rgba(251, 191, 36, 0.12)',
+                border: status.bios_status.platforms_ready === status.bios_status.total_platforms
+                  ? '1px solid rgba(74, 222, 128, 0.4)'
+                  : '1px solid rgba(251, 191, 36, 0.4)',
+                borderRadius: '6px',
+                fontSize: '13px',
+                color: status.bios_status.platforms_ready === status.bios_status.total_platforms
+                  ? '#4ade80'
+                  : '#fbbf24',
+                lineHeight: '1.5',
               }}
             >
-              {status.bios_status.platforms_ready === status.bios_status.total_platforms ? '✅' : '⚠️'} {status.bios_status.platforms_ready}/{status.bios_status.total_platforms} platforms ready
-              <div style={{ fontSize: '11px', marginTop: '4px', opacity: 0.8 }}>
-                {biosExpanded ? '▼ Click to collapse' : '▶ Click to expand'}
+              {/* Summary header - clickable */}
+              <div
+                onClick={() => setBiosExpanded(!biosExpanded)}
+                style={{
+                  cursor: 'pointer',
+                }}
+              >
+                {status.bios_status.platforms_ready === status.bios_status.total_platforms ? '✅' : '⚠️'} {status.bios_status.platforms_ready}/{status.bios_status.total_platforms} platforms ready
+                <div style={{ fontSize: '11px', marginTop: '4px', opacity: 0.8 }}>
+                  {biosExpanded ? '▼ Click to collapse' : '▶ Click to expand'}
+                </div>
               </div>
+
+              {/* Expanded platform list - inside container */}
+              {biosExpanded && status.bios_status.platforms && (
+                <div style={{ marginTop: '12px', paddingTop: '8px', borderTop: '1px solid rgba(255, 255, 255, 0.1)' }}>
+                  {Object.entries(status.bios_status.platforms).map(([slug, platform]: [string, any]) => {
+                    const isDownloading = status.bios_status.downloading?.includes(slug);
+                    const hasFailed = status.bios_status.failures?.[slug];
+                    let icon = '✅';
+                    let color = '#4ade80';
+                    let statusText = 'Ready';
+
+                    if (isDownloading) {
+                      icon = '📥';
+                      color = '#60a5fa';
+                      statusText = 'Downloading...';
+                    } else if (hasFailed && hasFailed !== 'unavailable_on_server') {
+                      icon = '❌';
+                      color = '#f87171';
+                      statusText = 'Failed';
+                    } else if (hasFailed === 'unavailable_on_server' || platform.present === 0) {
+                      // Zero BIOS files - needs attention (lenient logic)
+                      icon = '⚠️';
+                      color = '#fbbf24';
+                      statusText = 'Missing';
+                    } else if (platform.present > 0) {
+                      // Has at least one BIOS - functional (lenient logic)
+                      icon = '✅';
+                      color = '#4ade80';
+                      // Show detail: "Ready (2/3)" if partial, "Ready" if complete
+                      if (platform.missing > 0) {
+                        statusText = `Ready (${platform.present}/${platform.total_required})`;
+                      } else {
+                        statusText = `Ready (${platform.present})`;
+                      }
+                    }
+
+                    return (
+                      <div
+                        key={slug}
+                        style={{
+                          padding: '6px 10px',
+                          margin: '4px 0',
+                          background: 'rgba(0, 0, 0, 0.2)',
+                          borderRadius: '4px',
+                          fontSize: '12px',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <span>{icon}</span>
+                          <span>{platform.name}</span>
+                        </div>
+                        <span style={{ color, fontSize: '11px' }}>{statusText}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
-            {/* Expanded platform list - inside container */}
-            {biosExpanded && status.bios_status.platforms && (
-              <div style={{ marginTop: '12px', paddingTop: '8px', borderTop: '1px solid rgba(255, 255, 255, 0.1)' }}>
-                {Object.entries(status.bios_status.platforms).map(([slug, platform]: [string, any]) => {
-                  const isDownloading = status.bios_status.downloading?.includes(slug);
-                  const hasFailed = status.bios_status.failures?.[slug];
-                  let icon = '✅';
-                  let color = '#4ade80';
-                  let statusText = 'Ready';
-
-                  if (isDownloading) {
-                    icon = '📥';
-                    color = '#60a5fa';
-                    statusText = 'Downloading...';
-                  } else if (hasFailed && hasFailed !== 'unavailable_on_server') {
-                    icon = '❌';
-                    color = '#f87171';
-                    statusText = 'Failed';
-                  } else if (hasFailed === 'unavailable_on_server' || platform.present === 0) {
-                    // Zero BIOS files - needs attention (lenient logic)
-                    icon = '⚠️';
-                    color = '#fbbf24';
-                    statusText = 'Missing';
-                  } else if (platform.present > 0) {
-                    // Has at least one BIOS - functional (lenient logic)
-                    icon = '✅';
-                    color = '#4ade80';
-                    // Show detail: "Ready (2/3)" if partial, "Ready" if complete
-                    if (platform.missing > 0) {
-                      statusText = `Ready (${platform.present}/${platform.total_required})`;
-                    } else {
-                      statusText = `Ready (${platform.present})`;
-                    }
-                  }
-
-                  return (
-                    <div
-                      key={slug}
-                      style={{
-                        padding: '6px 10px',
-                        margin: '4px 0',
-                        background: 'rgba(0, 0, 0, 0.2)',
-                        borderRadius: '4px',
-                        fontSize: '12px',
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                      }}
-                    >
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <span>{icon}</span>
-                        <span>{platform.name}</span>
-                      </div>
-                      <span style={{ color, fontSize: '11px' }}>{statusText}</span>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-        </>
-      )}
+          </>
+        )}
 
       {status.collections && status.collections.length > 0 && (
         <>
@@ -1015,6 +1038,24 @@ function Content() {
                         )}
                       </div>
                     </div>
+                  </PanelSectionRow>
+                )}
+                {/* Steam shortcut toggle */}
+                {status.steam_available && hasCount && (
+                  <PanelSectionRow>
+                    <ToggleField
+                      label={
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <FaSteam size={14} color={collection.steam_sync ? '#66c0f4' : '#6b7280'} style={{ paddingRight: '2px' }} />
+                          <span style={{ fontSize: '0.85em' }}>Add to Steam</span>
+                        </div>
+                      }
+                      description={collection.steam_sync && collection.steam_shortcut_count > 0
+                        ? `${collection.steam_shortcut_count} shortcuts`
+                        : undefined}
+                      checked={!!collection.steam_sync}
+                      onChange={(value: boolean) => handleToggleSteamSync(collection.name, value)}
+                    />
                   </PanelSectionRow>
                 )}
               </div>
