@@ -142,8 +142,8 @@ print_success "System dependencies installed"
 print_status "Setting up Python virtual environment..."
 
 if [ ! -d "venv" ]; then
-    python3 -m venv venv
-    print_success "Virtual environment created"
+    python3 -m venv --system-site-packages venv
+    print_success "Virtual environment created (with system site packages)"
 else
     print_warning "Virtual environment already exists"
 fi
@@ -165,7 +165,7 @@ if [ -f "requirements.txt" ]; then
 else
     # Fallback to manual installation
     print_warning "requirements.txt not found, installing dependencies manually"
-    pip install requests watchdog cryptography  # <-- Add cryptography here
+    pip install requests watchdog cryptography Pillow psutil
 fi
 
 # 5. Install development dependencies
