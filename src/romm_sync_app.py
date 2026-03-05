@@ -6028,6 +6028,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             retroarch_interface=self.retroarch,
             settings=self.settings,
             log_callback=lambda msg: GLib.idle_add(self.log_message, msg),
+            cover_manager=None  # Will be set after romm_client is created
         )
 
         self.game_cache = GameDataCache(self.settings)
@@ -7828,6 +7829,13 @@ class SyncWindow(Gtk.ApplicationWindow):
             # STEP 1: Initialize client
             init_start = time.time()
             self.romm_client = RomMClient(url, username, password)
+
+            # Initialize cover art manager for Steam grid images
+            self.romm_client.cover_manager = CoverArtManager(self.settings, self.romm_client)
+
+            # Update steam manager with cover manager
+            self.steam_manager.cover_manager = self.romm_client.cover_manager
+
             init_time = time.time() - init_start
             self.log_message(f"⚡ Client initialized in {init_time:.2f}s")
             

@@ -144,6 +144,7 @@ class Plugin:
             retroarch_interface=self._retroarch,
             settings=self._settings,
             log_callback=lambda msg: logging.info(f"[STEAM] {msg}"),
+            cover_manager=None  # Will be set after romm_client is created
         )
         logging.info(f"Steam shortcut manager created, available: {self._steam_manager.is_available()}")
         logging.info(f"RetroArch interface created, has bios_manager: {hasattr(self._retroarch, 'bios_manager')}")
@@ -217,6 +218,13 @@ class Plugin:
             if not self._romm_client.authenticated:
                 logging.error("RomM authentication failed")
                 return False
+
+            # Initialize cover art manager for Steam grid images
+            self._romm_client.cover_manager = CoverArtManager(self._settings, self._romm_client)
+
+            # Update steam manager with cover manager
+            if self._steam_manager:
+                self._steam_manager.cover_manager = self._romm_client.cover_manager
 
             logging.info("Connected to RomM successfully")
 

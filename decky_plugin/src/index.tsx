@@ -1046,7 +1046,7 @@ function Content() {
                     <ToggleField
                       label={
                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <FaSteam size={14} color={collection.steam_sync ? '#66c0f4' : '#6b7280'} style={{ paddingRight: '2px' }} />
+                          <FaSteam size={14} color={collection.steam_sync ? '#66c0f4' : '#6b7280'} />
                           <span style={{ fontSize: '0.85em' }}>Add to Steam</span>
                         </div>
                       }

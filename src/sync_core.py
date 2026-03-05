@@ -758,6 +758,8 @@ class SettingsManager:
                 'enabled': 'false',
                 'userdata_path': '',
                 'collections': '',
+                'artwork_enabled': 'true',
+                'artwork_quality': 'high',
             }
 
             self.save_settings()
@@ -795,6 +797,8 @@ class SettingsManager:
             'enabled': 'false',
             'userdata_path': '',
             'collections': '',
+            'artwork_enabled': 'true',
+            'artwork_quality': 'high',
         }
         for key, default_value in steam_defaults.items():
             if key not in self.config['Steam']:
@@ -877,6 +881,286 @@ class DownloadProgress:
             'filename': self.filename
         }
 
+class CoverArtManager:
+    """Manages cover art downloads and local caching for Steam grid images"""
+
+    def __init__(self, settings_manager, romm_client):
+        self.settings = settings_manager
+        self.romm_client = romm_client
+        self.cache_dir = Path.home() / 'RomMSync' / 'covers'
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def get_cover_cache_path(self, rom_id, platform_slug):
+        """Return local cache path for a ROM's cover art
+
+        Args:
+            rom_id: ROM identifier from RomM API
+            platform_slug: Platform slug for directory organization
+
+        Returns:
+            Path object for cached cover image
+        """
+        platform_dir = self.cache_dir / platform_slug
+        platform_dir.mkdir(parents=True, exist_ok=True)
+        return platform_dir / f"{rom_id}.jpg"
+
+    def download_cover(self, rom_id, platform_slug, cover_url, progress_callback=None):
+        """Download cover art from RomM API with caching
+
+        Args:
+            rom_id: ROM identifier
+            platform_slug: Platform slug for organization
+            cover_url: Cover URL from RomM API (path_cover_large or path_cover_small)
+            progress_callback: Optional progress callback
+
+        Returns:
+            Tuple of (success: bool, local_path: Path or None, message: str)
+        """
+        if not cover_url:
+            return False, None, "No cover URL provided"
+
+        cache_path = self.get_cover_cache_path(rom_id, platform_slug)
+
+        # Return cached cover if exists and valid (at least 1KB)
+        if cache_path.exists() and cache_path.stat().st_size > 1024:
+            logging.debug(f"Using cached cover for ROM {rom_id}")
+            return True, cache_path, "Using cached cover"
+
+        # Download cover from RomM
+        try:
+            # Build full URL (cover_url is a path like /assets/romm/resources/...)
+            from urllib.parse import urljoin
+            full_url = urljoin(self.romm_client.base_url, cover_url)
+
+            logging.debug(f"Downloading cover from: {full_url}")
+            response = self.romm_client.session.get(full_url, stream=True, timeout=30)
+
+            if response.status_code != 200:
+                logging.warning(f"Cover download failed: HTTP {response.status_code}")
+                return False, None, f"HTTP {response.status_code}"
+
+            # Stream download to cache file
+            temp_path = cache_path.with_suffix('.tmp')
+            with open(temp_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+
+            # Verify file was written and has content
+            if temp_path.stat().st_size < 100:
+                temp_path.unlink()
+                return False, None, "Downloaded file too small (corrupt)"
+
+            # Move temp file to final location
+            temp_path.rename(cache_path)
+            logging.debug(f"Cover cached at: {cache_path}")
+            return True, cache_path, "Cover downloaded"
+
+        except Exception as e:
+            logging.warning(f"Cover download failed for ROM {rom_id}: {e}")
+            # Clean up temp file if it exists
+            if temp_path.exists():
+                temp_path.unlink()
+            return False, None, f"Download failed: {e}"
+
+class SteamGridImageGenerator:
+    """Generate Steam grid images from cover art in multiple formats"""
+
+    # Steam grid image dimensions
+    GRID_PORTRAIT = (600, 900)    # Vertical cover for library
+    GRID_LANDSCAPE = (920, 430)   # Horizontal grid view
+    GRID_HERO = (1920, 620)       # Hero/banner for big picture mode
+
+    @staticmethod
+    def generate_grid_images(source_image_path, output_dir, appid):
+        """Generate all Steam grid image variants from a cover image
+
+        Args:
+            source_image_path: Path to source cover image (jpg/png)
+            output_dir: Steam grid directory (userdata/config/grid/)
+            appid: Steam shortcut appid (signed int32)
+
+        Returns:
+            Tuple of (success: bool, generated_count: int, message: str)
+        """
+        try:
+            from PIL import Image
+        except ImportError:
+            return False, 0, "Pillow not installed (pip install Pillow)"
+
+        if not Path(source_image_path).exists():
+            return False, 0, "Source image not found"
+
+        try:
+            # Load source image
+            source = Image.open(source_image_path)
+
+            # Convert RGBA to RGB if needed (Steam expects RGB)
+            if source.mode == 'RGBA':
+                rgb_source = Image.new('RGB', source.size, (0, 0, 0))
+                rgb_source.paste(source, mask=source.split()[3])  # Use alpha channel as mask
+                source = rgb_source
+            elif source.mode != 'RGB':
+                source = source.convert('RGB')
+
+            # Convert appid to unsigned for filenames
+            unsigned_appid = appid if appid >= 0 else appid + 0x100000000
+
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            generated = 0
+
+            # Generate portrait (600x900) - typical for cover art
+            portrait_path = output_dir / f"{unsigned_appid}p.png"
+            portrait = SteamGridImageGenerator._resize_and_pad(
+                source.copy(),
+                SteamGridImageGenerator.GRID_PORTRAIT
+            )
+            portrait.save(portrait_path, 'PNG', optimize=True)
+            generated += 1
+
+            # Generate landscape (920x430) - for grid view
+            landscape_path = output_dir / f"{unsigned_appid}.png"
+            landscape = SteamGridImageGenerator._resize_and_crop(
+                source.copy(),
+                SteamGridImageGenerator.GRID_LANDSCAPE
+            )
+            landscape.save(landscape_path, 'PNG', optimize=True)
+            generated += 1
+
+            # Generate hero (1920x620) - for big picture mode
+            hero_path = output_dir / f"{unsigned_appid}_hero.png"
+            hero = SteamGridImageGenerator._resize_and_crop(
+                source.copy(),
+                SteamGridImageGenerator.GRID_HERO
+            )
+            hero.save(hero_path, 'PNG', optimize=True)
+            generated += 1
+
+            return True, generated, f"Generated {generated} grid images"
+
+        except Exception as e:
+            logging.warning(f"Image processing failed: {e}")
+            return False, 0, f"Image processing failed: {e}"
+
+    @staticmethod
+    def _resize_and_pad(image, target_size):
+        """Resize image preserving aspect ratio with padding (letterbox/pillarbox)
+
+        Args:
+            image: PIL Image object
+            target_size: Target (width, height) tuple
+
+        Returns:
+            PIL Image object resized and padded to target_size
+        """
+        from PIL import Image
+
+        # Calculate aspect-ratio-preserving size
+        image.thumbnail(target_size, Image.Resampling.LANCZOS)
+
+        # Create new image with black background
+        result = Image.new('RGB', target_size, (0, 0, 0))
+
+        # Center paste the resized image
+        paste_x = (target_size[0] - image.width) // 2
+        paste_y = (target_size[1] - image.height) // 2
+        result.paste(image, (paste_x, paste_y))
+
+        return result
+
+    @staticmethod
+    def _resize_and_crop(image, target_size):
+        """Resize and crop image to fill target size (cover fit)
+
+        Args:
+            image: PIL Image object
+            target_size: Target (width, height) tuple
+
+        Returns:
+            PIL Image object resized and cropped to target_size
+        """
+        from PIL import Image
+
+        # Calculate crop to fit target aspect ratio
+        target_aspect = target_size[0] / target_size[1]
+        image_aspect = image.width / image.height
+
+        if image_aspect > target_aspect:
+            # Image is wider - crop width
+            new_width = int(image.height * target_aspect)
+            left = (image.width - new_width) // 2
+            image = image.crop((left, 0, left + new_width, image.height))
+        else:
+            # Image is taller - crop height
+            new_height = int(image.width / target_aspect)
+            top = (image.height - new_height) // 2
+            image = image.crop((0, top, image.width, top + new_height))
+
+        # Resize to exact target size
+        image = image.resize(target_size, Image.Resampling.LANCZOS)
+        return image
+
+    @staticmethod
+    def generate_square_icon(source_image_path, output_path, size=256):
+        """Generate a square icon from cover art by extracting center square
+
+        Args:
+            source_image_path: Path to source cover image
+            output_path: Path where to save the icon
+            size: Icon size in pixels (default 256x256)
+
+        Returns:
+            Tuple of (success: bool, message: str)
+        """
+        try:
+            from PIL import Image
+        except ImportError:
+            return False, "Pillow not installed"
+
+        if not Path(source_image_path).exists():
+            return False, "Source image not found"
+
+        try:
+            # Load source image
+            source = Image.open(source_image_path)
+
+            # Convert RGBA to RGB if needed
+            if source.mode == 'RGBA':
+                rgb_source = Image.new('RGB', source.size, (255, 255, 255))
+                rgb_source.paste(source, mask=source.split()[3])
+                source = rgb_source
+            elif source.mode != 'RGB':
+                source = source.convert('RGB')
+
+            # Extract center square
+            width, height = source.size
+
+            if width > height:
+                # Wider image - crop width to match height
+                left = (width - height) // 2
+                icon = source.crop((left, 0, left + height, height))
+            elif height > width:
+                # Taller image - crop height to match width
+                top = (height - width) // 2
+                icon = source.crop((0, top, width, top + width))
+            else:
+                # Already square
+                icon = source
+
+            # Resize to target size
+            icon = icon.resize((size, size), Image.Resampling.LANCZOS)
+
+            # Save as PNG for transparency support
+            icon.save(output_path, 'PNG', optimize=True)
+
+            return True, f"Icon saved to {output_path}"
+
+        except Exception as e:
+            logging.warning(f"Icon generation failed: {e}")
+            return False, f"Icon generation failed: {e}"
+
 class RomMClient:
     """Client for interacting with RomM API"""
     
@@ -890,6 +1174,9 @@ class RomMClient:
         self.refresh_token = None
         self.token_type = 'bearer'
         self.token_expiry = None
+
+        # Cover art manager (set externally after initialization)
+        self.cover_manager = None
 
         # Force HTTP/2 and connection reuse
         from requests.adapters import HTTPAdapter
@@ -1247,7 +1534,7 @@ class RomMClient:
                 params = {
                     'limit': limit,
                     'offset': offset,
-                    'fields': 'id,name,fs_name,platform_name,platform_slug,files,multi'
+                    'fields': 'id,name,fs_name,platform_name,platform_slug,files,multi,path_cover_large,path_cover_small'
                 }
 
                 # Add updated_after filter if provided
@@ -1428,7 +1715,7 @@ class RomMClient:
                     params={
                         'limit': page_size,
                         'offset': offset,
-                        'fields': 'id,name,fs_name,platform_name,platform_slug,files,multi'
+                        'fields': 'id,name,fs_name,platform_name,platform_slug,files,multi,path_cover_large,path_cover_small'
                     },
                     timeout=60
                 )
@@ -6895,11 +7182,12 @@ class SteamShortcutManager:
 
     MANAGED_TAG = 'romm-sync'  # Tag used to identify our shortcuts
 
-    def __init__(self, retroarch_interface, settings, log_callback=None):
+    def __init__(self, retroarch_interface, settings, log_callback=None, cover_manager=None):
         self.retroarch = retroarch_interface
         self.settings = settings
         self.log = log_callback or (lambda msg: logging.info(msg))
         self._userdata_path_cache = None
+        self.cover_manager = cover_manager
 
     def is_available(self):
         """Check if Steam userdata is accessible."""
@@ -6994,11 +7282,20 @@ class SteamShortcutManager:
         else:
             return f'"{exe}"', f'-L "{core_path}" "{rom_path}"'
 
-    def build_shortcut_entry(self, rom_name, rom_path, platform_name, collection_name):
+    def build_shortcut_entry(self, rom_name, rom_path, platform_name, collection_name, rom_id=None, platform_slug=None, cover_url=None):
         """Build a single shortcut dict for a ROM.
 
         Creates a shortcut even if no core is found (with placeholder launch command).
         Returns the shortcut dict.
+
+        Args:
+            rom_name: Display name of the ROM
+            rom_path: Path to the ROM file
+            platform_name: Platform name
+            collection_name: Collection name
+            rom_id: Optional ROM ID for cover art download
+            platform_slug: Optional platform slug for cover art organization
+            cover_url: Optional cover URL from RomM API (path_cover_l or path_cover_s)
         """
         exe, launch_options = self._build_launch_command(rom_path, platform_name)
 
@@ -7024,12 +7321,15 @@ class SteamShortcutManager:
         if missing_core_tag:
             tags.append(missing_core_tag)
 
+        # Icon will be set after cover processing if available
+        icon_path = ''
+
         shortcut = {
             'appid': appid,
             'AppName': app_name,
             'Exe': exe,
             'StartDir': start_dir,
-            'icon': '',
+            'icon': icon_path,
             'ShortcutPath': '',
             'LaunchOptions': launch_options,
             'IsHidden': 0,
@@ -7043,6 +7343,53 @@ class SteamShortcutManager:
             'FlatpakAppID': '',
             'tags': tags,
         }
+
+        # Generate Steam grid artwork if enabled
+        if self.cover_manager and rom_id and cover_url:
+            artwork_enabled = self.settings.get('Steam', 'artwork_enabled', 'true') == 'true'
+
+            if artwork_enabled:
+                # Download cover art
+                success, cover_path, msg = self.cover_manager.download_cover(
+                    rom_id, platform_slug or 'unknown', cover_url
+                )
+
+                if success and cover_path:
+                    # Generate Steam grid images
+                    userdata_path = self.find_steam_userdata_path()
+                    if userdata_path:
+                        grid_dir = userdata_path / 'grid'
+                        grid_success, count, grid_msg = SteamGridImageGenerator.generate_grid_images(
+                            cover_path, grid_dir, appid
+                        )
+
+                        if grid_success:
+                            self.log(f"  🎨 Generated {count} grid images for {rom_name}")
+                        else:
+                            # Non-fatal - log but continue
+                            logging.debug(f"Grid generation failed for {rom_name}: {grid_msg}")
+
+                        # Generate square icon for Steam
+                        icon_dir = Path.home() / 'RomMSync' / 'icons'
+                        icon_dir.mkdir(parents=True, exist_ok=True)
+                        icon_file = icon_dir / f"{rom_id}.png"
+
+                        icon_success, icon_msg = SteamGridImageGenerator.generate_square_icon(
+                            cover_path, icon_file, size=256
+                        )
+
+                        if icon_success:
+                            # Update shortcut icon field with absolute path
+                            shortcut['icon'] = str(icon_file.absolute())
+                            logging.debug(f"Generated icon for {rom_name}: {icon_file}")
+                        else:
+                            logging.debug(f"Icon generation failed for {rom_name}: {icon_msg}")
+                    else:
+                        logging.debug(f"Steam userdata not found, skipping grid generation for {rom_name}")
+                else:
+                    # Cover download failed - non-fatal
+                    logging.debug(f"Cover download skipped for {rom_name}: {msg}")
+
         return shortcut
 
     def _is_managed_shortcut(self, shortcut, collection_name=None):
@@ -7153,10 +7500,14 @@ class SteamShortcutManager:
         download_dir = Path(download_dir)
 
         for rom in roms:
+            rom_id = rom.get('id')
             rom_name = rom.get('name', rom.get('fs_name', 'Unknown'))
             platform_name = rom.get('platform_name', rom.get('platform_slug', 'Unknown'))
             platform_slug = rom.get('platform_slug', 'Unknown')
-            
+
+            # Get cover URL (prefer large, fallback to small)
+            cover_url = rom.get('path_cover_large') or rom.get('path_cover_small')
+
             # Detect multi-disc game from API data
             is_multi, disc_files = self._detect_multi_disc_from_api(rom)
 
@@ -7175,7 +7526,10 @@ class SteamShortcutManager:
                     if not is_path_validly_downloaded(local_path):
                         continue
                     disc_display = f"{rom_name} (Disc {disc_idx})"
-                    entry = self.build_shortcut_entry(disc_display, str(local_path), platform_name, collection_name)
+                    entry = self.build_shortcut_entry(
+                        disc_display, str(local_path), platform_name, collection_name,
+                        rom_id=rom_id, platform_slug=platform_slug, cover_url=cover_url
+                    )
                     if entry:
                         shortcuts.append(entry)
                         added += 1
@@ -7185,7 +7539,10 @@ class SteamShortcutManager:
                 local_path = download_dir / platform_slug / file_name
                 if not is_path_validly_downloaded(local_path):
                     continue
-                entry = self.build_shortcut_entry(rom_name, str(local_path), platform_name, collection_name)
+                entry = self.build_shortcut_entry(
+                    rom_name, str(local_path), platform_name, collection_name,
+                    rom_id=rom_id, platform_slug=platform_slug, cover_url=cover_url
+                )
                 if entry:
                     shortcuts.append(entry)
                     added += 1
@@ -7212,6 +7569,45 @@ class SteamShortcutManager:
             self.log(msg)
             return 0, msg
 
+    def _cleanup_shortcut_artwork(self, shortcut):
+        """Clean up grid images and icons for a shortcut.
+
+        Args:
+            shortcut: Shortcut dict containing appid and icon path
+        """
+        appid = shortcut.get('appid')
+        if not appid:
+            return
+
+        # Convert to unsigned for filenames
+        unsigned_appid = appid if appid >= 0 else appid + 0x100000000
+
+        # Delete grid images
+        userdata_path = self.find_steam_userdata_path()
+        if userdata_path:
+            grid_dir = userdata_path / 'grid'
+
+            # Delete all variants (portrait, landscape, hero)
+            for suffix in ['p.png', '.png', '_hero.png']:
+                grid_file = grid_dir / f"{unsigned_appid}{suffix}"
+                if grid_file.exists():
+                    try:
+                        grid_file.unlink()
+                        logging.debug(f"Deleted grid image: {grid_file.name}")
+                    except Exception as e:
+                        logging.warning(f"Failed to delete {grid_file}: {e}")
+
+        # Delete icon if it exists
+        icon_path = shortcut.get('icon', '')
+        if icon_path:
+            icon_file = Path(icon_path)
+            if icon_file.exists():
+                try:
+                    icon_file.unlink()
+                    logging.debug(f"Deleted icon: {icon_file.name}")
+                except Exception as e:
+                    logging.warning(f"Failed to delete icon {icon_file}: {e}")
+
     def remove_collection_shortcuts(self, collection_name):
         """Remove all Steam shortcuts for a collection.
 
@@ -7223,15 +7619,27 @@ class SteamShortcutManager:
             return 0, "Steam userdata not found"
 
         shortcuts = SteamVDFHandler.read_shortcuts(shortcuts_path)
-        original_count = len(shortcuts)
-        shortcuts = [s for s in shortcuts if not self._is_managed_shortcut(s, collection_name)]
-        removed = original_count - len(shortcuts)
 
-        if removed == 0:
+        # Find shortcuts to remove and clean up their artwork
+        shortcuts_to_remove = [s for s in shortcuts if self._is_managed_shortcut(s, collection_name)]
+
+        if not shortcuts_to_remove:
             return 0, f"No shortcuts found for '{collection_name}'"
+
+        # Clean up grid images and icons before removing
+        for shortcut in shortcuts_to_remove:
+            self._cleanup_shortcut_artwork(shortcut)
+
+        # Remove shortcuts from list
+        shortcuts = [s for s in shortcuts if not self._is_managed_shortcut(s, collection_name)]
+        removed = len(shortcuts_to_remove)
 
         try:
             SteamVDFHandler.write_shortcuts(shortcuts_path, shortcuts)
+
+            # Also remove the Steam collection itself
+            self.remove_steam_collection(collection_name)
+
             msg = f"Removed {removed} shortcuts for '{collection_name}'"
             self.log(msg)
             return removed, msg
@@ -7268,10 +7676,14 @@ class SteamShortcutManager:
         desired_names = set()
 
         for rom in current_roms:
+            rom_id = rom.get('id')
             rom_name = rom.get('name', rom.get('fs_name', 'Unknown'))
             platform_name = rom.get('platform_name', rom.get('platform_slug', 'Unknown'))
             platform_slug = rom.get('platform_slug', 'Unknown')
-            
+
+            # Get cover URL (prefer large, fallback to small)
+            cover_url = rom.get('path_cover_large') or rom.get('path_cover_small')
+
             # Detect multi-disc game from API data
             is_multi, disc_files = self._detect_multi_disc_from_api(rom)
 
@@ -7289,7 +7701,10 @@ class SteamShortcutManager:
                     if not is_path_validly_downloaded(local_path):
                         continue
                     disc_display = f"{rom_name} (Disc {disc_idx})"
-                    entry = self.build_shortcut_entry(disc_display, str(local_path), platform_name, collection_name)
+                    entry = self.build_shortcut_entry(
+                        disc_display, str(local_path), platform_name, collection_name,
+                        rom_id=rom_id, platform_slug=platform_slug, cover_url=cover_url
+                    )
                     if entry:
                         desired.append(entry)
                         desired_names.add(entry['AppName'])
@@ -7298,7 +7713,10 @@ class SteamShortcutManager:
                 local_path = download_dir / platform_slug / file_name
                 if not is_path_validly_downloaded(local_path):
                     continue
-                entry = self.build_shortcut_entry(rom_name, str(local_path), platform_name, collection_name)
+                entry = self.build_shortcut_entry(
+                    rom_name, str(local_path), platform_name, collection_name,
+                    rom_id=rom_id, platform_slug=platform_slug, cover_url=cover_url
+                )
                 if entry:
                     desired.append(entry)
                     desired_names.add(entry['AppName'])
@@ -7306,7 +7724,12 @@ class SteamShortcutManager:
         # Calculate delta
         to_add = [s for s in desired if s['AppName'] not in existing_names]
         to_keep = [s for s in managed_shortcuts if s.get('AppName', '') in desired_names]
-        removed_count = len(managed_shortcuts) - len(to_keep)
+        to_remove = [s for s in managed_shortcuts if s.get('AppName', '') not in desired_names]
+        removed_count = len(to_remove)
+
+        # Clean up artwork for removed shortcuts
+        for shortcut in to_remove:
+            self._cleanup_shortcut_artwork(shortcut)
 
         # Rebuild full list
         new_shortcuts = user_shortcuts + to_keep + to_add
@@ -7498,4 +7921,97 @@ class SteamShortcutManager:
         except Exception as e:
             self.log(f"Failed to update Steam collections: {e}")
             logging.error(f"Steam collection update error: {e}", exc_info=True)
+            return False
+
+    def remove_steam_collection(self, collection_name):
+        """Remove a Steam collection (category) completely.
+
+        Args:
+            collection_name: Name of the RomM collection to remove from Steam
+        """
+        import json
+        import hashlib
+
+        config_path = self.find_steam_userdata_path()
+        if not config_path:
+            return False
+
+        localconfig_path = config_path / 'localconfig.vdf'
+        cloud_storage_path = config_path / 'cloudstorage' / 'cloud-storage-namespace-1.json'
+
+        if not localconfig_path.exists():
+            return False
+
+        try:
+            # Generate collection ID (same as in update_steam_collections)
+            collection_id = f"romm-{hashlib.md5(collection_name.encode()).hexdigest()[:12]}"
+
+            # Remove from localconfig.vdf
+            with open(localconfig_path, 'r', encoding='utf-8', errors='replace') as f:
+                content = f.read()
+
+            import re
+            match = re.search(r'(\s*)"user-collections"(\s+)"([^"\\]*(?:\\.[^"\\]*)*)"', content)
+            if match:
+                indent = match.group(1)
+                whitespace = match.group(2)
+                json_str = match.group(3)
+
+                # Unescape JSON
+                json_str = json_str.replace('\\\\', '\x00')
+                json_str = json_str.replace('\\"', '"')
+                json_str = json_str.replace('\x00', '\\')
+                collections = json.loads(json_str)
+
+                # Remove our collection if it exists
+                if collection_id in collections:
+                    del collections[collection_id]
+
+                    # Re-serialize
+                    new_json = json.dumps(collections, separators=(',', ':'))
+                    new_json_escaped = new_json.replace('\\', '\\\\').replace('"', '\\"')
+
+                    # Replace in content
+                    new_line = f'{indent}"user-collections"{whitespace}"{new_json_escaped}"'
+                    content = re.sub(
+                        r'\s*"user-collections"\s+"[^"\\]*(?:\\.[^"\\]*)*"',
+                        new_line,
+                        content
+                    )
+
+                    # Backup and write
+                    backup_path = localconfig_path.with_suffix('.vdf.bak')
+                    shutil.copy2(localconfig_path, backup_path)
+
+                    with open(localconfig_path, 'w', encoding='utf-8') as f:
+                        f.write(content)
+
+                    self.log(f"Removed collection '{collection_name}' from localconfig.vdf")
+
+            # Remove from cloud storage
+            if cloud_storage_path.exists():
+                try:
+                    with open(cloud_storage_path, 'r', encoding='utf-8') as f:
+                        cloud_data = json.load(f)
+
+                    # Find and remove collection entry
+                    key_to_remove = f'user-collections.{collection_id}'
+                    cloud_data = [entry for entry in cloud_data if entry[0] != key_to_remove]
+
+                    # Backup and write
+                    backup_cloud = cloud_storage_path.with_suffix('.json.bak')
+                    shutil.copy2(cloud_storage_path, backup_cloud)
+
+                    with open(cloud_storage_path, 'w', encoding='utf-8') as f:
+                        json.dump(cloud_data, f, separators=(',', ':'))
+
+                    self.log(f"Removed collection '{collection_name}' from cloud storage")
+                except Exception as e:
+                    self.log(f"Failed to remove from cloud storage (non-fatal): {e}")
+
+            return True
+
+        except Exception as e:
+            self.log(f"Failed to remove Steam collection: {e}")
+            logging.error(f"Steam collection removal error: {e}", exc_info=True)
             return False
