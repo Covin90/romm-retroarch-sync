@@ -50,6 +50,7 @@ Decky Loader's installer validates all of these. **Any missing file causes silen
 | `py_modules/sync_core.py` | YES | Sync daemon logic |
 | `py_modules/requests/` | YES | Bundled dependency (not on SteamOS) |
 | `py_modules/watchdog/` | YES | Bundled dependency (not on SteamOS) |
+| `py_modules/PIL/` | YES | Bundled dependency (Pillow for image processing) |
 | `py_modules/urllib3/`, `certifi/`, `charset_normalizer/`, `idna/` | YES | Transitive deps of requests |
 | `assets/logo.png` | NO | Plugin icon |
 

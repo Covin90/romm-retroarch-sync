@@ -765,6 +765,23 @@ class Plugin:
             if self._settings:
                 self._settings.load_settings()
 
+            # Enable/disable Steam sync integration if available
+            if self._steam_manager and self._steam_manager.is_available():
+                steam_enabled = self._settings.get('Steam', 'enabled', 'false') == 'true'
+                if steam_enabled:
+                    # Call the steam toggle method but don't await it (run in background)
+                    # The method is async but we're in a sync context, so we'll call it
+                    # using asyncio to avoid blocking
+                    import asyncio
+                    try:
+                        # Run the steam sync toggle in the background
+                        asyncio.create_task(
+                            self.toggle_collection_steam_sync(collection_name, enabled)
+                        )
+                        logging.info(f"Steam sync {'enabled' if enabled else 'disabled'} for: {collection_name}")
+                    except Exception as e:
+                        logging.warning(f"Could not toggle Steam sync: {e}")
+
             # Update collection sync directly — no trigger file needed
             if self._collection_sync:
                 if sync_set:
@@ -1292,4 +1309,101 @@ class Plugin:
 
         except Exception as e:
             logging.error(f"toggle_collection_steam_sync error: {e}", exc_info=True)
+            return {'success': False, 'message': str(e)}
+
+    async def toggle_steam_integration(self, enabled: bool):
+        """Enable or disable Steam integration globally.
+
+        When enabled, adds Steam shortcuts for all currently synced collections.
+        When disabled, removes all Steam shortcuts for all synced collections.
+        """
+        try:
+            import configparser
+            ini_path = Path.home() / '.config' / 'romm-retroarch-sync' / 'settings.ini'
+            if not ini_path.exists():
+                logging.error("Settings file not found")
+                return {'success': False, 'message': 'Settings file not found'}
+
+            config = configparser.ConfigParser()
+            config.read(ini_path)
+            if not config.has_section('Steam'):
+                config.add_section('Steam')
+
+            config.set('Steam', 'enabled', str(enabled).lower())
+
+            total_added = 0
+            total_removed = 0
+            collections_count = 0
+
+            if self._steam_manager and self._steam_manager.is_available():
+                if enabled:
+                    # When enabling, add Steam shortcuts for all currently synced collections
+                    actively_syncing = config.get('Collections', 'actively_syncing', fallback='')
+                    synced_collections = {c for c in actively_syncing.split('|') if c}
+
+                    if synced_collections and self._romm_client and self._romm_client.authenticated:
+                        for collection_name in synced_collections:
+                            try:
+                                # Enable Steam sync for this collection
+                                steam_collections = self._steam_manager.get_steam_sync_collections()
+                                steam_collections.add(collection_name)
+                                self._steam_manager.set_steam_sync_collections(steam_collections)
+
+                                # Find collection and add shortcuts
+                                collection_id = None
+                                for col in (self._romm_collections or []):
+                                    if col.get('name') == collection_name:
+                                        collection_id = col.get('id')
+                                        break
+
+                                if collection_id:
+                                    collection_roms = self._romm_client.get_collection_roms(collection_id)
+                                    download_dir = Path(self._settings.get('Download', 'rom_directory',
+                                                                            '~/RomMSync/roms')).expanduser()
+                                    added, msg = self._steam_manager.add_collection_shortcuts(
+                                        collection_name, collection_roms, str(download_dir))
+                                    total_added += added
+                                    collections_count += 1
+                                    logging.info(f"Added {added} shortcuts for '{collection_name}'")
+                            except Exception as e:
+                                logging.warning(f"Error adding shortcuts for {collection_name}: {e}")
+                else:
+                    # When disabling, clean up all Steam shortcuts
+                    steam_collections = self._steam_manager.get_steam_sync_collections().copy()
+                    if steam_collections:
+                        for collection_name in steam_collections:
+                            try:
+                                removed, msg = self._steam_manager.remove_collection_shortcuts(collection_name)
+                                total_removed += removed
+                                collections_count += 1
+                                logging.info(f"Removed {removed} shortcuts for '{collection_name}'")
+                            except Exception as e:
+                                logging.warning(f"Error removing shortcuts for {collection_name}: {e}")
+
+                        # Clear the Steam sync collections list
+                        self._steam_manager.set_steam_sync_collections(set())
+
+            with open(ini_path, 'w') as f:
+                config.write(f)
+
+            # Update in-memory settings
+            if self._settings:
+                self._settings.load_settings()
+
+            if enabled:
+                if collections_count > 0:
+                    message = f"Steam integration enabled — added {total_added} shortcuts from {collections_count} synced collections"
+                else:
+                    message = "Steam integration enabled — no collections currently synced"
+            else:
+                if collections_count > 0:
+                    message = f"Steam integration disabled — removed {total_removed} shortcuts from {collections_count} collections"
+                else:
+                    message = "Steam integration disabled"
+
+            logging.info(message)
+            return {'success': True, 'message': message}
+
+        except Exception as e:
+            logging.error(f"toggle_steam_integration error: {e}", exc_info=True)
             return {'success': False, 'message': str(e)}

@@ -96,7 +96,7 @@ cp "$SOURCE_ICON" "$APPDIR/usr/bin/romm_icon.png"
 # Method 1: Use --no-deps to avoid dependency checking for conflicting packages
 pip3 install --target="$APPDIR/usr/lib/python3/dist-packages" \
     --no-deps \
-    requests watchdog cryptography psutil
+    requests watchdog cryptography psutil Pillow
 
 # Install any missing sub-dependencies manually
 pip3 install --target="$APPDIR/usr/lib/python3/dist-packages" \

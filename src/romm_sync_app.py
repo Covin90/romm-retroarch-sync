@@ -5402,7 +5402,11 @@ class EnhancedLibrarySection:
                 switch.set_active(is_actively_syncing)
                 switch._updating = False
 
+                # Build tooltip with Steam integration info if enabled
                 tooltip = f"{collection_name} - {status_text}"
+                if (self.parent.settings.get('Steam', 'enabled', 'false') == 'true'
+                        and self.parent.steam_manager.is_available()):
+                    tooltip += "\n🎮 Steam shortcuts sync included"
                 switch.set_tooltip_text(tooltip)
 
                 # Connect handler
@@ -5413,28 +5417,6 @@ class EnhancedLibrarySection:
                 if not hasattr(switch, '_sync_handler_connected'):
                     switch.connect('notify::active', on_collection_sync_toggle)
                     switch._sync_handler_connected = True
-
-                # Steam shortcut toggle button (only if Steam integration is enabled)
-                if (self.parent.settings.get('Steam', 'enabled', 'false') == 'true'
-                        and self.parent.steam_manager.is_available()):
-                    steam_btn = Gtk.ToggleButton()
-                    steam_btn.set_icon_name('input-gaming-symbolic')
-                    steam_btn.set_valign(Gtk.Align.CENTER)
-                    steam_btn.add_css_class('flat')
-                    steam_btn.add_css_class('compact-switch')
-                    steam_collections = self.parent.steam_manager.get_steam_sync_collections()
-                    steam_btn.set_active(collection_name in steam_collections)
-                    steam_btn.set_tooltip_text(
-                        f"Steam shortcuts {'enabled' if collection_name in steam_collections else 'disabled'} for {collection_name}"
-                    )
-
-                    def on_steam_toggle(btn, name=collection_name):
-                        if getattr(btn, '_updating', False):
-                            return
-                        self._toggle_steam_sync(name, btn.get_active())
-
-                    steam_btn.connect('toggled', on_steam_toggle)
-                    box.append(steam_btn)
 
                 return
             else:
@@ -5665,6 +5647,13 @@ class EnhancedLibrarySection:
             # Update status indicator IMMEDIATELY (no delay)
             self.update_collection_sync_status(collection_name)
             self.parent.log_message(f"[DEBUG] Status updated ({time.time() - toggle_start:.3f}s)")
+
+            # Enable Steam sync if Steam integration is available
+            if (self.parent.settings.get('Steam', 'enabled', 'false') == 'true'
+                    and self.parent.steam_manager.is_available()):
+                self._toggle_steam_sync(collection_name, True)
+                self.parent.log_message(f"[DEBUG] Steam sync enabled ({time.time() - toggle_start:.3f}s)")
+
             self.parent.log_message(f"[DEBUG] TOTAL on_switch_toggled time: {time.time() - toggle_start:.3f}s")
 
         else:
@@ -5674,6 +5663,11 @@ class EnhancedLibrarySection:
             # Also remove from completed collections
             if hasattr(self, 'completed_sync_collections'):
                 self.completed_sync_collections.discard(collection_name)
+
+            # Disable Steam sync if Steam integration is available
+            if (self.parent.settings.get('Steam', 'enabled', 'false') == 'true'
+                    and self.parent.steam_manager.is_available()):
+                self._toggle_steam_sync(collection_name, False)
 
             # Stop global sync if no collections left
             if not self.actively_syncing_collections:
@@ -8213,6 +8207,18 @@ class SyncWindow(Gtk.ApplicationWindow):
         self.autosync_expander.set_title("Auto-Sync")
         self.autosync_expander.set_subtitle("Monitor and sync save files automatically")
 
+        # Status indicator
+        self.autosync_status_row = Adw.ActionRow()
+        self.autosync_status_row.set_title("Status")
+        self.autosync_status_row.set_subtitle("Disabled")
+
+        # Add status dot as prefix
+        self.autosync_status_dot = self.create_status_dot('red')
+        self.autosync_status_dot.set_margin_end(8)
+        self.autosync_status_row.add_prefix(self.autosync_status_dot)
+
+        self.autosync_expander.add_row(self.autosync_status_row)
+
         # Collection sync settings
         collection_sync_row = Adw.SpinRow()
         collection_sync_row.set_title("Collection Sync Interval")
@@ -8312,26 +8318,8 @@ class SyncWindow(Gtk.ApplicationWindow):
         
         upload_saves_row.add_suffix(upload_container)
         self.autosync_expander.add_row(upload_saves_row)
-        
-        # Status indicator
-        self.autosync_status_row = Adw.ActionRow()
-        self.autosync_status_row.set_title("Status")
-        self.autosync_status_row.set_subtitle("Disabled")
 
-        # Add status dot as prefix
-        self.autosync_status_dot = self.create_status_dot('red')
-        self.autosync_status_dot.set_margin_end(8)
-        self.autosync_status_row.add_prefix(self.autosync_status_dot)
-
-        self.autosync_expander.add_row(self.autosync_status_row)
-        
-        download_sync_group.add(self.autosync_expander)
-        self.preferences_page.add(download_sync_group)
-
-        # Steam Integration group
-        steam_group = Adw.PreferencesGroup()
-        steam_group.set_title("Steam Integration")
-
+        # Steam collections integration
         steam_enable_row = Adw.SwitchRow()
         steam_enable_row.set_title("Add Collections to Steam")
         steam_enable_row.set_subtitle(
@@ -8341,9 +8329,10 @@ class SyncWindow(Gtk.ApplicationWindow):
         steam_enable_row.set_active(self.settings.get('Steam', 'enabled', 'false') == 'true')
         steam_enable_row.set_sensitive(self.steam_manager.is_available())
         steam_enable_row.connect('notify::active', self.on_steam_enable_toggle)
-        steam_group.add(steam_enable_row)
+        self.autosync_expander.add_row(steam_enable_row)
 
-        self.preferences_page.add(steam_group)
+        download_sync_group.add(self.autosync_expander)
+        self.preferences_page.add(download_sync_group)
 
     def on_autosync_toggle(self, switch_row, pspec):
         """Handle auto-sync enable/disable"""
@@ -8375,9 +8364,72 @@ class SyncWindow(Gtk.ApplicationWindow):
         enabled = switch_row.get_active()
         self.settings.set('Steam', 'enabled', str(enabled).lower())
         if enabled:
-            self.log_message("Steam integration enabled — toggle Steam sync per-collection in the Collections view")
+            # When enabling Steam integration, add Steam shortcuts for all currently synced collections
+            if self.steam_manager and self.steam_manager.is_available():
+                if hasattr(self, 'library_section'):
+                    synced_collections = self.library_section.actively_syncing_collections.copy()
+                    if synced_collections:
+                        def add_steam_shortcuts():
+                            total_added = 0
+                            for collection_name in synced_collections:
+                                try:
+                                    # Enable Steam sync for this collection
+                                    steam_collections = self.steam_manager.get_steam_sync_collections()
+                                    steam_collections.add(collection_name)
+                                    self.steam_manager.set_steam_sync_collections(steam_collections)
+
+                                    # Find collection and add shortcuts
+                                    all_collections = self.romm_client.get_collections()
+                                    collection_id = None
+                                    for col in all_collections:
+                                        if col.get('name') == collection_name:
+                                            collection_id = col.get('id')
+                                            break
+
+                                    if collection_id:
+                                        roms = self.romm_client.get_collection_roms(collection_id)
+                                        download_dir = self.settings.get('Download', 'rom_directory')
+                                        added, msg = self.steam_manager.add_collection_shortcuts(
+                                            collection_name, roms, download_dir)
+                                        total_added += added
+                                except Exception as e:
+                                    GLib.idle_add(self.log_message, f"Error adding shortcuts for {collection_name}: {e}")
+
+                            GLib.idle_add(self.log_message,
+                                         f"Steam integration enabled — added {total_added} shortcuts from {len(synced_collections)} synced collections")
+
+                        threading.Thread(target=add_steam_shortcuts, daemon=True).start()
+                    else:
+                        self.log_message("Steam integration enabled — no collections currently synced")
+                else:
+                    self.log_message("Steam integration enabled — toggle collection sync to add shortcuts")
+            else:
+                self.log_message("Steam integration enabled — toggle collection sync to add shortcuts")
         else:
-            self.log_message("Steam integration disabled")
+            # When disabling Steam integration, remove all Steam shortcuts for synced collections
+            if self.steam_manager and self.steam_manager.is_available():
+                steam_collections = self.steam_manager.get_steam_sync_collections().copy()
+                if steam_collections:
+                    def cleanup_steam_shortcuts():
+                        total_removed = 0
+                        for collection_name in steam_collections:
+                            try:
+                                removed, msg = self.steam_manager.remove_collection_shortcuts(collection_name)
+                                total_removed += removed
+                            except Exception as e:
+                                GLib.idle_add(self.log_message, f"Error removing shortcuts for {collection_name}: {e}")
+
+                        # Clear the Steam sync collections list
+                        self.steam_manager.set_steam_sync_collections(set())
+
+                        GLib.idle_add(self.log_message,
+                                     f"Steam integration disabled — removed {total_removed} shortcuts from {len(steam_collections)} collections")
+
+                    threading.Thread(target=cleanup_steam_shortcuts, daemon=True).start()
+                else:
+                    self.log_message("Steam integration disabled")
+            else:
+                self.log_message("Steam integration disabled")
 
     def on_collection_sync_interval_changed(self, spin_row, pspec):
         """Save collection sync interval in seconds"""

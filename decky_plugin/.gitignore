@@ -64,6 +64,9 @@ py_modules/charset_normalizer/
 py_modules/charset_normalizer-*.dist-info/
 py_modules/idna/
 py_modules/idna-*.dist-info/
+py_modules/PIL/
+py_modules/pillow-*.dist-info/
+py_modules/pillow.libs/
 py_modules/requests/
 py_modules/requests-*.dist-info/
 py_modules/urllib3/
