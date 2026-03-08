@@ -1834,11 +1834,18 @@ class RomMClient:
             if not filename:
                 print(f"Available ROM fields: {rom_details}")
                 return False, "Could not find filename in ROM details"
-            
+        
             # Check if this is a folder
+            files = rom_details.get('files', [])
+            files_amount = len(files)
+            file_extension = rom_details.get('fs_extension', '')
+
             is_folder = rom_details.get('multi', False) or \
-                    rom_details.get('fs_extension', '') == '' or \
-                    len(rom_details.get('files', [])) > 1
+                    files_amount > 1
+            
+            if (files_amount == 1 and file_extension == ''):
+                download_path = download_path / files[0].get('file_name', 'file')
+                print("Single foldered file detected, using download path: " + download_path.__str__())
 
             if is_folder:
                 folder_name = rom_details.get('fs_name', filename)
@@ -2024,7 +2031,7 @@ class RomMClient:
             print(f"Download cancelled: {e}")
             return False, "cancelled"
         except Exception as e:
-            print(f"Download exception: {e}")
+            logging.exception("Download exception")
             return False, f"Download error: {e}"
     
     def download_save(self, rom_id, save_type, download_path, device_id=None):
