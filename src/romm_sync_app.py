@@ -10023,14 +10023,30 @@ class SyncWindow(Gtk.ApplicationWindow):
         if self.retroarch.bios_manager:
             platform = game.get('platform')
             if platform:
+                # Set RomM client BEFORE checking (needed for server queries)
+                self.retroarch.bios_manager.romm_client = self.romm_client
+
+                logging.debug(f"[BIOS] Checking platform: {platform}")
                 normalized = self.retroarch.bios_manager.normalize_platform_name(platform)
+                logging.debug(f"[BIOS] Normalized to: {normalized}")
                 present, missing = self.retroarch.bios_manager.check_platform_bios(normalized)
+                logging.debug(f"[BIOS] Present: {len(present)}, Missing: {len(missing)}")
+                if missing:
+                    logging.debug(f"[BIOS] Missing files: {[m.get('file') for m in missing]}")
                 required_missing = [b for b in missing if not b.get('optional', False)]
+                logging.debug(f"[BIOS] Required missing: {len(required_missing)}")
 
                 if required_missing:
-                    # Set RomM client and download silently
-                    self.retroarch.bios_manager.romm_client = self.romm_client
-                    self.retroarch.bios_manager.auto_download_missing_bios(normalized)
+                    self.log_message(f"📥 Downloading {len(required_missing)} missing BIOS file(s) for {platform}...")
+                    success = self.retroarch.bios_manager.auto_download_missing_bios(normalized)
+                    if success:
+                        self.log_message(f"✅ BIOS download complete for {platform}")
+                    else:
+                        self.log_message(f"⚠️ Some BIOS files may not have downloaded for {platform}")
+            else:
+                logging.debug("[BIOS] No platform specified for game")
+        else:
+            logging.debug("[BIOS] No BIOS manager available")
 
         # Actually launch the game
         local_path = game.get('local_path')
@@ -10080,14 +10096,20 @@ class SyncWindow(Gtk.ApplicationWindow):
         if self.retroarch.bios_manager:
             platform = game.get('platform')
             if platform:
+                # Set RomM client BEFORE checking (needed for server queries)
+                self.retroarch.bios_manager.romm_client = self.romm_client
+
                 normalized = self.retroarch.bios_manager.normalize_platform_name(platform)
                 present, missing = self.retroarch.bios_manager.check_platform_bios(normalized)
                 required_missing = [b for b in missing if not b.get('optional', False)]
 
                 if required_missing:
-                    # Set RomM client and download silently
-                    self.retroarch.bios_manager.romm_client = self.romm_client
-                    self.retroarch.bios_manager.auto_download_missing_bios(normalized)
+                    self.log_message(f"📥 Downloading {len(required_missing)} missing BIOS file(s) for {platform}...")
+                    success = self.retroarch.bios_manager.auto_download_missing_bios(normalized)
+                    if success:
+                        self.log_message(f"✅ BIOS download complete for {platform}")
+                    else:
+                        self.log_message(f"⚠️ Some BIOS files may not have downloaded for {platform}")
 
         # Build path to the specific disc file
         game_local_path = game.get('local_path')

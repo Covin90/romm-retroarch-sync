@@ -6,6 +6,7 @@ Handles BIOS detection, verification, and synchronization
 
 from pathlib import Path
 import hashlib
+import logging
 
 class BiosManager:
     """Manages BIOS files for RetroArch cores"""
@@ -202,21 +203,25 @@ class BiosManager:
             or None if server unavailable or platform not found
         """
         if not self.romm_client or not self.romm_client.authenticated:
+            logging.debug("[BIOS] No RomM client or not authenticated")
             return None
 
         try:
             from urllib.parse import urljoin
 
             # Get all platforms from server
+            logging.debug(f"[BIOS] Querying server for platform: {platform_name}")
             platforms_response = self.romm_client.session.get(
                 urljoin(self.romm_client.base_url, '/api/platforms'),
                 timeout=10
             )
 
             if platforms_response.status_code != 200:
+                logging.debug(f"[BIOS] Server returned status {platforms_response.status_code}")
                 return None
 
             platforms = platforms_response.json()
+            logging.debug(f"[BIOS] Got {len(platforms)} platforms from server")
 
             # Platform name variations for matching
             platform_mappings = {
@@ -237,6 +242,7 @@ class BiosManager:
             }
 
             possible_names = platform_mappings.get(platform_name, [platform_name])
+            logging.debug(f"[BIOS] Searching for matches: {possible_names}")
 
             # Find matching platform
             for platform in platforms:
@@ -247,12 +253,18 @@ class BiosManager:
                       for name in possible_names):
 
                     firmware_list = platform.get('firmware', [])
+                    logging.debug(f"[BIOS] Found platform '{platform_name_check}' with {len(firmware_list)} firmware files")
+                    if firmware_list:
+                        logging.debug(f"[BIOS] Firmware files: {[f.get('file_name') for f in firmware_list]}")
                     return firmware_list
 
+            logging.debug(f"[BIOS] Platform '{platform_name}' not found on server")
             return None  # Platform not found
 
         except Exception as e:
-            self.log(f"⚠️ Error querying server firmware: {e}")
+            logging.warning(f"[BIOS] Error querying server firmware: {e}")
+            import traceback
+            logging.debug(traceback.format_exc())
             return None
 
     def check_platform_bios(self, platform_name):
@@ -275,15 +287,14 @@ class BiosManager:
                 if file_name in self.installed_bios:
                     present.append({
                         'file': file_name,
-                        'required': True,
                         'status': 'present'
                     })
                 else:
+                    # Mark as required so auto-download will fetch them
                     missing.append({
                         'file': file_name,
-                        'required': True,
                         'status': 'missing',
-                        'optional': True  # Don't block, just inform
+                        'optional': False  # Treat as required for downloading
                     })
 
         return present, missing
@@ -384,13 +395,13 @@ class BiosManager:
                         platform_name_check.lower() in name.lower() 
                         for name in possible_names):
                         
-                        self.log(f"🔍 Found platform: {platform_name_check}")
+                        logging.debug(f"[BIOS] Found platform: {platform_name_check}")
                         firmware_list = platform.get('firmware', [])
-                        
+
                         for firmware in firmware_list:
                             if firmware.get('file_name') == bios_filename:
                                 firmware_id = firmware.get('id')
-                                self.log(f"🔍 Found BIOS: {bios_filename} (ID: {firmware_id})")
+                                logging.debug(f"[BIOS] Found BIOS: {bios_filename} (ID: {firmware_id})")
 
                                 # Construct the download URL using the firmware ID and filename
                                 download_url = f'/api/firmware/{firmware_id}/content/{bios_filename}'
@@ -401,19 +412,19 @@ class BiosManager:
                                     stream=True,
                                     timeout=60  # Increased timeout for larger files
                                 )
-                                
+
                                 # STEP 2: Check for a successful response and write the file
                                 if file_response.status_code == 200:
                                     download_path = self.system_dir / bios_filename
-                                    
+
                                     with open(download_path, 'wb') as f:
                                         for chunk in file_response.iter_content(chunk_size=8192):
                                             f.write(chunk)
-                                    
-                                    self.log(f"✅ Downloaded {bios_filename}")
+
+                                    logging.debug(f"[BIOS] Downloaded {bios_filename}")
                                     return True
                                 else:
-                                    self.log(f"❌ Download failed with status code: {file_response.status_code}")
+                                    logging.warning(f"[BIOS] Download failed with status code: {file_response.status_code}")
                                     return False
                         
                         self.log(f"❌ {bios_filename} not found in {platform_name_check} firmware list on server.")
@@ -547,11 +558,11 @@ class BiosManager:
         self.scan_installed_bios()
         
         if success_count == len(required_missing):
-            self.log(f"✅ Downloaded all {success_count} BIOS files for {platform_name}")
+            logging.debug(f"[BIOS] Downloaded all {success_count} BIOS files for {platform_name}")
             return True
         elif success_count > 0:
-            self.log(f"⚠️ Downloaded {success_count}/{len(required_missing)} BIOS files for {platform_name}")
+            logging.warning(f"[BIOS] Downloaded {success_count}/{len(required_missing)} BIOS files for {platform_name}")
             return True
         else:
-            self.log(f"❌ Could not download any BIOS files for {platform_name}")
+            logging.warning(f"[BIOS] Could not download any BIOS files for {platform_name}")
             return False
