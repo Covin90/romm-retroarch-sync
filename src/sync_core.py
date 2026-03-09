@@ -3396,9 +3396,9 @@ class RetroArchInterface:
             'Game Boy Advance': ['mgba', 'vba_next', 'vbam'],
             'Sega Genesis': ['genesis_plus_gx', 'blastem', 'picodrive'],
             'Nintendo 64': ['mupen64plus_next', 'parallel_n64'],
-            'Nintendo DS': ['desmume', 'melonds'],
-            'Nintendo - Nintendo DS': ['desmume', 'melonds'],
-            'nds': ['desmume', 'melonds'], 
+            'Nintendo DS': ['desmume', 'melonds', 'melondsds'],
+            'Nintendo - Nintendo DS': ['desmume', 'melonds', 'melondsds'],
+            'nds': ['desmume', 'melonds', 'melondsds'], 
             'Sega Saturn': ['beetle_saturn', 'kronos'],
             'Arcade': ['mame', 'fbneo', 'fbalpha'],
             'PlayStation 2': ['pcsx2', 'play'],
@@ -3765,7 +3765,7 @@ class RetroArchInterface:
             'ps1': ['beetle_psx', 'beetle_psx_hw', 'mednafen_psx_hw', 'mednafen_psx', 'pcsx_rearmed', 'swanstation'],
             'genesis': ['genesis_plus_gx', 'blastem', 'picodrive'],
             'mega drive': ['genesis_plus_gx', 'blastem', 'picodrive'],
-            'nintendo ds': ['desmume', 'melonds'],
+            'nintendo ds': ['desmume', 'melonds', 'melondsds'],
             'nds': ['desmume', 'melonds'],
         }
 
