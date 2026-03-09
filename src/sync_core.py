@@ -3766,7 +3766,7 @@ class RetroArchInterface:
             'genesis': ['genesis_plus_gx', 'blastem', 'picodrive'],
             'mega drive': ['genesis_plus_gx', 'blastem', 'picodrive'],
             'nintendo ds': ['desmume', 'melonds', 'melondsds'],
-            'nds': ['desmume', 'melonds'],
+            'nds': ['desmume', 'melonds', 'melondsds'],
         }
 
         # Try keyword matching
