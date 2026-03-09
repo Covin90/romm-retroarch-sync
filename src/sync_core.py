@@ -734,10 +734,14 @@ class SettingsManager:
             }
             self.config['AutoSync'] = {
                 'auto_enable_on_connect': 'true',
-                'overwrite_behavior': '0'
+                'overwrite_behavior': '0',
+                'startup_sync_enabled': 'true',
+                'startup_scan_days': '7',
+                'last_shutdown_time': ''
             }
             self.config['System'] = {
-                'autostart': 'false'
+                'autostart': 'false',
+                'debug_mode': 'false'
             }
             self.config['Collections'] = {
                 'sync_interval': '120',
@@ -804,6 +808,15 @@ class SettingsManager:
             if key not in self.config['Steam']:
                 self.config['Steam'][key] = default_value
                 modified = True
+
+        # Ensure System section has debug_mode (added in v1.5+)
+        if 'System' not in self.config:
+            self.config['System'] = {}
+            modified = True
+
+        if 'debug_mode' not in self.config['System']:
+            self.config['System']['debug_mode'] = 'false'
+            modified = True
 
         # Save if any migrations were applied
         if modified:
@@ -1183,8 +1196,8 @@ class RomMClient:
         from urllib3.util.retry import Retry
 
         adapter = HTTPAdapter(
-            pool_connections=4,
-            pool_maxsize=4,
+            pool_connections=10,
+            pool_maxsize=10,
             max_retries=Retry(total=2)
         )
         self.session.mount('http://', adapter)
@@ -3929,8 +3942,6 @@ class RetroArchInterface:
                 # If we found both or either, we're done
                 if save_dirs:
                     print(f"📁 Found RetroArch save dirs: {base_dir}")
-                    print(f"   Saves: {save_dirs.get('saves', 'Not found')}")
-                    print(f"   States: {save_dirs.get('states', 'Not found')}")
                     break
         
         return save_dirs
@@ -3946,17 +3957,18 @@ class RetroArchInterface:
             if custom_config_dir.exists():
                 print(f"🔧 Using custom config directory: {custom_config_dir}")
                 return custom_config_dir
-        
+
         # Standard detection logic
         possible_dirs = [
             # RetroDECK (correct path)
             Path.home() / '.var/app/net.retrodeck.retrodeck/config/retroarch',
-            Path.home() / 'retrodeck',
-            # Flatpak
+            # Flatpak RetroArch (prioritize over generic retrodeck folder)
             Path.home() / '.var/app/org.libretro.RetroArch/config/retroarch',
             # Native/Steam installations
             Path.home() / '.config/retroarch',
-            Path.home() / '/.retroarch',
+            Path.home() / '.retroarch',
+            # RetroDECK generic folder (may not have retroarch.cfg directly)
+            Path.home() / 'retrodeck',
             # Steam specific locations
             Path.home() / '.steam/steam/steamapps/common/RetroArch',
             Path.home() / '.local/share/Steam/steamapps/common/RetroArch',
@@ -3965,10 +3977,22 @@ class RetroArchInterface:
             # AppImage
             Path.home() / '.retroarch-appimage',
         ]
-        
+
+        # Check each directory and verify retroarch.cfg exists
         for config_dir in possible_dirs:
             if config_dir.exists():
-                return config_dir
+                # Check if retroarch.cfg actually exists in this directory
+                config_file = config_dir / 'retroarch.cfg'
+                if config_file.exists():
+                    return config_dir
+                else:
+                    # Directory exists but no retroarch.cfg - try subdirectories
+                    for subdir in ['config/retroarch', '.config/retroarch']:
+                        subconfig_dir = config_dir / subdir
+                        subconfig_file = subconfig_dir / 'retroarch.cfg'
+                        if subconfig_file.exists():
+                            return subconfig_dir
+
         return None
 
     def is_retrodeck_installation(self):
@@ -4133,10 +4157,9 @@ class RetroArchInterface:
             Path.home() / '.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/RetroArch/cores',
             Path.home() / '.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/RetroArch/info',
         ]
-        
+
         for cores_dir in possible_dirs:
             if cores_dir.exists() and any(cores_dir.glob('*.so')):
-                print(f"🔧 Found cores directory: {cores_dir}")
                 return cores_dir
         
         return None
@@ -4487,11 +4510,12 @@ class RetroArchInterface:
         try:
             config_dir = self.find_retroarch_config_dir()
             if not config_dir:
-                return False, "Config directory not found"
+                return False, "Config directory not found (see logs for checked paths)"
 
             config_file = config_dir / 'retroarch.cfg'
             if not config_file.exists():
-                return False, "retroarch.cfg not found"
+                print(f"⚠️ Expected retroarch.cfg at: {config_file}")
+                return False, f"retroarch.cfg not found at {config_dir}"
 
             network_enabled = False
             network_port = None
@@ -4508,7 +4532,7 @@ class RetroArchInterface:
                             pass
 
             if not network_enabled:
-                return False, "Network commands disabled in RA"
+                return False, "Network commands disabled"
             elif network_port != 55355:
                 return False, f"Wrong port: {network_port} (should be 55355)"
             else:
@@ -4538,7 +4562,7 @@ class RetroArchInterface:
                         break
 
             if not thumbnail_enabled:
-                return False, "Save state thumbnails disabled in RA"
+                return False, "Save state thumbnails disabled"
             else:
                 return True, "Save state thumbnails enabled"
 
@@ -4557,11 +4581,13 @@ class RetroArchInterface:
         try:
             config_dir = self.find_retroarch_config_dir()
             if not config_dir:
-                return False, "Config directory not found"
+                print("⚠️ Cannot enable setting: config directory not found")
+                return False, "Config directory not found (see logs for checked paths)"
 
             config_file = config_dir / 'retroarch.cfg'
             if not config_file.exists():
-                return False, "retroarch.cfg not found"
+                print(f"⚠️ Expected retroarch.cfg at: {config_file}")
+                return False, f"retroarch.cfg not found at {config_dir}"
 
             # Read the entire config file
             with open(config_file, 'r', encoding='utf-8') as f:
@@ -4631,6 +4657,90 @@ class RetroArchInterface:
         except Exception as e:
             return False, f"Failed to enable setting: {e}"
 
+    def toggle_retroarch_setting(self, setting_type):
+        """Toggle a specific RetroArch setting (enable if disabled, disable if enabled)
+
+        Args:
+            setting_type: Either 'network_commands' or 'savestate_thumbnails'
+
+        Returns:
+            (success: bool, message: str)
+        """
+        try:
+            # Check current state
+            if setting_type == 'network_commands':
+                is_enabled, _ = self.check_network_commands_config()
+            elif setting_type == 'savestate_thumbnails':
+                is_enabled, _ = self.check_savestate_thumbnail_config()
+            else:
+                return False, f"Unknown setting type: {setting_type}"
+
+            # Get config file
+            config_dir = self.find_retroarch_config_dir()
+            if not config_dir:
+                return False, "Config directory not found (see logs for checked paths)"
+
+            config_file = config_dir / 'retroarch.cfg'
+            if not config_file.exists():
+                return False, f"retroarch.cfg not found at {config_dir}"
+
+            # Read the config file
+            with open(config_file, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+
+            modified = False
+            new_value = "false" if is_enabled else "true"  # Toggle the value
+            action = "disabled" if is_enabled else "enabled"
+
+            if setting_type == 'network_commands':
+                # Toggle network_cmd_enable
+                network_enable_found = False
+                for i, line in enumerate(lines):
+                    stripped = line.strip()
+                    if stripped.startswith('network_cmd_enable = '):
+                        lines[i] = f'network_cmd_enable = "{new_value}"\n'
+                        network_enable_found = True
+                        modified = True
+                        break
+
+                # If not found, add it
+                if not network_enable_found:
+                    lines.append(f'network_cmd_enable = "{new_value}"\n')
+                    if new_value == "true":
+                        lines.append('network_cmd_port = "55355"\n')
+                    modified = True
+
+            elif setting_type == 'savestate_thumbnails':
+                # Toggle savestate_thumbnail_enable
+                thumbnail_found = False
+                for i, line in enumerate(lines):
+                    stripped = line.strip()
+                    if stripped.startswith('savestate_thumbnail_enable = '):
+                        lines[i] = f'savestate_thumbnail_enable = "{new_value}"\n'
+                        thumbnail_found = True
+                        modified = True
+                        break
+
+                # If not found, add it
+                if not thumbnail_found:
+                    lines.append(f'savestate_thumbnail_enable = "{new_value}"\n')
+                    modified = True
+
+            if not modified:
+                return True, f"Setting already {action}"
+
+            # Write the modified config back
+            with open(config_file, 'w', encoding='utf-8') as f:
+                f.writelines(lines)
+
+            if setting_type == 'network_commands':
+                return True, f"Network commands {action} (restart RetroArch to apply)"
+            elif setting_type == 'savestate_thumbnails':
+                return True, f"Save state thumbnails {action} (restart RetroArch to apply)"
+
+        except Exception as e:
+            return False, f"Failed to toggle setting: {e}"
+
 class AutoSyncManager:
     """Manages automatic synchronization of saves/states between RetroArch and RomM"""
     
@@ -4661,6 +4771,12 @@ class AutoSyncManager:
         
         # Upload worker thread
         self.upload_worker = None
+        self.startup_sync_thread = None
+
+        # Upload fingerprints persistence
+        self.upload_fingerprints_file = Path.home() / '.config' / 'romm-retroarch-sync' / 'cache' / 'upload_fingerprints.json'
+        self.upload_fingerprints_file.parent.mkdir(parents=True, exist_ok=True)
+        self._load_upload_fingerprints()
 
         # Add these new attributes at the end
         self.retroarch_monitor = None
@@ -4670,6 +4786,30 @@ class AutoSyncManager:
         # Add lock mechanism
         self.lock = AutoSyncLock()
         self.instance_id = f"{'gui' if parent_window else 'daemon'}_{os.getpid()}"
+
+    def _load_upload_fingerprints(self):
+        """Load upload fingerprints from disk"""
+        try:
+            if self.upload_fingerprints_file.exists():
+                with open(self.upload_fingerprints_file, 'r') as f:
+                    data = json.load(f)
+                    # Convert JSON arrays back to tuples
+                    self.last_uploaded = {path: tuple(fingerprint) for path, fingerprint in data.items()}
+                logging.debug(f"Loaded {len(self.last_uploaded)} upload fingerprints from cache")
+        except Exception as e:
+            logging.debug(f"Could not load upload fingerprints: {e}")
+            self.last_uploaded = {}
+
+    def _save_upload_fingerprints(self):
+        """Save upload fingerprints to disk"""
+        try:
+            # Convert tuples to lists for JSON serialization
+            data = {path: list(fingerprint) for path, fingerprint in self.last_uploaded.items()}
+            with open(self.upload_fingerprints_file, 'w') as f:
+                json.dump(data, f, indent=2)
+            logging.debug(f"Saved {len(self.last_uploaded)} upload fingerprints to cache")
+        except Exception as e:
+            logging.debug(f"Could not save upload fingerprints: {e}")
 
     def start_auto_sync(self):
         """Start all auto-sync components"""
@@ -4684,17 +4824,21 @@ class AutoSyncManager:
             
         self.enabled = True
         self.should_stop.clear()
-        
+
         try:
-            # Start file system monitoring
-            self.start_file_monitoring()
-            
             # Start upload worker
             self.start_upload_worker()
-            
+
+            # Start startup save sync
+            if self.settings.get('AutoSync', 'startup_sync_enabled', 'true') == 'true':
+                self.start_startup_save_sync()
+
+            # Start file system monitoring
+            self.start_file_monitoring()
+
             self.start_retroarch_monitoring()
             self.start_playlist_monitoring()
-            
+
             self.log("🔄 Auto-sync started (file monitoring + RetroArch + playlist monitoring)")
             
         except Exception as e:
@@ -4708,7 +4852,17 @@ class AutoSyncManager:
             
         self.enabled = False
         self.should_stop.set()
-        
+
+        # Save shutdown time for startup sync
+        try:
+            self.settings.config['AutoSync']['last_shutdown_time'] = str(time.time())
+            self.settings.save_settings()
+        except Exception as e:
+            logging.debug(f"Could not save shutdown time: {e}")
+
+        # Save upload fingerprints to persist between restarts
+        self._save_upload_fingerprints()
+
         # Release lock
         self.lock.release()
         
@@ -5155,6 +5309,88 @@ class AutoSyncManager:
         except Exception as e:
             self.log(f"❌ Recent saves sync error: {e}")
 
+    def start_startup_save_sync(self):
+        """Launch background thread to upload saves modified while app was closed"""
+        def startup_sync_worker():
+            try:
+                # Wait for upload worker to be ready
+                time.sleep(2)
+
+                # Get timestamp of last shutdown
+                last_shutdown = self.settings.get('AutoSync', 'last_shutdown_time', '')
+                current_time = time.time()
+
+                if not last_shutdown:
+                    # First run - scan last 24 hours
+                    cutoff_time = current_time - 86400
+                    self.log("📅 First startup sync - scanning saves from last 24 hours")
+                else:
+                    cutoff_time = float(last_shutdown)
+                    max_window = int(self.settings.get('AutoSync', 'startup_scan_days', '7')) * 86400
+
+                    # Don't scan too far back
+                    if current_time - cutoff_time > max_window:
+                        cutoff_time = current_time - max_window
+                        self.log(f"📅 Startup sync - scanning saves from last {max_window/86400:.0f} days")
+                    else:
+                        hours = (current_time - cutoff_time) / 3600
+                        self.log(f"📅 Startup sync - scanning saves modified in last {hours:.1f} hours")
+
+                # Scan for modified files
+                modified_files = []
+                save_files = self.retroarch.get_save_files()
+
+                for save_type, files in save_files.items():
+                    for file_info in files:
+                        file_path = Path(file_info['path'])
+                        if not file_path.exists():
+                            continue
+
+                        mtime = file_info['modified']
+
+                        # Check if modified since last shutdown
+                        if mtime > cutoff_time:
+                            # Check if already uploaded (fingerprint match)
+                            stat = file_path.stat()
+                            current_fingerprint = (stat.st_size, stat.st_mtime)
+                            last = self.last_uploaded.get(str(file_path))
+
+                            if last != current_fingerprint:
+                                modified_files.append(str(file_path))
+
+                if not modified_files:
+                    self.log("✅ No modified saves found - all up to date")
+                    return
+
+                self.log(f"📤 Found {len(modified_files)} modified saves, queuing for upload...")
+
+                # Queue files for upload in chunks to avoid overwhelming server
+                chunk_size = 10
+                for i in range(0, len(modified_files), chunk_size):
+                    if self.should_stop.is_set():
+                        break
+
+                    chunk = modified_files[i:i+chunk_size]
+                    current_time = time.time()
+
+                    for file_path in chunk:
+                        # Queue with short delay (0.5s) for relatively quick processing
+                        self.upload_debounce[file_path] = current_time - self.upload_delay + 0.5
+
+                    self.log(f"  Queued {len(chunk)} files for upload (batch {i//chunk_size + 1})")
+
+                    # Brief pause between chunks
+                    if i + chunk_size < len(modified_files):
+                        time.sleep(2)
+
+                self.log(f"✅ Startup sync complete - {len(modified_files)} files queued")
+
+            except Exception as e:
+                self.log(f"❌ Startup sync error: {e}")
+
+        self.startup_sync_thread = threading.Thread(target=startup_sync_worker, daemon=True)
+        self.startup_sync_thread.start()
+
     def start_upload_worker(self):
         """Start background thread to process upload queue"""
         def upload_worker():
@@ -5266,6 +5502,7 @@ class AutoSyncManager:
             elif result:
                 # Record successful upload fingerprint to avoid duplicate uploads
                 self.last_uploaded[str(file_path)] = current_fingerprint
+                self._save_upload_fingerprints()
                 if thumbnail_path:
                     self.log(f"✅ Server accepted {file_path.name} (200 OK) with screenshot")
                 else:
@@ -5704,16 +5941,9 @@ class AutoSyncManager:
             if 'states' in self.retroarch.save_dirs:
                 state_base_dir = self.retroarch.save_dirs['states']
 
-                # Use summary endpoint to get latest state per slot
-                states_summary = self.romm_client.get_saves_summary(rom_id, save_type='states')
+                # Note: /api/states/summary endpoint doesn't exist in RomM API
+                # Group user_states by slot locally instead
                 slot_states = []
-                if states_summary and isinstance(states_summary, dict):
-                    for slot_info in states_summary.get('slots', []):
-                        latest = slot_info.get('latest')
-                        if latest:
-                            slot_states.append(latest)
-
-                # Fallback: if summary unavailable, group user_states by slot locally
                 if not slot_states:
                     user_states = rom_details.get('user_states', [])
                     if user_states:

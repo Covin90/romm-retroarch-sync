@@ -494,6 +494,21 @@ class Plugin:
                     'actively_syncing_count':  0,
                 }
 
+            # Auto-enable RetroArch settings if disabled (Option B: always-on approach)
+            if self._retroarch:
+                try:
+                    network_ok, _ = self._retroarch.check_network_commands_config()
+                    if not network_ok:
+                        self._retroarch.enable_retroarch_setting('network_commands')
+                        logging.info("Auto-enabled network commands")
+
+                    thumbnail_ok, _ = self._retroarch.check_savestate_thumbnail_config()
+                    if not thumbnail_ok:
+                        self._retroarch.enable_retroarch_setting('savestate_thumbnails')
+                        logging.info("Auto-enabled save state thumbnails")
+                except Exception as e:
+                    logging.debug(f"Auto-enable settings error: {e}")
+
             # Build status directly from live in-memory objects — zero API calls,
             # always up-to-date, no race condition with a background thread.
             status = build_sync_status(

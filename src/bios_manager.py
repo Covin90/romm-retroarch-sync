@@ -6,146 +6,6 @@ Handles BIOS detection, verification, and synchronization
 
 from pathlib import Path
 import hashlib
-import json
-import threading
-from typing import Dict, List, Tuple, Optional
-
-# Comprehensive BIOS requirements database
-BIOS_DATABASE = {
-    'Sony - PlayStation': {
-        'cores': ['beetle_psx', 'beetle_psx_hw', 'pcsx_rearmed', 'swanstation', 'duckstation'],
-        'bios_files': [
-            {'file': 'scph5500.bin', 'md5': '8dd7d5296a650fac7319bce665a6a53c', 'region': 'JP', 'required': True},
-            {'file': 'scph5501.bin', 'md5': '490f666e1afb15b7362b406ed1cea246', 'region': 'US', 'required': True},
-            {'file': 'scph5502.bin', 'md5': '32736f17079d0b2b7024407c39bd3050', 'region': 'EU', 'required': True},
-            {'file': 'scph1001.bin', 'md5': '924e392ed05558ffdb115408c263dccf', 'region': 'US', 'required': False},
-            {'file': 'scph7001.bin', 'md5': '1e68c231d0896b7eadcad1d7d8e76129', 'region': 'US', 'required': False},
-            {'file': 'scph101.bin', 'md5': '6e3735ff4c7dc899ee98981385f6f3d0', 'region': 'US', 'required': False},
-        ]
-    },
-    'Sony - PlayStation 2': {
-        'cores': ['pcsx2', 'play'],
-        'bios_files': [
-            {'file': 'ps2-0230a-20080220.bin', 'required': True, 'desc': 'PS2 USA BIOS'},
-            {'file': 'ps2-0230e-20080220.bin', 'required': True, 'desc': 'PS2 Europe BIOS'},
-            {'file': 'ps2-0230j-20080220.bin', 'required': True, 'desc': 'PS2 Japan BIOS'},
-            {'file': 'SCPH-70012_BIOS_V12_USA_200.BIN', 'required': False},
-            {'file': 'SCPH-70004_BIOS_V12_EUR_200.BIN', 'required': False},
-        ]
-    },
-    'Sega - Saturn': {
-        'cores': ['beetle_saturn', 'kronos', 'yabause'],
-        'bios_files': [
-            {'file': 'sega_101.bin', 'md5': '85ec9ca47d8f6807718151cbcca8b964', 'required': True},
-            {'file': 'mpr-17933.bin', 'md5': '3240872c70984b6cbfda1586cab68dbe', 'required': True},
-            {'file': 'saturn_bios.bin', 'md5': 'af5828fdff51384f99b3c4926be27762', 'required': False},
-        ]
-    },
-    'Sega - Mega-CD - Sega CD': {
-        'cores': ['genesis_plus_gx', 'picodrive'],
-        'bios_files': [
-            {'file': 'bios_CD_U.bin', 'md5': '2efd74e3232ff260e371b99f84024f7f', 'region': 'US', 'required': True},
-            {'file': 'bios_CD_E.bin', 'md5': 'e66fa1dc5820d254611fdcdba0662372', 'region': 'EU', 'required': True},
-            {'file': 'bios_CD_J.bin', 'md5': '278a9397d192149e84e820ac621a8edd', 'region': 'JP', 'required': True},
-        ]
-    },
-    'Sega - Dreamcast': {
-        'cores': ['flycast', 'redream'],
-        'bios_files': [
-            {'file': 'dc_boot.bin', 'md5': 'e10c53c2f8b90bab96ead2d368858623', 'required': True},
-            {'file': 'dc_flash.bin', 'md5': '0a93f7940c455905bea6e392dfde92a4', 'required': True},
-            {'file': 'dc_nvmem.bin', 'required': False},
-        ]
-    },
-    'SNK - Neo Geo': {
-        'cores': ['fbneo', 'fbalpha', 'mame'],
-        'bios_files': [
-            {'file': 'neogeo.zip', 'required': True, 'desc': 'Neo Geo BIOS package'},
-            {'file': 'uni-bios.rom', 'required': False, 'desc': 'UniBIOS (optional)'},
-        ]
-    },
-    'Nintendo - Nintendo DS': {
-        'cores': ['desmume', 'melonds'],
-        'bios_files': [
-            {'file': 'bios7.bin', 'size': 16384, 'required': True, 'md5': 'df692a80a5b1bc90728bc3dfc76cd948'},
-            {'file': 'bios9.bin', 'size': 4096, 'required': True, 'md5': 'a392174eb3e572fed6447e956bde4b25'},
-            {'file': 'firmware.bin', 'size': 262144, 'required': True},
-        ]
-    },
-    'Nintendo - Game Boy Advance': {
-        'cores': ['mgba', 'vba_next', 'vbam', 'gpsp'],
-        'bios_files': [
-            {'file': 'gba_bios.bin', 'md5': 'a860e8c0b6d573d191e4ec7db1b1e4f6', 'required': False},
-            {'file': 'gb_bios.bin', 'md5': '32fbbd84168d3482956eb3c5051637f5', 'required': False},
-            {'file': 'gbc_bios.bin', 'md5': 'dbfce9db9deaa2567f6a84fde55f9680', 'required': False},
-            {'file': 'sgb_bios.bin', 'md5': 'd574d4f9c12f305074798f54c091a8b4', 'required': False},
-        ]
-    },
-    'NEC - PC Engine - TurboGrafx 16': {
-        'cores': ['beetle_pce', 'beetle_pce_fast', 'beetle_supergrafx'],
-        'bios_files': [
-            {'file': 'syscard3.pce', 'md5': '38179df8f4ac870017db21ebcbf53114', 'required': True},
-            {'file': 'syscard2.pce', 'md5': '3cdd6614a918616bfc41c862e889dd79', 'required': False},
-            {'file': 'syscard1.pce', 'md5': '2b7ccb3d86baa18f6402c176f3065082', 'required': False},
-            {'file': 'gexpress.pce', 'md5': '51a12d90b2a7a6fbd6509e0a38b1c120', 'required': False},
-        ]
-    },
-    'Atari - 7800': {
-        'cores': ['prosystem'],
-        'bios_files': [
-            {'file': '7800 BIOS (U).rom', 'md5': '0763f1ffb006ddbe32e52d497ee848ae', 'required': False},
-            {'file': '7800 BIOS (E).rom', 'required': False},
-        ]
-    },
-    'Atari - Lynx': {
-        'cores': ['handy', 'beetle_lynx'],
-        'bios_files': [
-            {'file': 'lynxboot.img', 'md5': 'fcd403db69f54290b51035d82f835e7b', 'required': True},
-        ]
-    },
-    '3DO': {
-        'cores': ['opera', '4do'],
-        'bios_files': [
-            {'file': 'panafz1.bin', 'md5': 'f47264dd47fe30f73ab3c010015c155b', 'required': True},
-            {'file': 'panafz10.bin', 'md5': '51f2f43ae2f3508a14d9f56597e2d3ce', 'required': False},
-            {'file': 'goldstar.bin', 'md5': '8639fd5e549bd6238cfee79e3e749114', 'required': False},
-        ]
-    },
-    'Microsoft - MSX': {
-        'cores': ['bluemsx', 'fmsx'],
-        'bios_files': [
-            {'file': 'MSX.ROM', 'required': True},
-            {'file': 'MSX2.ROM', 'required': False},
-            {'file': 'MSX2EXT.ROM', 'required': False},
-            {'file': 'MSX2P.ROM', 'required': False},
-            {'file': 'MSX2PEXT.ROM', 'required': False},
-        ]
-    },
-    'Commodore - Amiga': {
-        'cores': ['puae', 'fsuae'],
-        'bios_files': [
-            {'file': 'kick33180.A500', 'md5': '85ad74194e87c08904327de1a9443b7a', 'required': True},
-            {'file': 'kick34005.A500', 'md5': '82a21c1890cae844b3df741f2762d48d', 'required': True},
-            {'file': 'kick37175.A500', 'md5': 'dc10d7bdd1b6f450773dfb558477c230', 'required': False},
-            {'file': 'kick40063.A600', 'md5': 'e40a5dfb3d017ba8779faba30cbd1c8e', 'required': False},
-        ]
-    },
-    'Sony - PlayStation Portable': {
-        'cores': ['ppsspp'],
-        'bios_files': [
-            # PPSSPP generates its own PSP firmware files
-            {'file': 'PPSSPP', 'required': False, 'desc': 'PPSSPP handles firmware internally'},
-        ]
-    },
-    'Nintendo - Nintendo 3DS': {
-        'cores': ['citra'],
-        'bios_files': [
-            {'file': 'boot9.bin', 'required': True},
-            {'file': 'boot11.bin', 'required': True},
-            {'file': 'sysdata', 'required': True, 'desc': 'System save data folder'},
-        ]
-    }
-}
 
 class BiosManager:
     """Manages BIOS files for RetroArch cores"""
@@ -313,99 +173,164 @@ class BiosManager:
                         'modified': file_path.stat().st_mtime,
                         'md5': None  # Calculate on demand to speed up scanning
                     }
-            
-            self.log(f"📋 Found {len(self.installed_bios)} files in system directory")
-            
+
         except Exception as e:
             self.log(f"Error scanning BIOS directory: {e}")
     
     def normalize_platform_name(self, platform_name):
-        """Normalize platform name to match BIOS database"""
+        """Normalize platform name using aliases"""
         if not platform_name:
             return None
-        
+
         # Convert to lowercase for comparison
         platform_lower = platform_name.lower().replace('_', '-')
-        
+
         # Check aliases
         if platform_lower in self.platform_aliases:
             return self.platform_aliases[platform_lower]
-        
-        # Check if it's already a proper name
-        for db_platform in BIOS_DATABASE.keys():
-            if db_platform.lower() == platform_lower:
-                return db_platform
-        
-        # Partial matching for complex names
-        for db_platform in BIOS_DATABASE.keys():
-            if platform_lower in db_platform.lower() or db_platform.lower() in platform_lower:
-                return db_platform
-        
+
         return platform_name  # Return original if no match found
-    
+
+    def get_server_firmware_for_platform(self, platform_name):
+        """Query RomM server for available firmware files for a platform
+
+        Args:
+            platform_name: The platform name to query
+
+        Returns:
+            List of firmware file dictionaries with 'file_name' and 'id' fields,
+            or None if server unavailable or platform not found
+        """
+        if not self.romm_client or not self.romm_client.authenticated:
+            return None
+
+        try:
+            from urllib.parse import urljoin
+
+            # Get all platforms from server
+            platforms_response = self.romm_client.session.get(
+                urljoin(self.romm_client.base_url, '/api/platforms'),
+                timeout=10
+            )
+
+            if platforms_response.status_code != 200:
+                return None
+
+            platforms = platforms_response.json()
+
+            # Platform name variations for matching
+            platform_mappings = {
+                'Sony - PlayStation': ['PlayStation', 'Sony PlayStation', 'PS1', 'PSX'],
+                'Sony - PlayStation 2': ['PlayStation 2', 'Sony PlayStation 2', 'PS2'],
+                'Nintendo - Game Boy Advance': ['Game Boy Advance', 'GBA', 'Nintendo Game Boy Advance'],
+                'Nintendo - Game Boy': ['Game Boy', 'GB', 'Nintendo Game Boy'],
+                'Nintendo - Game Boy Color': ['Game Boy Color', 'GBC', 'Nintendo Game Boy Color'],
+                'Nintendo - Nintendo DS': ['Nintendo DS', 'DS', 'NDS'],
+                'Nintendo - Nintendo 3DS': ['Nintendo 3DS', '3DS', 'N3DS'],
+                'Sega - Saturn': ['Sega Saturn', 'Saturn', 'SS'],
+                'Sega - Dreamcast': ['Sega Dreamcast', 'Dreamcast', 'DC'],
+                'Sega - Mega-CD - Sega CD': ['Sega CD', 'Mega CD', 'Mega-CD'],
+                'SNK - Neo Geo': ['Neo Geo', 'NeoGeo', 'Neo-Geo'],
+                'NEC - PC Engine - TurboGrafx 16': ['PC Engine', 'TurboGrafx', 'TurboGrafx-16', 'TG-16', 'PCE'],
+                'Atari - 7800': ['Atari 7800', '7800'],
+                'Atari - Lynx': ['Atari Lynx', 'Lynx']
+            }
+
+            possible_names = platform_mappings.get(platform_name, [platform_name])
+
+            # Find matching platform
+            for platform in platforms:
+                platform_name_check = platform.get('name', '')
+
+                if any(name.lower() in platform_name_check.lower() or
+                      platform_name_check.lower() in name.lower()
+                      for name in possible_names):
+
+                    firmware_list = platform.get('firmware', [])
+                    return firmware_list
+
+            return None  # Platform not found
+
+        except Exception as e:
+            self.log(f"⚠️ Error querying server firmware: {e}")
+            return None
+
     def check_platform_bios(self, platform_name):
-        """Check BIOS status for a specific platform"""
+        """Check BIOS status for a platform by querying RomM server"""
         platform_name = self.normalize_platform_name(platform_name)
-        
-        if platform_name not in BIOS_DATABASE:
-            return [], []  # No BIOS requirements known
-        
-        platform_bios = BIOS_DATABASE[platform_name]
         present = []
         missing = []
-        
-        for bios_info in platform_bios['bios_files']:
-            bios_file = bios_info['file']
-            
-            # Check if file exists
-            if bios_file in self.installed_bios:
-                installed = self.installed_bios[bios_file]
-                
-                # Verify MD5 if specified
-                if 'md5' in bios_info:
-                    # Calculate MD5 if not already done
-                    if installed['md5'] is None:
-                        installed['md5'] = self.calculate_md5(Path(installed['path']))
-                    
-                    if installed['md5'] == bios_info['md5']:
-                        present.append({**bios_info, 'status': 'verified'})
-                    else:
-                        missing.append({**bios_info, 'status': 'md5_mismatch', 
-                                      'actual_md5': installed['md5']})
-                
-                # Verify size if specified
-                elif 'size' in bios_info:
-                    if installed['size'] == bios_info['size']:
-                        present.append({**bios_info, 'status': 'size_ok'})
-                    else:
-                        missing.append({**bios_info, 'status': 'size_mismatch',
-                                      'actual_size': installed['size']})
+
+        # Query server for firmware list
+        server_firmware = self.get_server_firmware_for_platform(platform_name)
+
+        if server_firmware:
+            # Check each firmware file from server against local files
+            for firmware in server_firmware:
+                file_name = firmware.get('file_name', '')
+
+                if not file_name:
+                    continue
+
+                if file_name in self.installed_bios:
+                    present.append({
+                        'file': file_name,
+                        'required': True,
+                        'status': 'present'
+                    })
                 else:
-                    # No verification criteria, assume OK
-                    present.append({**bios_info, 'status': 'present'})
-            
-            elif not bios_info.get('optional', False):
-                # Required file is missing
-                missing.append({**bios_info, 'status': 'missing'})
-        
+                    missing.append({
+                        'file': file_name,
+                        'required': True,
+                        'status': 'missing',
+                        'optional': True  # Don't block, just inform
+                    })
+
         return present, missing
     
     def get_all_platforms_status(self):
-        """Get BIOS status for all platforms"""
+        """Get BIOS status for all platforms by querying RomM server"""
         status = {}
-        
-        for platform_name in BIOS_DATABASE.keys():
-            present, missing = self.check_platform_bios(platform_name)
-            
-            # Only include platforms that need BIOS files
-            if present or missing:
-                status[platform_name] = {
-                    'present': present,
-                    'missing': missing,
-                    'complete': len(missing) == 0,
-                    'required_count': len([b for b in missing if not b.get('optional', False)])
-                }
-        
+
+        if not self.romm_client or not self.romm_client.authenticated:
+            return status
+
+        try:
+            from urllib.parse import urljoin
+
+            # Get all platforms from server
+            platforms_response = self.romm_client.session.get(
+                urljoin(self.romm_client.base_url, '/api/platforms'),
+                timeout=10
+            )
+
+            if platforms_response.status_code != 200:
+                return status
+
+            platforms = platforms_response.json()
+
+            # Check BIOS status for each platform that has firmware
+            for platform in platforms:
+                platform_name = platform.get('name', '')
+                firmware_list = platform.get('firmware', [])
+
+                if not firmware_list:
+                    continue  # Skip platforms with no firmware
+
+                present, missing = self.check_platform_bios(platform_name)
+
+                # Only include platforms that have BIOS files
+                if present or missing:
+                    status[platform_name] = {
+                        'present': present,
+                        'missing': missing,
+                        'complete': len(missing) == 0,
+                        'required_count': len([b for b in missing if not b.get('optional', False)])
+                    }
+
+        except Exception as e:
+            self.log(f"⚠️ Error getting platforms status: {e}")
+
         return status
     
     def download_bios_from_romm(self, platform_name, bios_filename):
@@ -435,9 +360,19 @@ class BiosManager:
                 
                 platform_mappings = {
                     'Sony - PlayStation': ['PlayStation', 'Sony PlayStation', 'PS1', 'PSX'],
+                    'Sony - PlayStation 2': ['PlayStation 2', 'Sony PlayStation 2', 'PS2'],
                     'Nintendo - Game Boy Advance': ['Game Boy Advance', 'GBA', 'Nintendo Game Boy Advance'],
                     'Nintendo - Game Boy': ['Game Boy', 'GB', 'Nintendo Game Boy'],
-                    'Nintendo - Game Boy Color': ['Game Boy Color', 'GBC', 'Nintendo Game Boy Color']
+                    'Nintendo - Game Boy Color': ['Game Boy Color', 'GBC', 'Nintendo Game Boy Color'],
+                    'Nintendo - Nintendo DS': ['Nintendo DS', 'DS', 'NDS'],
+                    'Nintendo - Nintendo 3DS': ['Nintendo 3DS', '3DS', 'N3DS'],
+                    'Sega - Saturn': ['Sega Saturn', 'Saturn', 'SS'],
+                    'Sega - Dreamcast': ['Sega Dreamcast', 'Dreamcast', 'DC'],
+                    'Sega - Mega-CD - Sega CD': ['Sega CD', 'Mega CD', 'Mega-CD'],
+                    'SNK - Neo Geo': ['Neo Geo', 'NeoGeo', 'Neo-Geo'],
+                    'NEC - PC Engine - TurboGrafx 16': ['PC Engine', 'TurboGrafx', 'TurboGrafx-16', 'TG-16', 'PCE'],
+                    'Atari - 7800': ['Atari 7800', '7800'],
+                    'Atari - Lynx': ['Atari Lynx', 'Lynx']
                 }
                 
                 possible_names = platform_mappings.get(platform_name, [platform_name])

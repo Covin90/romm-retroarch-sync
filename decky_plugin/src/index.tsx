@@ -24,7 +24,6 @@ const getConfig = callable<[], any>("get_config");
 const resetAllSettings = callable<[], any>("reset_all_settings");
 const saveConfig = callable<[string, string, string, string, string, string, string], any>("save_config");
 const testRommConnection = callable<[string, string, string], any>("test_connection");
-const enableRetroArchSetting = callable<[string], any>("enable_retroarch_setting");
 const toggleCollectionSteamSync = callable<[string, boolean], any>("toggle_collection_steam_sync");
 
 const formatSpeed = (bytesPerSec: number): string => {
@@ -495,7 +494,6 @@ function Content() {
   const [status, setStatus] = useState<any>({ status: 'loading', message: 'Loading...' });
   const [loading, setLoading] = useState(false);
   const [togglingCollection, setTogglingCollection] = useState<string | null>(null);
-  const [enablingWarning, setEnablingWarning] = useState<string | null>(null);
   const [configured, setConfigured] = useState<boolean | null>(null);
   const configuredRef = useRef<boolean | null>(null);
   const intervalRef = useRef<any>(null);
@@ -694,39 +692,6 @@ function Content() {
     }
   };
 
-  const handleEnableWarning = async (warningType: string) => {
-    if (enablingWarning) return; // Already processing
-
-    setEnablingWarning(warningType);
-    try {
-      const result = await enableRetroArchSetting(warningType);
-      if (result?.success) {
-        toaster.toast({
-          title: '✅ Setting Enabled',
-          body: result.message,
-          duration: 4000,
-        });
-        // Refresh status to clear the warning
-        await refreshStatus();
-      } else {
-        toaster.toast({
-          title: '❌ Failed',
-          body: result?.message || 'Could not enable setting',
-          duration: 4000,
-        });
-      }
-    } catch (error) {
-      console.error('[ENABLE_WARNING] Error:', error);
-      toaster.toast({
-        title: '❌ Error',
-        body: 'Failed to enable setting',
-        duration: 4000,
-      });
-    } finally {
-      setEnablingWarning(null);
-    }
-  };
-
   if (configured === null) {
     return (
       <PanelSection>
@@ -777,54 +742,6 @@ function Content() {
         }} />
         <span>{status.message.replace(', ', ' - ')}</span>
       </div>
-
-      {/* RetroArch configuration warnings */}
-      {status.details?.warnings && status.details.warnings.length > 0 && (
-        <>
-          {status.details.warnings.map((warning: any, index: number) => {
-            const isEnabling = enablingWarning === warning.type;
-            return (
-              <div
-                key={index}
-                onClick={() => !isEnabling && handleEnableWarning(warning.type)}
-                style={{
-                  margin: '8px 0 4px',
-                  padding: '10px 14px',
-                  background: 'rgba(251, 191, 36, 0.12)',
-                  border: '1px solid rgba(251, 191, 36, 0.4)',
-                  borderRadius: '6px',
-                  fontSize: '13px',
-                  color: '#fbbf24',
-                  lineHeight: '1.5',
-                  cursor: isEnabling ? 'wait' : 'pointer',
-                  opacity: isEnabling ? 0.6 : 1,
-                  transition: 'opacity 0.2s, background 0.2s',
-                }}
-                onMouseEnter={(e) => {
-                  if (!isEnabling) {
-                    e.currentTarget.style.background = 'rgba(251, 191, 36, 0.2)';
-                  }
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = 'rgba(251, 191, 36, 0.12)';
-                }}
-              >
-                <strong>⚠️ RetroArch Setting:</strong> {warning.message}
-                {!isEnabling && (
-                  <div style={{ fontSize: '11px', marginTop: '4px', opacity: 0.8 }}>
-                    Click to enable
-                  </div>
-                )}
-                {isEnabling && (
-                  <div style={{ fontSize: '11px', marginTop: '4px' }}>
-                    Enabling...
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </>
-      )}
 
       {status.status === 'running' && status.details?.last_update && (
         <>
