@@ -514,8 +514,6 @@ class TrayIcon:
         self.window = window
         self.tray_process = None
         self.desktop = self.detect_desktop()
-        
-        print(f"🖥️ Detected desktop environment: {self.desktop}")
         self.setup_tray()
     
     def detect_desktop(self):
@@ -570,7 +568,6 @@ class TrayIndicator:
                 custom_icon_path,
                 AppIndicator3.IndicatorCategory.APPLICATION_STATUS
             )
-            print(f"Using custom tray icon: {{custom_icon_path}}")
         else:
             # Fallback to system icon
             self.indicator = AppIndicator3.Indicator.new(
@@ -621,8 +618,7 @@ if __name__ == "__main__":
         try:
             # Start tray process
             self.tray_process = subprocess.Popen([sys.executable, script_path])
-            print("✅ Tray icon started in subprocess")
-            
+
             # Setup signal handlers
             import signal
             signal.signal(signal.SIGUSR1, self._on_toggle_signal)
@@ -1370,9 +1366,11 @@ class EnhancedLibrarySection:
         try:
             if not self.actively_syncing_collections or not self.collection_auto_sync_enabled:
                 return
-                
-            self.parent.log_message(f"🔄 Restoring collection auto-sync for {len(self.actively_syncing_collections)} collections")
-            
+
+            count = len(self.actively_syncing_collections)
+            plural = "collection" if count == 1 else "collections"
+            self.parent.log_message(f"🔄 Restoring collection auto-sync for {count} {plural}")
+
             # Download missing games
             self.download_all_actively_syncing_games()
             
@@ -1382,9 +1380,7 @@ class EnhancedLibrarySection:
             # Start background monitoring
             self.start_collection_auto_sync()
             self.update_sync_button_state()
-            
-            self.parent.log_message("✅ Collection auto-sync restored successfully")
-            
+
         except Exception as e:
             self.parent.log_message(f"⚠️ Failed to restore collection auto-sync: {e}")
 
@@ -1468,8 +1464,10 @@ class EnhancedLibrarySection:
         if self.collection_sync_thread and self.collection_sync_thread.is_alive():
             self.parent.log_message(f"🔄 Collection sync already running")
         else:
-            self.parent.log_message(f"🎯 Starting collection sync for {len(self.actively_syncing_collections)} collections...")
-            
+            count = len(self.actively_syncing_collections)
+            plural = "collection" if count == 1 else "collections"
+            self.parent.log_message(f"🎯 Starting collection sync for {count} {plural}...")
+
             # Download all existing games in selected collections first
             # Don't send notifications during startup - only for user-initiated actions
             self.download_all_collection_games(send_notifications=False)
@@ -1516,9 +1514,6 @@ class EnhancedLibrarySection:
                     collection_id = collection.get('id')
                     collection_roms = self.parent.romm_client.get_collection_roms(collection_id)
 
-                    GLib.idle_add(lambda name=collection_name, count=len(collection_roms):
-                                self.parent.log_message(f"📋 Collection '{name}': {count} total games"))
-
                     download_dir = Path(self.parent.rom_dir_row.get_text())
 
                     # Track collection-specific data
@@ -1562,9 +1557,6 @@ class EnhancedLibrarySection:
                                 )
                                 return False
                             GLib.idle_add(send_collection_synced_notification)
-
-                    GLib.idle_add(lambda:
-                                self.parent.log_message(f"✅ Collection sync: all selected collections already complete"))
 
             except Exception as e:
                 GLib.idle_add(lambda err=str(e):
@@ -1632,7 +1624,9 @@ class EnhancedLibrarySection:
             self._sync_check_count = 1
 
         # ADD THIS - ALWAYS LOG
-        self.parent.log_message(f"🔄 Collection autosync running: checking {len(self.actively_syncing_collections)} collections...")
+        count = len(self.actively_syncing_collections)
+        plural = "collection" if count == 1 else "collections"
+        self.parent.log_message(f"🔄 Collection autosync running: checking {count} {plural}...")
 
         try:
             all_collections = self.parent.romm_client.get_collections()
@@ -1690,7 +1684,9 @@ class EnhancedLibrarySection:
             
             # At the end of the method, after the for loop
             if not changes_detected and len(self.actively_syncing_collections) > 0:
-                self.parent.log_message(f"✅ Collection check complete: no changes detected in {len(self.actively_syncing_collections)} collections")
+                count = len(self.actively_syncing_collections)
+                plural = "collection" if count == 1 else "collections"
+                self.parent.log_message(f"✅ Collection check complete: no changes detected in {count} {plural}")
 
             # Note: We no longer reload the entire collections view after changes
             # because handle_added_games and handle_removed_games now do in-place updates
@@ -2605,8 +2601,7 @@ class EnhancedLibrarySection:
                 
                 self.collections_games = all_collection_games
                 self.collections_cache_time = time.time()  # Mark cache as valid
-                print(f"✅ Ready in {time.time()-start_time:.2f}s ({len(all_collection_games)} games)")
-                print(f"✅ Collections ready for instant loading (cache valid for {self.collections_cache_duration}s)")
+                print(f"✅ Collections ready: {len(all_collection_games)} games loaded in {time.time()-start_time:.2f}s (cache valid for {self.collections_cache_duration}s)")
 
             except Exception as e:
                 print(f"Error: {e}")
@@ -2724,7 +2719,6 @@ class EnhancedLibrarySection:
             return result
 
         # For large lists, use optimized sorting with download status
-        print(f"⚡ Fast-sorting {game_count:,} games...")
         start_time = time.time()
 
         keyed_games = []
@@ -3241,26 +3235,31 @@ class EnhancedLibrarySection:
         # Create library group
         self.library_group = Adw.PreferencesGroup()
         self.library_group.set_title("Game Library")
-        
+        # Don't set vexpand - let scrolled window handle height constraints
+
         # Create main container
         library_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         library_container.set_margin_top(12)
         library_container.set_margin_bottom(12)
         library_container.set_margin_start(12)
         library_container.set_margin_end(12)
-        
+        # Don't set vexpand - let scrolled window handle vertical expansion
+
+        # Store reference for setup_ui to extract
+        self.library_container = library_container
+
         # Toolbar with actions
         toolbar = self.create_toolbar()
         library_container.append(toolbar)
-        
+
         # Tree view container
         tree_container = self.create_tree_view()
         library_container.append(tree_container)
-        
+
         # Action buttons
         action_bar = self.create_action_bar()
         library_container.append(action_bar)
-        
+
         # Wrap in ActionRow for proper styling
         library_row = Adw.ActionRow()
         library_row.set_child(library_container)
@@ -3346,7 +3345,14 @@ class EnhancedLibrarySection:
     def create_tree_view(self):
         scrolled = Gtk.ScrolledWindow()
         scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        scrolled.set_size_request(-1, 300)
+
+        # Set min/max heights for adaptive sizing with controlled bounds
+        scrolled.set_min_content_height(250)  # Minimum to keep it usable
+        scrolled.set_max_content_height(600)  # Maximum height before its own scrollbar appears
+        scrolled.set_propagate_natural_height(False)  # Don't propagate beyond max
+        scrolled.set_vexpand(True)   # Expand to fill available space in window
+        scrolled.set_hexpand(True)   # Allow horizontal expansion
+
         scrolled.add_css_class('data-table')
         
         # Create MultiSelection model
@@ -5978,6 +5984,17 @@ class EnhancedLibrarySection:
         GLib.idle_add(self.force_checkbox_sync)
         GLib.idle_add(self.refresh_all_platform_checkboxes) 
 
+class SettingsBackedEntry:
+    """Simple helper that acts like an EntryRow but reads from settings"""
+    def __init__(self, settings, section, key, default=''):
+        self.settings = settings
+        self.section = section
+        self.key = key
+        self.default = default
+
+    def get_text(self):
+        return self.settings.get(self.section, self.key, fallback=self.default)
+
 class SyncWindow(Gtk.ApplicationWindow):
     """Main application window"""
 
@@ -6007,14 +6024,14 @@ class SyncWindow(Gtk.ApplicationWindow):
 
         # Set application identity FIRST
         self.set_application_identity()
-        
-        # Debug icon loading
-        self.debug_icon_loading()
-        
+
         self.romm_client = None
         self.device_id = None
 
         self.settings = SettingsManager()
+
+        # Create settings-backed entry for ROM directory (used throughout the code)
+        self.rom_dir_row = SettingsBackedEntry(self.settings, 'Download', 'rom_directory', '')
 
         self.retroarch = RetroArchInterface(self.settings)
 
@@ -6048,7 +6065,6 @@ class SyncWindow(Gtk.ApplicationWindow):
         self._bulk_download_in_progress = False  # Track if bulk download is active
 
         self.setup_ui()
-        self.debug_retroarch_status() 
         self.connect('close-request', self.on_window_close_request)
         self.load_saved_settings()
 
@@ -6259,6 +6275,36 @@ class SyncWindow(Gtk.ApplicationWindow):
         drawing_area.set_draw_func(draw_func)
         drawing_area.queue_draw()
 
+    def _enable_row_subtitle_markup(self, row):
+        """Enable Pango markup on an ActionRow's subtitle label and center content vertically"""
+        def find_and_configure(widget):
+            # Recursively find and configure widgets
+            if isinstance(widget, Gtk.Label):
+                # Enable markup on labels
+                widget.set_use_markup(True)
+            elif isinstance(widget, Gtk.Box):
+                # Check if this box contains labels (title/subtitle container)
+                has_labels = False
+                child = widget.get_first_child()
+                while child:
+                    if isinstance(child, Gtk.Label):
+                        has_labels = True
+                        break
+                    child = child.get_next_sibling()
+
+                # If this box contains labels, center it vertically and allow expansion
+                if has_labels:
+                    widget.set_valign(Gtk.Align.CENTER)
+                    widget.set_vexpand(True)
+
+            # Check children recursively
+            child = widget.get_first_child()
+            while child:
+                find_and_configure(child)
+                child = child.get_next_sibling()
+
+        find_and_configure(row)
+
     def format_sync_interval(self, seconds):
         """Format seconds into user-friendly string"""
         if seconds < 60:
@@ -6296,10 +6342,7 @@ class SyncWindow(Gtk.ApplicationWindow):
         url = self.settings.get('RomM', 'url')
         username = self.settings.get('RomM', 'username')
         password = self.settings.get('RomM', 'password')
-        
-        self.log_message(f"🔍 Auto-connect check: auto={auto_connect_enabled}, remember={remember_enabled}")
-        self.log_message(f"🔍 Credentials: url={bool(url)}, user={bool(username)}, pass={bool(password)}")
-        
+
         if (auto_connect_enabled == 'true' and remember_enabled == 'true'):
             if url and username and password:
                 self.log_message("🔄 Auto-connecting to RomM...")
@@ -6337,9 +6380,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                 if 'x11' in display_name.lower():
                     # For X11, we need to set the class hint
                     self.set_wmclass("romm-sync", "RomM - RetroArch Sync")
-            
-            print("✅ Set application identity")
-            
+
         except Exception as e:
             print(f"❌ Failed to set application identity: {e}")
 
@@ -6402,6 +6443,17 @@ class SyncWindow(Gtk.ApplicationWindow):
         
         threading.Thread(target=setup_autostart, daemon=True).start()
 
+    def on_debug_mode_changed(self, switch_row, pspec):
+        """Handle debug mode setting change"""
+        enable = switch_row.get_active()
+        self.settings.set('System', 'debug_mode', 'true' if enable else 'false')
+        self.settings.save_settings()
+
+        if enable:
+            self.log_message("🔍 Debug mode enabled - detailed logs will be written to debug.log")
+        else:
+            self.log_message("✅ Debug mode disabled")
+
     def create_systemd_service(self):
         """Create systemd user service for autostart"""
         import subprocess
@@ -6430,7 +6482,7 @@ class SyncWindow(Gtk.ApplicationWindow):
     [Service]
     Type=simple
     ExecStartPre=/bin/sleep 15
-    ExecStart={exec_path} --daemon
+    ExecStart={exec_path} --minimized
     Restart=always
     RestartSec=10
     Environment=DISPLAY=:0
@@ -6950,23 +7002,45 @@ class SyncWindow(Gtk.ApplicationWindow):
     def on_retroarch_override_changed(self, entry_row):
         """Handle RetroArch path override change"""
         custom_path = entry_row.get_text().strip()
-        
+
         # Handle RetroDECK config directory input
         if 'retrodeck' in custom_path.lower() and 'config/retroarch' in custom_path:
             # User entered config directory, set to RetroDECK executable instead
             custom_path = 'flatpak run net.retrodeck.retrodeck retroarch'
             entry_row.set_text(custom_path)  # Update the field
-        
+
         self.settings.set('RetroArch', 'custom_path', custom_path)
-        
+
         # Re-initialize RetroArch with new path
         self.retroarch = RetroArchInterface()
         self.refresh_retroarch_info()
-        
+
         if custom_path:
             self.log_message(f"RetroArch path overridden: {custom_path}")
         else:
             self.log_message("RetroArch path override cleared, using auto-detection")
+
+    def on_device_name_changed(self, entry_row):
+        """Handle device name change"""
+        new_name = entry_row.get_text().strip()
+        if not new_name:
+            # Don't allow empty names - reset to hostname
+            new_name = socket.gethostname()
+            entry_row.set_text(new_name)
+
+        # Save to settings
+        self.settings.set('Device', 'device_name', new_name)
+        self.log_message(f"✓ Device name updated to: {new_name}")
+
+        # Re-register device with new name if connected
+        if self.romm_client and self.romm_client.authenticated:
+            device_id = self.settings.get('Device', 'device_id', '')
+            if device_id:
+                # Re-register with new name
+                self.romm_client.register_device(device_name=new_name)
+                self.log_message(f"✓ Device re-registered with RomM")
+                # Refresh device info display
+                GLib.idle_add(self.update_device_info_display)
 
     def debug_icon_loading(self):
         """Set application icon for GTK4 correctly"""
@@ -7083,16 +7157,28 @@ class SyncWindow(Gtk.ApplicationWindow):
                 is_enabled = self.check_autostart_status()
                 self.autostart_row.set_active(is_enabled)
                 return False  # Don't repeat
-            
+
             GLib.timeout_add(100, check_autostart_when_ready)
-        
+
         self.auto_connect_switch.set_active(self.settings.get('RomM', 'auto_connect') == 'true')
         self.auto_refresh_switch.set_active(self.settings.get('RomM', 'auto_refresh') == 'true') 
 
     def setup_ui(self):
             """Set up the user interface with actually working wider layout"""
             self.set_title("RomM - RetroArch Sync")
-            self.set_default_size(800, 900)  # Increased width
+            self.set_default_size(800, 900)  # Good default height - library will expand to fill
+
+            # Constrain window size to prevent it from growing beyond reasonable bounds
+            # Get the display to calculate max height
+            try:
+                display = self.get_display()
+                if display:
+                    monitor = display.get_monitors()[0]  # Get primary monitor
+                    geometry = monitor.get_geometry()
+                    max_height = int(geometry.height * 0.9)  # 90% of screen height
+                    self.set_size_request(800, min(900, max_height))  # Set minimum/initial size
+            except:
+                pass  # Fallback if display detection fails
 
             # Add custom CSS - using very specific targeting
             css_provider = Gtk.CssProvider()
@@ -7195,13 +7281,13 @@ class SyncWindow(Gtk.ApplicationWindow):
                 Gtk.STYLE_PROVIDER_PRIORITY_USER  # Higher priority than APPLICATION
             )
 
-            # Use Adw.PreferencesPage for scrollable layout
-            self.preferences_page = Adw.PreferencesPage()
+            # Main content container (simple box - no PreferencesPage width constraints)
+            main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
 
-            # Main scrolled content
-            scrolled_window = Gtk.ScrolledWindow()
-            scrolled_window.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-            scrolled_window.set_child(self.preferences_page)
+            # Create wrapper for connection section to hold PreferencesGroup
+            self.connection_wrapper = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            self.connection_wrapper.set_margin_top(12)
+            main_box.append(self.connection_wrapper)
 
             # Header bar with menu button
             header = Adw.HeaderBar()
@@ -7220,117 +7306,48 @@ class SyncWindow(Gtk.ApplicationWindow):
             menu_button.set_menu_model(menu)
             header.pack_end(menu_button)
 
-            # Set as main content
-            self.set_child(scrolled_window)
+            # Wrap main_box in a scrolled window to prevent window from expanding
+            # when content grows (e.g., expanding library sections)
+            main_scrolled = Gtk.ScrolledWindow()
+            main_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            main_scrolled.set_child(main_box)
 
-            # Hook to force width after the widget is realized
-            def on_preferences_realize(widget):
-                # Get the clamp widget and force it wider
-                try:
-                    def find_clamp_widget(widget):
-                        """Recursively find clamp widgets"""
-                        if hasattr(widget, 'get_css_name') and widget.get_css_name() == 'clamp':
-                            return widget
-                        if hasattr(widget, 'get_first_child'):
-                            child = widget.get_first_child()
-                            while child:
-                                result = find_clamp_widget(child)
-                                if result:
-                                    return result
-                                child = child.get_next_sibling()
-                        return None
-                    
-                    clamp_widget = find_clamp_widget(self.preferences_page)
-                    if clamp_widget:
-                        # Force the clamp widget to be wider
-                        clamp_widget.set_maximum_size(1000)
-                        print("✅ Found and modified clamp widget")
-                    else:
-                        print("❌ Could not find clamp widget")
-                except Exception as e:
-                    print(f"Error modifying clamp: {e}")
-            
-            # Connect to realize signal
-            self.preferences_page.connect('realize', on_preferences_realize)
-            
-            # Create sections (no changes needed)
-            self.create_connection_section()  # Combined server & status section
+            # Set the scrolled window as main content
+            self.set_child(main_scrolled)
+
+            # Create sections
+            self.create_connection_section()  # Connection & Sync section (includes RomM, RetroArch, Auto-Sync)
             self.create_library_section()     # Game library tree view
-            self.create_settings_section()    # Settings including auto-sync with upload saves
-            self.create_bios_section() 
 
-    def create_bios_section(self):
-        """Create BIOS management section"""
-        bios_group = Adw.PreferencesGroup()
-        bios_group.set_title("BIOS &amp; Firmware")
-        
-        # BIOS status expander
-        self.bios_expander = Adw.ExpanderRow()
-        self.bios_expander.set_title("System BIOS Files")
-        self.bios_expander.set_subtitle("Manage emulator BIOS/firmware files")
-        
-        # Download All button
-        download_container = Gtk.Box()
-        download_container.set_size_request(-1, 18)
-        download_container.set_valign(Gtk.Align.CENTER)
-        
-        download_all_btn = Gtk.Button(label="Download All")
-        download_all_btn.connect('clicked', self.on_download_all_bios)
-        download_all_btn.set_size_request(100, -1)
-        download_all_btn.set_valign(Gtk.Align.CENTER)
-        download_container.append(download_all_btn)
-        
-        self.bios_expander.add_suffix(download_container)
+            # Add library directly to main_box (NOT to preferences_page) so it can expand
+            # Add title label
+            library_title = Gtk.Label()
+            library_title.set_markup("<b>Game Library</b>")
+            library_title.set_halign(Gtk.Align.START)
+            library_title.set_margin_top(24)
+            library_title.set_margin_bottom(12)
+            library_title.set_margin_start(12)
+            main_box.append(library_title)
 
-        # BIOS path override
-        self.bios_override_row = Adw.EntryRow()
-        self.bios_override_row.set_title("Custom BIOS Directory (Override auto-detection)")
-        self.bios_override_row.set_text(self.settings.get('BIOS', 'custom_path', ''))
-        self.bios_override_row.connect('entry-activated', self.on_bios_override_changed)
-        self.bios_expander.add_row(self.bios_override_row)
+            # Remove library container from its current parent (ActionRow)
+            # unparent() removes the widget from whatever parent it has
+            self.library_section.library_container.unparent()
 
-        # System directory info
-        self.bios_dir_row = Adw.ActionRow()
-        self.bios_dir_row.set_title("BIOS Directory")
-        self.bios_dir_row.set_subtitle("Checking...")
-        self.bios_expander.add_row(self.bios_dir_row)
-        
-        # Platform status rows (dynamically added)
-        self.bios_platform_rows = {}
-        
-        bios_group.add(self.bios_expander)
-        self.preferences_page.add(bios_group)
-        
-        # Update BIOS directory info
-        self.update_bios_directory_info()
-    
-    def update_bios_directory_info(self):
-        """Update BIOS directory display with debugging"""
-        if self.retroarch.bios_manager:
-            if self.retroarch.bios_manager.system_dir:
-                self.bios_dir_row.set_subtitle(str(self.retroarch.bios_manager.system_dir))
-            else:
-                # Debug RetroDECK paths
-                debug_paths = [
-                    Path.home() / 'retrodeck',
-                    Path.home() / 'retrodeck' / 'bios', 
-                    Path.home() / 'retrodeck' / 'roms',
-                    Path.home() / '.var/app/net.retrodeck.retrodeck',
-                    Path.home() / '.var/app/net.retrodeck.retrodeck/config/retroarch/system'
-                ]
-                
-                existing_paths = []
-                for path in debug_paths:
-                    if path.exists():
-                        existing_paths.append(str(path))
-                
-                if existing_paths:
-                    self.bios_dir_row.set_subtitle(f"Debug - Found: {', '.join(existing_paths[:2])}")
-                else:
-                    self.bios_dir_row.set_subtitle("Not found - no RetroDECK paths detected")
-        else:
-            self.bios_dir_row.set_subtitle("BIOS manager failed to initialize")
-    
+            # Wrap library in a styled container to match Connection & Sync section
+            library_wrapper = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            library_wrapper.set_margin_start(12)
+            library_wrapper.set_margin_end(12)
+            library_wrapper.set_margin_bottom(12)
+            # Don't set vexpand - let scrolled window control height with max constraint
+            library_wrapper.add_css_class('card')  # Add card styling for background/border
+
+            # Add library container to wrapper
+            # Don't set vexpand - scrolled window inside handles expansion within max height
+            library_wrapper.append(self.library_section.library_container)
+
+            # Add wrapper to main_box
+            main_box.append(library_wrapper) 
+
     def on_download_all_bios(self, button):
         """Download all missing BIOS files for current game platforms"""
         if not self.retroarch.bios_manager:
@@ -7434,9 +7451,12 @@ class SyncWindow(Gtk.ApplicationWindow):
             self.log_message("BIOS path override cleared, reverting to auto-detection")
 
     def create_connection_section(self):
-        """Create combined server section with RomM connection and RetroArch status"""
+        """Create combined connection and sync section"""
         connection_group = Adw.PreferencesGroup()
-        connection_group.set_title("Server &amp; Status")
+        connection_group.set_title("Connection &amp; Sync")
+        # Set explicit margins to match game library
+        connection_group.set_margin_start(12)
+        connection_group.set_margin_end(12)
         
         # RomM Connection expander (keep as is)
         self.connection_expander = Adw.ExpanderRow()
@@ -7495,7 +7515,7 @@ class SyncWindow(Gtk.ApplicationWindow):
         # Autostart setting
         self.autostart_row = Adw.SwitchRow()
         self.autostart_row.set_title("Run at Startup")
-        self.autostart_row.set_subtitle("Run as a service at startup")
+        self.autostart_row.set_subtitle("Automatically start minimized to tray on login")
         self.autostart_row.connect('notify::active', self.on_autostart_changed)
         self.connection_expander.add_row(self.autostart_row)
 
@@ -7515,13 +7535,12 @@ class SyncWindow(Gtk.ApplicationWindow):
         self.device_id_label = device_id_label
         device_expander.add_row(self.device_id_row)
 
-        # Device Name
-        self.device_name_row = Adw.ActionRow()
+        # Device Name (editable)
+        self.device_name_row = Adw.EntryRow()
         self.device_name_row.set_title("Device Name")
-        device_name_label = Gtk.Label()
-        device_name_label.set_text("-")
-        self.device_name_row.add_suffix(device_name_label)
-        self.device_name_label = device_name_label
+        device_name = self.settings.get('Device', 'device_name', socket.gethostname())
+        self.device_name_row.set_text(device_name)
+        self.device_name_row.connect('apply', self.on_device_name_changed)
         device_expander.add_row(self.device_name_row)
 
         # Device Platform
@@ -7612,15 +7631,102 @@ class SyncWindow(Gtk.ApplicationWindow):
         self.core_count_row.set_subtitle("Checking...")
         self.retroarch_expander.add_row(self.core_count_row)
 
-        # Add this new connection status row
+        # Add RetroArch settings status row (auto-enabled, info-only display)
         self.retroarch_connection_row = Adw.ActionRow()
-        self.retroarch_connection_row.set_title("Network Commands")
-        self.retroarch_connection_row.set_subtitle("Turn ON in Settings → Network Commands to get notifications")
+        self.retroarch_connection_row.set_title("")  # Empty title for better centering
+        self.retroarch_connection_row.set_subtitle("Auto-enabling RetroArch settings...")
+        # Allow subtitle to wrap to multiple lines if needed
+        self.retroarch_connection_row.set_subtitle_lines(3)
+
         self.retroarch_expander.add_row(self.retroarch_connection_row)
 
+        # Enable markup immediately and schedule status update
+        from gi.repository import GLib
+        def enable_markup_and_update():
+            try:
+                self._enable_row_subtitle_markup(self.retroarch_connection_row)
+                # Ensure retroarch is initialized
+                if not hasattr(self, 'retroarch') or self.retroarch is None:
+                    self.retroarch = RetroArchInterface()
+                # Trigger initial status update
+                self.refresh_retroarch_info()
+            except Exception as e:
+                print(f"Error enabling markup and updating: {e}")
+                import traceback
+                traceback.print_exc()
+            return False  # Don't repeat
+
+        GLib.timeout_add(500, enable_markup_and_update)  # Increased delay to ensure everything is ready
+
         connection_group.add(self.retroarch_expander)
-        
-        self.preferences_page.add(connection_group)
+
+        # Auto-Sync expander with built-in toggle switch
+        self.autosync_expander = Adw.ExpanderRow()
+        self.autosync_expander.set_title("Auto-Sync")
+        self.autosync_expander.set_subtitle("Disabled")
+
+        # Add status dot as prefix (15px size for better visibility)
+        self.autosync_status_dot = self.create_status_dot('red', size=15)
+        self.autosync_status_dot.set_margin_end(8)
+        self.autosync_expander.add_prefix(self.autosync_status_dot)
+
+        # Collection sync settings
+        collection_sync_row = Adw.SpinRow()
+        collection_sync_row.set_title("Collection Sync Interval")
+        collection_sync_row.set_subtitle("Seconds between collection updates (minimum 30s)")
+        adjustment = Gtk.Adjustment(value=30, lower=30, upper=600, step_increment=30)  # 30s to 10min
+        collection_sync_row.set_adjustment(adjustment)
+        collection_sync_row.set_value(int(self.settings.get('Collections', 'sync_interval', '30')))
+        collection_sync_row.connect('notify::value', self.on_collection_sync_interval_changed)
+        self.autosync_expander.add_row(collection_sync_row)
+
+        # Add toggle switch as suffix to the expander
+        self.autosync_enable_switch = Gtk.Switch()
+        self.autosync_enable_switch.set_valign(Gtk.Align.CENTER)
+        # Load saved state (default to True for new users)
+        autosync_enabled = self.settings.get('AutoSync', 'enabled', 'true') == 'true'
+        self.autosync_enable_switch.set_active(autosync_enabled)
+        self.autosync_enable_switch.connect('notify::active', self.on_autosync_toggle)
+        self.autosync_expander.add_suffix(self.autosync_enable_switch)
+
+        # Auto-overwrite behavior setting
+        self.auto_overwrite_row = Adw.ComboRow()
+        self.auto_overwrite_row.set_title("Auto-Sync Behaviour")
+        self.auto_overwrite_row.set_subtitle("How to handle conflicts between local and server saves")
+
+        overwrite_options = Gtk.StringList()
+        overwrite_options.append("Smart (prefer newer)")  # Default
+        overwrite_options.append("Always prefer local")
+        overwrite_options.append("Always download from server")
+        overwrite_options.append("Ask each time")
+
+        self.auto_overwrite_row.set_model(overwrite_options)
+        self.auto_overwrite_row.set_selected(0)  # Default to "Smart"
+
+        # Connect the setting change handler
+        self.auto_overwrite_row.connect('notify::selected', self.on_overwrite_behavior_changed)
+
+        # Load saved setting
+        saved_behavior = int(self.settings.get('AutoSync', 'overwrite_behavior', '0'))
+        self.auto_overwrite_row.set_selected(saved_behavior)
+
+        self.autosync_expander.add_row(self.auto_overwrite_row)
+
+        # Steam collections integration
+        steam_enable_row = Adw.SwitchRow()
+        steam_enable_row.set_title("Steam Integration")
+        steam_enable_row.set_subtitle(
+            "Create non-Steam game shortcuts for synced collections" if self.steam_manager.is_available()
+            else "Steam userdata not found"
+        )
+        steam_enable_row.set_active(self.settings.get('Steam', 'enabled', 'false') == 'true')
+        steam_enable_row.set_sensitive(self.steam_manager.is_available())
+        steam_enable_row.connect('notify::active', self.on_steam_enable_toggle)
+        self.autosync_expander.add_row(steam_enable_row)
+
+        connection_group.add(self.autosync_expander)
+
+        self.connection_wrapper.append(connection_group)
 
     def on_clear_cache(self, button):
         """Clear cached game data"""
@@ -7673,7 +7779,6 @@ class SyncWindow(Gtk.ApplicationWindow):
 
             if existing_device_id:
                 # Device already registered, just verify it still exists
-                print(f"Device ID found in config: {existing_device_id}")
                 device_info = self.romm_client.get_device(existing_device_id)
 
                 if device_info:
@@ -7722,7 +7827,7 @@ class SyncWindow(Gtk.ApplicationWindow):
 
                 # Update Name
                 device_name = device_info.get('name', '-')
-                self.device_name_label.set_text(device_name)
+                self.device_name_row.set_text(device_name)
 
                 # Update Platform
                 device_platform = device_info.get('platform', '-')
@@ -7763,7 +7868,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                         self.settings.set('Device', 'device_id', '')
                         self.device_id = None
                         GLib.idle_add(lambda: self.device_id_label.set_text("Not registered"))
-                        GLib.idle_add(lambda: self.device_name_label.set_text("-"))
+                        GLib.idle_add(lambda: self.device_name_row.set_text(socket.gethostname()))
                         GLib.idle_add(lambda: self.device_platform_label.set_text("-"))
                         GLib.idle_add(lambda: self.device_client_label.set_text("-"))
                         GLib.idle_add(lambda: self.log_message(f"Device {device_id} unregistered"))
@@ -7795,7 +7900,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             else:
                 # User wants to disconnect
                 self.disconnect_from_romm()
-    
+
     def start_connection(self, url, username, password):
         """Simplified connection without additional testing"""
         remember = self.remember_switch.get_active()
@@ -7902,7 +8007,6 @@ class SyncWindow(Gtk.ApplicationWindow):
 
                         for game in list(self.game_cache.cached_games):
                             platform_slug = game.get('platform_slug') or game.get('platform', 'Unknown')
-                            is_multi = game.get('is_multi_disc', False)
 
                             # Use cached local_path if available, otherwise construct from file_name
                             cached_path = game.get('local_path')
@@ -7931,9 +8035,6 @@ class SyncWindow(Gtk.ApplicationWindow):
 
                             all_cached_games.append(game_copy)
 
-                            if is_multi:
-                                print(f"  -> Added to all_cached_games with is_downloaded={game_copy['is_downloaded']}")
-                        
                         # Update UI immediately with cached games
                         def update_games_ui():
                             self.available_games = all_cached_games
@@ -8001,15 +8102,22 @@ class SyncWindow(Gtk.ApplicationWindow):
                         self.update_connection_ui("loading")
                         self.log_message("🔄 Connected! Loading games list for first time...")
                         self.refresh_games_list()
-                    
-                    # Auto-sync settings...
-                    if self.settings.get('AutoSync', 'auto_enable_on_connect') == 'true':
-                        self.autosync_enable_switch.set_active(True)
-                        self.log_message("🔥 Auto-sync enabled automatically")
 
                     # Restore collection auto-sync if it was enabled
                     if hasattr(self, 'library_section'):
                         self.library_section.restore_collection_auto_sync_on_connect()
+
+                    # Start auto-sync if enabled (respects user's saved preference)
+                    if hasattr(self, 'autosync_enable_switch') and self.autosync_enable_switch.get_active():
+                        # Start auto-sync directly without triggering UI update
+                        self.auto_sync.romm_client = self.romm_client
+                        self.auto_sync.upload_enabled = True
+                        self.auto_sync.download_enabled = True
+                        self.auto_sync.upload_delay = 3
+                        self.auto_sync.start_auto_sync()
+                        self.autosync_expander.set_subtitle("Active - monitoring for changes")
+                        self.update_status_dot(self.autosync_status_dot, 'green')
+                        self.log_message("🔄 Auto-sync enabled")
 
                     # Start background polling for new games
                     self._start_background_polling()
@@ -8040,9 +8148,11 @@ class SyncWindow(Gtk.ApplicationWindow):
         
         if hasattr(self, 'auto_sync'):
             self.auto_sync.stop_auto_sync()
-            # Turn off auto-sync switch when disconnected
+            # Turn off auto-sync switch when disconnected (without saving to settings)
+            self.autosync_enable_switch.handler_block_by_func(self.on_autosync_toggle)
             self.autosync_enable_switch.set_active(False)
-            self.autosync_status_row.set_subtitle("Disabled - not connected to RomM")
+            self.autosync_enable_switch.handler_unblock_by_func(self.on_autosync_toggle)
+            self.autosync_expander.set_subtitle("Disabled - not connected to RomM")
             self.update_status_dot(self.autosync_status_dot, 'red')
 
         # Stop background polling
@@ -8101,7 +8211,7 @@ class SyncWindow(Gtk.ApplicationWindow):
         """Create the enhanced library section with tree view (moved from quick actions)"""
         # Create enhanced library section with tree view
         self.library_section = EnhancedLibrarySection(self)
-        self.preferences_page.add(self.library_section.library_group)
+        # Library will be added to main_box in setup_ui, not to preferences_page
 
     def on_autosync_toggle(self, switch_row, pspec):
         """Handle auto-sync enable/disable"""
@@ -8115,18 +8225,18 @@ class SyncWindow(Gtk.ApplicationWindow):
                 
                 # Start auto-sync
                 self.auto_sync.start_auto_sync()
-                self.autosync_status_row.set_subtitle("Active - monitoring for changes")
+                self.autosync_expander.set_subtitle("Active - monitoring for changes")
                 self.update_status_dot(self.autosync_status_dot, 'green')
                 
                 self.log_message("🔄 Auto-sync enabled")
             else:
                 self.log_message("⚠️ Please connect to RomM before enabling auto-sync")
-                self.autosync_status_row.set_subtitle("Disabled - not connected to RomM")
+                self.autosync_expander.set_subtitle("Disabled - not connected to RomM")
                 self.update_status_dot(self.autosync_status_dot, 'red')
                 switch_row.set_active(False)
         else:
             self.auto_sync.stop_auto_sync()
-            self.autosync_status_row.set_subtitle("Disabled")
+            self.autosync_expander.set_subtitle("Disabled")
             self.update_status_dot(self.autosync_status_dot, 'red')
             self.log_message("⏹️ Auto-sync disabled")
 
@@ -8136,226 +8246,36 @@ class SyncWindow(Gtk.ApplicationWindow):
             return self.library_section.selected_game
         return None
 
-    def on_auto_enable_sync_changed(self, switch_row, pspec):
-        """Handle auto-enable sync setting change"""
-        self.settings.set('AutoSync', 'auto_enable_on_connect', str(switch_row.get_active()).lower())
-
-    def create_settings_section(self):
-        """Create settings section with merged download and sync settings"""
-        # Combined Download & Sync settings
-        download_sync_group = Adw.PreferencesGroup()
-        download_sync_group.set_title("Download &amp; Sync")
-
-        # ROM directory
-        self.rom_dir_expander = Adw.ExpanderRow()
-        self.rom_dir_expander.set_title("Library Directory")
-        self.rom_dir_expander.set_subtitle(self.settings.get('Download', 'rom_directory'))
-
-        # Directory chooser button wrapped in container
-        dir_button_container = Gtk.Box()
-        dir_button_container.set_size_request(-1, 18)
-        dir_button_container.set_valign(Gtk.Align.CENTER)
-
-        choose_dir_button = Gtk.Button(label="Browse")
-        choose_dir_button.connect('clicked', self.on_choose_directory)
-        choose_dir_button.set_hexpand(False)
-        choose_dir_button.set_vexpand(False)
-        choose_dir_button.set_valign(Gtk.Align.CENTER)
-        dir_button_container.append(choose_dir_button)
-
-        self.rom_dir_expander.add_suffix(dir_button_container)
-
-        # ROM Directory Path entry (nested under expander)
-        self.rom_dir_row = Adw.EntryRow()
-        self.rom_dir_row.set_title("Directory Path")
-        self.rom_dir_row.set_text(self.settings.get('Download', 'rom_directory'))
-        self.rom_dir_expander.add_row(self.rom_dir_row)
-
-        # Max concurrent downloads
-        self.max_downloads_row = Adw.SpinRow()
-        self.max_downloads_row.set_title("Max Concurrent Downloads")
-        self.max_downloads_row.set_subtitle("Maximum simultaneous ROM downloads")
-        downloads_adjustment = Gtk.Adjustment(value=3, lower=1, upper=10, step_increment=1)
-        self.max_downloads_row.set_adjustment(downloads_adjustment)
-        self.max_downloads_row.set_value(int(self.settings.get('Download', 'max_concurrent', '3')))
-        self.max_downloads_row.connect('notify::value', self.on_max_downloads_changed)
-        self.rom_dir_expander.add_row(self.max_downloads_row)
-
-        # Open Download Folder (nested under ROM Directory)
-        browse_row = Adw.ActionRow()
-        browse_row.set_title("Open Download Folder")
-        browse_row.set_subtitle("View downloaded files in file manager")
-
-        browse_button_container = Gtk.Box()
-        browse_button_container.set_size_request(-1, 18)
-        browse_button_container.set_valign(Gtk.Align.CENTER)
-
-        browse_button = Gtk.Button(label="Open")
-        browse_button.connect('clicked', self.on_browse_downloads)
-        browse_button.set_hexpand(False)
-        browse_button.set_vexpand(False)
-        browse_button.set_valign(Gtk.Align.CENTER)
-        browse_button_container.append(browse_button)
-
-        browse_row.add_suffix(browse_button_container)
-        self.rom_dir_expander.add_row(browse_row)
-
-        download_sync_group.add(self.rom_dir_expander)
-        
-        # Auto-Sync expander with built-in toggle switch
-        self.autosync_expander = Adw.ExpanderRow()
-        self.autosync_expander.set_title("Auto-Sync")
-        self.autosync_expander.set_subtitle("Monitor and sync save files automatically")
-
-        # Status indicator
-        self.autosync_status_row = Adw.ActionRow()
-        self.autosync_status_row.set_title("Status")
-        self.autosync_status_row.set_subtitle("Disabled")
-
-        # Add status dot as prefix
-        self.autosync_status_dot = self.create_status_dot('red')
-        self.autosync_status_dot.set_margin_end(8)
-        self.autosync_status_row.add_prefix(self.autosync_status_dot)
-
-        self.autosync_expander.add_row(self.autosync_status_row)
-
-        # Collection sync settings
-        collection_sync_row = Adw.SpinRow()
-        collection_sync_row.set_title("Collection Sync Interval")
-        collection_sync_row.set_subtitle("Seconds between collection updates (minimum 30s)")
-        adjustment = Gtk.Adjustment(value=30, lower=30, upper=600, step_increment=30)  # 30s to 10min
-        collection_sync_row.set_adjustment(adjustment)
-        collection_sync_row.set_value(int(self.settings.get('Collections', 'sync_interval', '30')))
-        collection_sync_row.connect('notify::value', self.on_collection_sync_interval_changed)
-        self.autosync_expander.add_row(collection_sync_row)
-
-        # Clear collection selection
-        clear_collections_row = Adw.ActionRow()
-        clear_collections_row.set_title("Clear Collection Selection")
-        clear_collections_row.set_subtitle("Remove all collections from auto-sync")
-        clear_btn = Gtk.Button(label="Clear All")
-        clear_btn.connect('clicked', self.on_clear_collection_selection)
-        clear_btn.set_valign(Gtk.Align.CENTER)
-        clear_collections_row.add_suffix(clear_btn)
-        self.autosync_expander.add_row(clear_collections_row)
-        
-        # Add toggle switch as suffix to the expander
-        self.autosync_enable_switch = Gtk.Switch()
-        self.autosync_enable_switch.set_valign(Gtk.Align.CENTER)
-        self.autosync_enable_switch.connect('notify::active', self.on_autosync_toggle)
-        self.autosync_expander.add_suffix(self.autosync_enable_switch)
-        
-        # Auto-upload toggle
-        self.autoupload_row = Adw.SwitchRow()
-        self.autoupload_row.set_title("Auto-Upload")
-        self.autoupload_row.set_subtitle("Upload saves to RomM when files change")
-        self.autoupload_row.set_active(True)
-        self.autosync_expander.add_row(self.autoupload_row)
-        
-        # Auto-download toggle  
-        self.autodownload_row = Adw.SwitchRow()
-        self.autodownload_row.set_title("Auto-Download")
-        self.autodownload_row.set_subtitle("Download saves from RomM before launching games")
-        self.autodownload_row.set_active(True)
-        self.autosync_expander.add_row(self.autodownload_row)
-        
-        # Upload delay setting
-        self.sync_delay_row = Adw.SpinRow()
-        self.sync_delay_row.set_title("Upload Delay")
-        self.sync_delay_row.set_subtitle("Seconds to wait after file changes")
-        adjustment = Gtk.Adjustment(value=3, lower=1, upper=30, step_increment=1)
-        self.sync_delay_row.set_adjustment(adjustment)
-        self.autosync_expander.add_row(self.sync_delay_row)
-
-        # Auto-enable on connection toggle
-        self.auto_enable_sync_row = Adw.SwitchRow()
-        self.auto_enable_sync_row.set_title("Auto-Enable on Connect")
-        self.auto_enable_sync_row.set_subtitle("Automatically turn on auto-sync when connecting to RomM")
-        self.auto_enable_sync_row.set_active(self.settings.get('AutoSync', 'auto_enable_on_connect') == 'true')
-        self.auto_enable_sync_row.connect('notify::active', self.on_auto_enable_sync_changed)
-        self.autosync_expander.add_row(self.auto_enable_sync_row)
-
-        # ADD THIS NEW SECTION HERE:
-        # Auto-overwrite behavior setting
-        self.auto_overwrite_row = Adw.ComboRow()
-        self.auto_overwrite_row.set_title("Auto-Sync Behaviour")
-        self.auto_overwrite_row.set_subtitle("How to handle conflicts between local and server saves")
-
-        overwrite_options = Gtk.StringList()
-        overwrite_options.append("Smart (prefer newer)")  # Default
-        overwrite_options.append("Always prefer local")
-        overwrite_options.append("Always download from server")
-        overwrite_options.append("Ask each time")
-
-        self.auto_overwrite_row.set_model(overwrite_options)
-        self.auto_overwrite_row.set_selected(0)  # Default to "Smart"
-        
-        # Connect the setting change handler
-        self.auto_overwrite_row.connect('notify::selected', self.on_overwrite_behavior_changed)
-        
-        # Load saved setting
-        saved_behavior = int(self.settings.get('AutoSync', 'overwrite_behavior', '0'))
-        self.auto_overwrite_row.set_selected(saved_behavior)
-        
-        self.autosync_expander.add_row(self.auto_overwrite_row)
-
-        # Manual Upload Saves row
-        upload_saves_row = Adw.ActionRow()
-        upload_saves_row.set_title("Manual Upload")
-        upload_saves_row.set_subtitle("Upload all local saves to RomM now")
-        
-        # Upload button wrapped in container
-        upload_container = Gtk.Box()
-        upload_container.set_size_request(-1, 18)
-        upload_container.set_valign(Gtk.Align.CENTER)
-        
-        upload_button = Gtk.Button(label="Upload Saves")
-        upload_button.connect('clicked', self.on_sync_to_romm)
-        upload_button.set_hexpand(False)
-        upload_button.set_vexpand(False)
-        upload_button.set_valign(Gtk.Align.CENTER)
-        upload_container.append(upload_button)
-        
-        upload_saves_row.add_suffix(upload_container)
-        self.autosync_expander.add_row(upload_saves_row)
-
-        # Steam collections integration
-        steam_enable_row = Adw.SwitchRow()
-        steam_enable_row.set_title("Add Collections to Steam")
-        steam_enable_row.set_subtitle(
-            "Steam shortcuts detected" if self.steam_manager.is_available()
-            else "Steam userdata not found"
-        )
-        steam_enable_row.set_active(self.settings.get('Steam', 'enabled', 'false') == 'true')
-        steam_enable_row.set_sensitive(self.steam_manager.is_available())
-        steam_enable_row.connect('notify::active', self.on_steam_enable_toggle)
-        self.autosync_expander.add_row(steam_enable_row)
-
-        download_sync_group.add(self.autosync_expander)
-        self.preferences_page.add(download_sync_group)
 
     def on_autosync_toggle(self, switch_row, pspec):
         """Handle auto-sync enable/disable"""
-        if switch_row.get_active():
+        enabled = switch_row.get_active()
+
+        # Save state to settings
+        self.settings.set('AutoSync', 'enabled', str(enabled).lower())
+
+        if enabled:
             if self.romm_client and self.romm_client.authenticated:
-                # Update auto-sync settings
+                # Update auto-sync settings with defaults
                 self.auto_sync.romm_client = self.romm_client
-                self.auto_sync.upload_enabled = self.autoupload_row.get_active()
-                self.auto_sync.download_enabled = self.autodownload_row.get_active()
-                self.auto_sync.upload_delay = int(self.sync_delay_row.get_value())
-                
+                self.auto_sync.upload_enabled = True
+                self.auto_sync.download_enabled = True
+                self.auto_sync.upload_delay = 3
+
                 # Start auto-sync
                 self.auto_sync.start_auto_sync()
-                self.autosync_status_row.set_subtitle("Active - monitoring for changes")
+                self.autosync_expander.set_subtitle("Active - monitoring for changes")
                 self.update_status_dot(self.autosync_status_dot, 'green')
-                
+
                 self.log_message("🔄 Auto-sync enabled")
             else:
                 self.log_message("⚠️ Please connect to RomM before enabling auto-sync")
+                self.autosync_expander.set_subtitle("Disabled - not connected to RomM")
+                self.update_status_dot(self.autosync_status_dot, 'red')
                 switch_row.set_active(False)
         else:
             self.auto_sync.stop_auto_sync()
-            self.autosync_status_row.set_subtitle("Disabled")
+            self.autosync_expander.set_subtitle("Disabled")
             self.update_status_dot(self.autosync_status_dot, 'red')
             self.log_message("⏹️ Auto-sync disabled")
 
@@ -8438,21 +8358,12 @@ class SyncWindow(Gtk.ApplicationWindow):
         if hasattr(self, 'library_section'):
             self.library_section.collection_sync_interval = interval
 
-    def on_clear_collection_selection(self, button):
-        """Clear all selected collections"""
-        if hasattr(self, 'library_section'):
-            self.library_section.selected_collections_for_sync.clear()
-            self.library_section.save_selected_collections()
-            self.library_section.stop_collection_auto_sync()
-            self.log_message("Cleared collection auto-sync selection")
-
     def on_show_logs_dialog(self, button):
         """Show logs and advanced tools dialog"""
-        dialog = Adw.PreferencesWindow()
+        dialog = Adw.PreferencesDialog()
         dialog.set_title("Logs & Advanced Tools")
-        dialog.set_default_size(600, 500)
-        dialog.set_transient_for(self)
-        dialog.set_modal(False)
+        dialog.set_content_width(600)
+        dialog.set_content_height(500)
         
         # Activity Log
         log_group = Adw.PreferencesGroup()
@@ -8475,32 +8386,108 @@ class SyncWindow(Gtk.ApplicationWindow):
         log_row = Adw.ActionRow()
         log_row.set_child(log_box)
         log_group.add(log_row)
-        
-        # Advanced Tools  
+
+        # Debug mode toggle
+        debug_mode_row = Adw.SwitchRow()
+        debug_mode_row.set_title("Debug Mode")
+        debug_mode_row.set_subtitle("Enable detailed logging and write debug.log file")
+        debug_mode_row.set_active(self.settings.get('System', 'debug_mode') == 'true')
+        debug_mode_row.connect('notify::active', lambda row, _: self.on_debug_mode_changed(row, _))
+        log_group.add(debug_mode_row)
+
+        # Configuration group (Library Directory & BIOS)
+        config_group = Adw.PreferencesGroup()
+        config_group.set_title("Configuration")
+
+        # Library Directory settings
+        library_dir_expander = Adw.ExpanderRow()
+        library_dir_expander.set_title("Library Directory")
+        library_dir_expander.set_subtitle(self.settings.get('Download', 'rom_directory'))
+
+        # Directory chooser button
+        dir_button_container = Gtk.Box()
+        dir_button_container.set_size_request(-1, 18)
+        dir_button_container.set_valign(Gtk.Align.CENTER)
+        choose_dir_button = Gtk.Button(label="Browse...")
+        choose_dir_button.connect('clicked', self.on_choose_directory)
+        choose_dir_button.set_size_request(100, -1)
+        choose_dir_button.set_valign(Gtk.Align.CENTER)
+        dir_button_container.append(choose_dir_button)
+        library_dir_expander.add_suffix(dir_button_container)
+
+        # Directory Path entry
+        library_dir_path_row = Adw.EntryRow()
+        library_dir_path_row.set_title("Directory Path")
+        library_dir_path_row.set_text(self.settings.get('Download', 'rom_directory'))
+        # Store reference for on_choose_directory to update
+        self._dialog_library_dir_row = library_dir_path_row
+        self._dialog_library_dir_expander = library_dir_expander
+        library_dir_expander.add_row(library_dir_path_row)
+
+        # Max concurrent downloads
+        max_downloads_row = Adw.SpinRow()
+        max_downloads_row.set_title("Max Concurrent Downloads")
+        max_downloads_row.set_subtitle("Maximum simultaneous ROM downloads")
+        downloads_adjustment = Gtk.Adjustment(value=3, lower=1, upper=10, step_increment=1)
+        max_downloads_row.set_adjustment(downloads_adjustment)
+        max_downloads_row.set_value(int(self.settings.get('Download', 'max_concurrent', '3')))
+        max_downloads_row.connect('notify::value', self.on_max_downloads_changed)
+        library_dir_expander.add_row(max_downloads_row)
+
+        # Open Download Folder
+        browse_row = Adw.ActionRow()
+        browse_row.set_title("Open Download Folder")
+        browse_row.set_subtitle("View downloaded files in file manager")
+        browse_button_container = Gtk.Box()
+        browse_button_container.set_size_request(-1, 18)
+        browse_button_container.set_valign(Gtk.Align.CENTER)
+        browse_button = Gtk.Button(label="Open")
+        browse_button.connect('clicked', self.on_browse_downloads)
+        browse_button.set_size_request(80, -1)
+        browse_button.set_valign(Gtk.Align.CENTER)
+        browse_button_container.append(browse_button)
+        browse_row.add_suffix(browse_button_container)
+        library_dir_expander.add_row(browse_row)
+
+        config_group.add(library_dir_expander)
+
+        # BIOS Files settings
+        bios_expander = Adw.ExpanderRow()
+        bios_expander.set_title("System BIOS Files")
+        bios_expander.set_subtitle("Manage emulator BIOS/firmware files")
+
+        # Download All button
+        bios_download_container = Gtk.Box()
+        bios_download_container.set_size_request(-1, 18)
+        bios_download_container.set_valign(Gtk.Align.CENTER)
+        download_all_btn = Gtk.Button(label="Download All")
+        download_all_btn.connect('clicked', self.on_download_all_bios)
+        download_all_btn.set_size_request(100, -1)
+        download_all_btn.set_valign(Gtk.Align.CENTER)
+        bios_download_container.append(download_all_btn)
+        bios_expander.add_suffix(bios_download_container)
+
+        # BIOS path override
+        bios_override_row = Adw.EntryRow()
+        bios_override_row.set_title("Custom BIOS Directory (Override auto-detection)")
+        bios_override_row.set_text(self.settings.get('BIOS', 'custom_path', ''))
+        bios_override_row.connect('entry-activated', self.on_bios_override_changed)
+        bios_expander.add_row(bios_override_row)
+
+        # BIOS directory info
+        bios_dir_row = Adw.ActionRow()
+        bios_dir_row.set_title("BIOS Directory")
+        if self.retroarch.bios_manager and self.retroarch.bios_manager.system_dir:
+            bios_dir_row.set_subtitle(str(self.retroarch.bios_manager.system_dir))
+        else:
+            bios_dir_row.set_subtitle("Not found")
+        bios_expander.add_row(bios_dir_row)
+
+        config_group.add(bios_expander)
+
+        # Advanced Tools
         advanced_group = Adw.PreferencesGroup()
         advanced_group.set_title("Advanced Tools")
-        
-        # Debug API
-        debug_row = Adw.ActionRow()
-        debug_row.set_title("Debug RomM API")
-        debug_row.set_subtitle("Test API endpoints and authentication")
-        debug_btn = Gtk.Button(label="Debug")
-        debug_btn.set_valign(Gtk.Align.CENTER)  # CHANGE: Use valign instead
-        debug_btn.set_size_request(80, -1)      # CHANGE: Only set width
-        debug_btn.connect('clicked', self.on_debug_api)
-        debug_row.add_suffix(debug_btn)
-        advanced_group.add(debug_row)
-
-        # Debug Sync Tracking
-        sync_debug_row = Adw.ActionRow()
-        sync_debug_row.set_title("Test Sync Tracking")
-        sync_debug_row.set_subtitle("Test track/untrack save sync controls")
-        sync_debug_btn = Gtk.Button(label="Test")
-        sync_debug_btn.set_valign(Gtk.Align.CENTER)
-        sync_debug_btn.set_size_request(80, -1)
-        sync_debug_btn.connect('clicked', self.on_debug_sync_tracking)
-        sync_debug_row.add_suffix(sync_debug_btn)
-        advanced_group.add(sync_debug_row)
 
         # Inspect Files
         inspect_row = Adw.ActionRow()
@@ -8535,25 +8522,34 @@ class SyncWindow(Gtk.ApplicationWindow):
         # Create page and add groups
         page = Adw.PreferencesPage()
         page.add(log_group)
+        page.add(config_group)
         page.add(advanced_group)
         dialog.add(page)
-        
-        dialog.present()
+
+        dialog.present(self)
 
     def log_message(self, message):
         """Add message to log view with buffer limit"""
-        
-        # ADD THIS: Also write to file for SteamOS debugging
-        try:
-            log_file = Path.home() / '.config' / 'romm-retroarch-sync' / 'debug.log'
-            log_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(log_file, 'a', encoding='utf-8') as f:
-                import datetime
-                timestamp = datetime.datetime.now().strftime("%H:%M:%S")
-                f.write(f"[{timestamp}] {message}\n")
-        except:
-            pass
-        
+
+        # Check if debug mode is enabled
+        debug_mode = self.settings.get('System', 'debug_mode') == 'true'
+
+        # Skip [DEBUG] messages if debug mode is disabled
+        if message.startswith('[DEBUG]') and not debug_mode:
+            return
+
+        # Write to file only if debug mode is enabled
+        if debug_mode:
+            try:
+                log_file = Path.home() / '.config' / 'romm-retroarch-sync' / 'debug.log'
+                log_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(log_file, 'a', encoding='utf-8') as f:
+                    import datetime
+                    timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+                    f.write(f"[{timestamp}] {message}\n")
+            except:
+                pass
+
         def update_ui():
             try:
                 buffer = self.log_view.get_buffer()
@@ -8666,20 +8662,24 @@ class SyncWindow(Gtk.ApplicationWindow):
         """Choose download directory"""
         dialog = Gtk.FileDialog()
         dialog.set_title("Choose ROM Download Directory")
-        
+
         def on_response(source, result):
             try:
                 file = dialog.select_folder_finish(result)
                 if file:
                     path = file.get_path()
-                    self.rom_dir_row.set_text(path)
-                    self.rom_dir_expander.set_subtitle(path)
+                    # Update settings
                     self.settings.set('Download', 'rom_directory', path)
+                    # Update dialog UI if it exists
+                    if hasattr(self, '_dialog_library_dir_row'):
+                        self._dialog_library_dir_row.set_text(path)
+                    if hasattr(self, '_dialog_library_dir_expander'):
+                        self._dialog_library_dir_expander.set_subtitle(path)
                     self.log_message(f"Download directory set to: {path}")
             except Exception as e:
                 # User cancelled or error occurred
                 pass
-        
+
         dialog.select_folder(self, None, on_response)
 
     def on_max_downloads_changed(self, spin_row, pspec):
@@ -8782,20 +8782,37 @@ class SyncWindow(Gtk.ApplicationWindow):
                         if hasattr(self, 'core_count_row'):
                             self.core_count_row.set_subtitle("0 cores available")
                             
-                # Check network commands configuration
+                # Auto-enable network commands and save state thumbnails (always on)
                 if hasattr(self, 'retroarch_connection_row'):
                     network_ok, network_status = self.retroarch.check_network_commands_config()
-                    if network_ok:
-                        self.retroarch_connection_row.set_subtitle(f"{network_status}")
-                    else:
-                        self.retroarch_connection_row.set_subtitle(f"{network_status} - Turn ON in Settings → Network Commands for improved sync and notifications")
+                    thumbnail_ok, thumbnail_status = self.retroarch.check_savestate_thumbnail_config()
+
+                    # Auto-enable if disabled (Option B: always-on approach)
+                    if not network_ok:
+                        self.retroarch.enable_retroarch_setting('network_commands')
+                        network_ok = True
+                        network_status = "Network commands enabled (port 55355)"
+
+                    if not thumbnail_ok:
+                        self.retroarch.enable_retroarch_setting('savestate_thumbnails')
+                        thumbnail_ok = True
+                        thumbnail_status = "Save state thumbnails enabled"
+
+                    # Build status message with green checkmarks (always enabled)
+                    # Green: #4ade80 (same as game library)
+                    status_parts = []
+                    status_parts.append(f'<span foreground="#4ade80">✓</span> {network_status}')
+                    status_parts.append(f'<span foreground="#4ade80">✓</span> {thumbnail_status}')
+
+                    combined_status = " | ".join(status_parts)
+                    self.retroarch_connection_row.set_subtitle(combined_status)
                         
             except Exception as e:
                 print(f"Error checking RetroArch info: {e}")
                 if hasattr(self, 'cores_info_row'):
                     self.cores_info_row.set_subtitle("Error checking cores")
                 if hasattr(self, 'retroarch_connection_row'):
-                    self.retroarch_connection_row.set_subtitle("Turn ON in Settings → Network Commands to get notifications")
+                    self.retroarch_connection_row.set_subtitle("Error checking configuration - use buttons above to enable")
         
         # Ensure UI update happens in main thread
         from gi.repository import GLib
@@ -9927,14 +9944,75 @@ class SyncWindow(Gtk.ApplicationWindow):
         if not selected_game:
             self.log_message("No game selected")
             return
-        
+
         if selected_game['is_downloaded']:
             # Launch the game
             self.launch_game(selected_game)
         else:
             # Download the game
             self.download_game(selected_game)
-    
+
+    def _select_file_from_folder(self, folder_path):
+        """Select the appropriate file to launch from a folder using smart heuristics.
+
+        Args:
+            folder_path: Path object pointing to a folder containing game files
+
+        Returns:
+            Path object pointing to the selected file, or None if no suitable file found
+        """
+        if not folder_path.is_dir():
+            return folder_path
+
+        # Get all files in the folder (excluding hidden files and directories)
+        files = [f for f in folder_path.iterdir() if f.is_file() and not f.name.startswith('.')]
+
+        if not files:
+            logging.warning(f"No files found in folder: {folder_path}")
+            return None
+
+        # Single file - auto-select it
+        if len(files) == 1:
+            logging.info(f"Auto-selected single file from folder: {files[0].name}")
+            return files[0]
+
+        # Multi-file folder - use smart selection
+        logging.info(f"Multiple files found in folder ({len(files)}), using smart selection")
+
+        # Priority 1: .m3u files (multi-disc playlists)
+        m3u_files = [f for f in files if f.suffix.lower() == '.m3u']
+        if m3u_files:
+            logging.info(f"Selected .m3u playlist: {m3u_files[0].name}")
+            return m3u_files[0]
+
+        # Priority 2: .cue files (CD-based games - REQUIRED for CD games)
+        cue_files = [f for f in files if f.suffix.lower() == '.cue']
+        if cue_files:
+            logging.info(f"Selected .cue file: {cue_files[0].name}")
+            return cue_files[0]
+
+        # Priority 3: .chd files (compressed CD images)
+        chd_files = [f for f in files if f.suffix.lower() == '.chd']
+        if chd_files:
+            logging.info(f"Selected .chd file: {chd_files[0].name}")
+            return chd_files[0]
+
+        # Priority 4: Common ROM extensions
+        rom_extensions = {'.iso', '.bin', '.img', '.nds', '.gba', '.gb', '.gbc',
+                         '.n64', '.z64', '.v64', '.sfc', '.smc', '.nes',
+                         '.md', '.gen', '.smd', '.32x', '.gg', '.pce'}
+        rom_files = [f for f in files if f.suffix.lower() in rom_extensions]
+        if rom_files:
+            # If multiple ROMs, pick the largest one
+            largest = max(rom_files, key=lambda f: f.stat().st_size)
+            logging.info(f"Selected largest ROM file: {largest.name} ({largest.stat().st_size} bytes)")
+            return largest
+
+        # Fallback: Pick the largest file
+        largest = max(files, key=lambda f: f.stat().st_size)
+        logging.info(f"Selected largest file as fallback: {largest.name} ({largest.stat().st_size} bytes)")
+        return largest
+
     def launch_game(self, game):
         """Launch a game using RetroArch (with BIOS verification)"""
         if not game.get('is_downloaded'):
@@ -9962,6 +10040,15 @@ class SyncWindow(Gtk.ApplicationWindow):
 
         platform_name = game.get('platform')
         rom_path = Path(local_path)
+
+        # Handle folder-based games by selecting the appropriate file
+        if rom_path.is_dir():
+            selected_file = self._select_file_from_folder(rom_path)
+            if selected_file is None:
+                self.log_message("❌ No launchable file found in game folder")
+                return
+            logging.info(f"Folder detected, selected file: {selected_file.name}")
+            rom_path = selected_file
 
         logging.info(f"Launching game: {game.get('name')}")
         logging.debug(f"ROM path: {rom_path}, Platform: {platform_name}")
@@ -10018,6 +10105,15 @@ class SyncWindow(Gtk.ApplicationWindow):
             return
 
         platform_name = game.get('platform')
+
+        # Handle folder-based discs (rare edge case)
+        if disc_path.is_dir():
+            selected_file = self._select_file_from_folder(disc_path)
+            if selected_file is None:
+                self.log_message("❌ No launchable file found in disc folder")
+                return
+            logging.info(f"Disc folder detected, selected file: {selected_file.name}")
+            disc_path = selected_file
 
         # Let RetroArch interface handle the actual launching
         success, message = self.retroarch.launch_game(disc_path, platform_name)
@@ -11034,346 +11130,6 @@ class SyncWindow(Gtk.ApplicationWindow):
         else:
             self.log_message("❌ No cache to clear")
 
-    def on_debug_api(self, button):
-        """Debug RomM API endpoints and structure, including save/state investigation"""
-        if not self.romm_client or not self.romm_client.authenticated:
-            self.log_message("Please connect to RomM first")
-            return
-        
-        def debug():
-            try:
-                self.log_message("=== Debugging RomM API & Save States ===")
-                
-                # First, find a ROM with saves/states to investigate
-                roms = self.romm_client.get_roms()
-                test_rom_id = None
-                
-                if roms and len(roms) > 0:
-                    # Look for ROM with ID 37 or first available
-                    for rom in roms:
-                        if rom.get('id') == 37:
-                            test_rom_id = 37
-                            break
-                    
-                    if not test_rom_id:
-                        test_rom_id = roms[0].get('id')
-                    
-                    GLib.idle_add(lambda id=test_rom_id: 
-                                 self.log_message(f"🎮 Testing with ROM ID: {id}"))
-                    
-                    # Check what save/state data looks like
-                    save_endpoints = [
-                        f'/api/roms/{test_rom_id}/states',
-                        f'/api/roms/{test_rom_id}/saves', 
-                        f'/api/states?rom_id={test_rom_id}',
-                        f'/api/saves?rom_id={test_rom_id}',
-                        f'/api/roms/{test_rom_id}',  # Full ROM details
-                    ]
-                    
-                    for endpoint in save_endpoints:
-                        try:
-                            response = self.romm_client.session.get(
-                                urljoin(self.romm_client.base_url, endpoint),
-                                timeout=10
-                            )
-                            
-                            GLib.idle_add(lambda ep=endpoint, code=response.status_code: 
-                                         self.log_message(f"📡 {ep} -> {code}"))
-                            
-                            if response.status_code == 200:
-                                try:
-                                    data = response.json()
-                                    
-                                    if isinstance(data, list) and data:
-                                        # List of saves/states
-                                        save_item = data[0]  # Look at first item
-                                        GLib.idle_add(lambda: self.log_message(f"📄 First save/state structure:"))
-                                        
-                                        # Look for thumbnail-related fields
-                                        thumbnail_fields = []
-                                        for key, value in save_item.items():
-                                            if any(thumb_keyword in key.lower() for thumb_keyword in ['thumb', 'image', 'screenshot', 'preview', 'picture']):
-                                                thumbnail_fields.append(f"{key}: {value}")
-                                            GLib.idle_add(lambda k=key, v=str(value)[:100]: 
-                                                         self.log_message(f"  {k}: {v}"))
-                                        
-                                        if thumbnail_fields:
-                                            GLib.idle_add(lambda: self.log_message("🖼️ Thumbnail-related fields found:"))
-                                            for field in thumbnail_fields:
-                                                GLib.idle_add(lambda f=field: self.log_message(f"  📸 {f}"))
-                                        else:
-                                            GLib.idle_add(lambda: self.log_message("❌ No thumbnail fields found in save data"))
-                                    
-                                    elif isinstance(data, dict):
-                                        # Single object or wrapper
-                                        if 'user_states' in data or 'user_saves' in data:
-                                            # ROM details with nested saves
-                                            states = data.get('user_states', [])
-                                            saves = data.get('user_saves', [])
-                                            
-                                            GLib.idle_add(lambda s=len(states), sv=len(saves): 
-                                                         self.log_message(f"📄 ROM has {s} states, {sv} saves"))
-                                            
-                                            if states:
-                                                state = states[0]
-                                                GLib.idle_add(lambda: self.log_message("🎮 First state structure:"))
-                                                for key, value in state.items():
-                                                    GLib.idle_add(lambda k=key, v=str(value)[:100]: 
-                                                                 self.log_message(f"  {k}: {v}"))
-                                        else:
-                                            # Unknown structure
-                                            GLib.idle_add(lambda keys=list(data.keys()): 
-                                                         self.log_message(f"📄 Data keys: {keys}"))
-                                
-                                except Exception as json_error:
-                                    GLib.idle_add(lambda ep=endpoint, err=str(json_error): 
-                                                 self.log_message(f"❌ JSON parse error for {ep}: {err}"))
-                                    GLib.idle_add(lambda text=response.text[:200]: 
-                                                 self.log_message(f"Raw response: {text}"))
-                            
-                        except Exception as e:
-                            GLib.idle_add(lambda ep=endpoint, err=str(e): 
-                                         self.log_message(f"❌ {ep} -> Error: {err}"))
-                
-                # Check OpenAPI for save/state schemas
-                try:
-                    GLib.idle_add(lambda: self.log_message("📋 Checking OpenAPI schemas..."))
-                    openapi_response = self.romm_client.session.get(
-                        urljoin(self.romm_client.base_url, '/openapi.json'),
-                        timeout=10
-                    )
-                    
-                    if openapi_response.status_code == 200:
-                        openapi_spec = openapi_response.json()
-                        components = openapi_spec.get('components', {})
-                        schemas = components.get('schemas', {})
-                        
-                        # Look for save/state schemas
-                        relevant_schemas = {}
-                        for schema_name, schema_def in schemas.items():
-                            if any(keyword in schema_name.lower() for keyword in ['save', 'state', 'thumbnail', 'image']):
-                                relevant_schemas[schema_name] = schema_def
-                        
-                        if relevant_schemas:
-                            GLib.idle_add(lambda: self.log_message("📋 Found relevant schemas:"))
-                            for schema_name, schema_def in relevant_schemas.items():
-                                properties = schema_def.get('properties', {})
-                                GLib.idle_add(lambda name=schema_name: self.log_message(f"  📄 {name}:"))
-                                
-                                for prop_name, prop_def in properties.items():
-                                    prop_type = prop_def.get('type', 'unknown')
-                                    GLib.idle_add(lambda pn=prop_name, pt=prop_type: 
-                                                 self.log_message(f"    {pn}: {pt}"))
-                        else:
-                            GLib.idle_add(lambda: self.log_message("❌ No save/state schemas found in OpenAPI"))
-                
-                except Exception as e:
-                    GLib.idle_add(lambda err=str(e): self.log_message(f"OpenAPI check failed: {err}"))
-                
-                GLib.idle_add(lambda: self.log_message("=== Debug complete ==="))
-                GLib.idle_add(lambda: self.log_message("💡 Check browser DevTools Network tab when viewing saves page"))
-                
-            except Exception as e:
-                GLib.idle_add(lambda err=str(e): self.log_message(f"Debug error: {err}"))
-        
-        threading.Thread(target=debug, daemon=True).start()
-
-    def on_debug_sync_tracking(self, button):
-        """Test track/untrack save sync functionality"""
-        if not self.romm_client or not self.romm_client.authenticated:
-            self.log_message("Please connect to RomM first")
-            return
-
-        if not self.device_id:
-            self.log_message("No device ID found - device registration may have failed")
-            return
-
-        def test_tracking():
-            try:
-                self.log_message("=== Testing Sync Tracking API ===")
-                self.log_message(f"Device ID: {self.device_id}")
-
-                # Query all saves/states directly from the API
-                test_save_id = None
-                test_state_id = None
-
-                # Try to get saves directly from /api/saves endpoint
-                try:
-                    saves_response = self.romm_client.session.get(
-                        urljoin(self.romm_client.base_url, '/api/saves'),
-                        params={'limit': 10},
-                        timeout=10
-                    )
-
-                    if saves_response.status_code == 200:
-                        saves_data = saves_response.json()
-
-                        # Handle both list and dict responses
-                        if isinstance(saves_data, list):
-                            items = saves_data
-                        elif isinstance(saves_data, dict):
-                            items = saves_data.get('items', [])
-                        else:
-                            items = []
-
-                        if items:
-                            test_save_id = items[0].get('id')
-                            rom_id = items[0].get('rom_id')
-                            GLib.idle_add(lambda sid=test_save_id, rid=rom_id:
-                                        self.log_message(f"Found save ID: {sid} (ROM: {rid})"))
-                except Exception as e:
-                    GLib.idle_add(lambda err=str(e):
-                                self.log_message(f"Could not fetch saves: {err}"))
-
-                # If no saves, try states
-                if not test_save_id:
-                    try:
-                        states_response = self.romm_client.session.get(
-                            urljoin(self.romm_client.base_url, '/api/states'),
-                            params={'limit': 10},
-                            timeout=10
-                        )
-
-                        if states_response.status_code == 200:
-                            states_data = states_response.json()
-
-                            # Handle both list and dict responses
-                            if isinstance(states_data, list):
-                                items = states_data
-                            elif isinstance(states_data, dict):
-                                items = states_data.get('items', [])
-                            else:
-                                items = []
-
-                            if items:
-                                test_state_id = items[0].get('id')
-                                rom_id = items[0].get('rom_id')
-                                GLib.idle_add(lambda sid=test_state_id, rid=rom_id:
-                                            self.log_message(f"Found state ID: {sid} (ROM: {rid})"))
-                    except Exception as e:
-                        GLib.idle_add(lambda err=str(e):
-                                    self.log_message(f"Could not fetch states: {err}"))
-
-                if not test_save_id and not test_state_id:
-                    GLib.idle_add(lambda: self.log_message("❌ No saves or states found to test with"))
-                    GLib.idle_add(lambda: self.log_message("💡 Upload a save file first, then try again"))
-                    return
-
-                # Test with save or state
-                save_id = test_save_id or test_state_id
-                save_type = 'saves' if test_save_id else 'states'
-
-                GLib.idle_add(lambda: self.log_message(f"\n--- Testing with {save_type[:-1]} ID: {save_id} ---"))
-
-                # Test 1: Untrack the save
-                GLib.idle_add(lambda: self.log_message("\n1️⃣ Testing UNTRACK..."))
-                untrack_result = self.romm_client.untrack_save(save_id, save_type, self.device_id)
-                if untrack_result:
-                    GLib.idle_add(lambda: self.log_message("✅ Untrack successful"))
-                else:
-                    GLib.idle_add(lambda: self.log_message("⚠️ Untrack failed (may already be untracked)"))
-
-                # Wait a bit
-                import time
-                time.sleep(1)
-
-                # Test 2: Track the save again
-                GLib.idle_add(lambda: self.log_message("\n2️⃣ Testing TRACK..."))
-                track_result = self.romm_client.track_save(save_id, save_type, self.device_id)
-                if track_result:
-                    GLib.idle_add(lambda: self.log_message("✅ Track successful"))
-                else:
-                    GLib.idle_add(lambda: self.log_message("⚠️ Track failed (may already be tracked)"))
-
-                # Test 3: Check device_syncs in metadata
-                GLib.idle_add(lambda: self.log_message("\n3️⃣ Checking metadata..."))
-                check_response = self.romm_client.session.get(
-                    urljoin(self.romm_client.base_url, f'/api/{save_type}/{save_id}'),
-                    timeout=10
-                )
-
-                if check_response.status_code == 200:
-                    save_data = check_response.json()
-                    device_syncs = save_data.get('device_syncs', [])
-                    GLib.idle_add(lambda syncs=device_syncs:
-                                self.log_message(f"📱 Device syncs: {syncs}"))
-
-                    # Look for our device in the sync list
-                    our_sync = None
-                    for sync in device_syncs:
-                        if sync.get('device_id') == self.device_id:
-                            our_sync = sync
-                            break
-
-                    if our_sync:
-                        GLib.idle_add(lambda: self.log_message(f"✅ Found our device in sync list:"))
-                        GLib.idle_add(lambda s=our_sync:
-                                    self.log_message(f"   Tracking: {s.get('is_tracking', 'unknown')}"))
-                        GLib.idle_add(lambda s=our_sync:
-                                    self.log_message(f"   Downloaded: {s.get('downloaded', 'unknown')}"))
-                    else:
-                        GLib.idle_add(lambda: self.log_message("⚠️ Our device not found in sync list"))
-                else:
-                    GLib.idle_add(lambda code=check_response.status_code:
-                                self.log_message(f"⚠️ Could not fetch metadata: HTTP {code}"))
-
-                # Test 4: Query saves by device
-                GLib.idle_add(lambda: self.log_message("\n4️⃣ Testing device-filtered query..."))
-                device_saves = self.romm_client.get_saves_by_device(
-                    self.device_id,
-                    save_type=save_type,
-                    limit=5
-                )
-
-                if device_saves:
-                    GLib.idle_add(lambda count=len(device_saves):
-                                self.log_message(f"✅ Found {count} {save_type} for this device"))
-                    for save in device_saves[:3]:  # Show first 3
-                        save_id_item = save.get('id')
-                        rom_id_item = save.get('rom_id')
-                        filename = save.get('file_name', 'unknown')
-                        GLib.idle_add(lambda sid=save_id_item, rid=rom_id_item, fn=filename:
-                                    self.log_message(f"   - {fn} (save:{sid}, rom:{rid})"))
-                else:
-                    GLib.idle_add(lambda: self.log_message("⚠️ No saves found for device (query may not be supported)"))
-
-                # Test 5: Get saves summary for the ROM
-                if save_id and save_type == 'saves':  # Only test with saves, not states
-                    GLib.idle_add(lambda: self.log_message("\n5️⃣ Testing saves summary..."))
-
-                    # Get the ROM ID from the save
-                    summary_rom_id = None
-                    if device_saves:
-                        for save in device_saves:
-                            if save.get('id') == save_id:
-                                summary_rom_id = save.get('rom_id')
-                                break
-
-                    if summary_rom_id:
-                        summary = self.romm_client.get_saves_summary(summary_rom_id, save_type='saves')
-
-                        if summary:
-                            GLib.idle_add(lambda: self.log_message("✅ Retrieved saves summary"))
-                            if isinstance(summary, dict):
-                                for key, value in list(summary.items())[:3]:  # Show first 3 items
-                                    GLib.idle_add(lambda k=key, v=str(value)[:80]:
-                                                self.log_message(f"   {k}: {v}"))
-                            elif isinstance(summary, list):
-                                GLib.idle_add(lambda count=len(summary):
-                                            self.log_message(f"   Summary contains {count} slots"))
-                        else:
-                            GLib.idle_add(lambda: self.log_message("⚠️ Summary not available (may not be supported)"))
-                    else:
-                        GLib.idle_add(lambda: self.log_message("⚠️ Could not determine ROM ID for summary"))
-
-                GLib.idle_add(lambda: self.log_message("\n=== Test Complete ==="))
-                GLib.idle_add(lambda: self.log_message("💡 Check the RomM web interface to verify sync status"))
-
-            except Exception as e:
-                GLib.idle_add(lambda err=str(e): self.log_message(f"Test error: {err}"))
-
-        threading.Thread(target=test_tracking, daemon=True).start()
-
     def on_browse_downloads(self, button):
         """Open the download directory in file manager"""
         download_dir = Path(self.rom_dir_row.get_text())
@@ -11496,19 +11252,12 @@ def main():
     
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='RomM-RetroArch Sync')
-    parser.add_argument('--minimized', action='store_true', 
+    parser.add_argument('--minimized', action='store_true',
                        help='Start minimized to tray')
-    parser.add_argument('--daemon', action='store_true',
-                        help='Run in daemon mode (no GUI)')
     args = parser.parse_args()
-    
+
     print("🚀 Starting RomM-RetroArch Sync...")
-    
-    # Handle daemon mode first
-    if args.daemon:
-        print("🔧 Starting in daemon mode...")
-        return run_daemon_mode()
-    
+
     # GUI mode continues here...
     # Check desktop environment
     desktop = os.environ.get('XDG_CURRENT_DESKTOP', 'unknown').lower()
