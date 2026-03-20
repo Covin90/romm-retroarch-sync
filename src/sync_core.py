@@ -1866,15 +1866,21 @@ class RomMClient:
                 download_path.mkdir(parents=True, exist_ok=True)
 
             # Use same API endpoint for both files and folders
-            api_endpoint = f'/api/roms/{rom_id}/content/{filename}'
+            # URL-encode the filename to handle spaces and special characters
+            encoded_filename = quote(filename)
+            api_endpoint = f'/api/roms/{rom_id}/content/{encoded_filename}'
+            full_url = urljoin(self.base_url, api_endpoint)
+            print(f"Requesting ROM download: {full_url}")
 
             response = self.session.get(
-                urljoin(self.base_url, api_endpoint),
+                full_url,
                 stream=True,
                 timeout=30
             )
 
             if response.status_code != 200:
+                print(f"ROM download failed with status {response.status_code}")
+                print(f"Response headers: {dict(response.headers)}")
                 return False, f"API download failed: HTTP {response.status_code}"
             
             # Check if we're getting HTML (error page) instead of a ROM file
@@ -3888,13 +3894,73 @@ class RetroArchInterface:
             print(f"❌ Failed to send RetroArch notification: {e}")
             return False
     
+    def parse_retroarch_save_dirs_from_config(self, config_dir):
+        """Parse savefile_directory and savestate_directory from retroarch.cfg
+
+        Args:
+            config_dir: Path to the RetroArch config directory
+
+        Returns:
+            dict: Dictionary with 'saves' and/or 'states' keys pointing to configured paths
+        """
+        save_dirs = {}
+        config_file = config_dir / 'retroarch.cfg'
+
+        if not config_file.exists():
+            return save_dirs
+
+        try:
+            with open(config_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+
+                    # Parse savefile_directory setting
+                    if line.startswith('savefile_directory = '):
+                        # Extract the path, removing quotes
+                        path_str = line.split('=', 1)[1].strip().strip('"')
+                        if path_str:
+                            # Expand ~ to home directory
+                            save_path = Path(path_str).expanduser()
+                            if save_path.exists():
+                                save_dirs['saves'] = save_path
+                                print(f"📁 Using configured savefile_directory: {save_path}")
+                            else:
+                                print(f"⚠️ Configured savefile_directory doesn't exist: {save_path}")
+
+                    # Parse savestate_directory setting
+                    elif line.startswith('savestate_directory = '):
+                        # Extract the path, removing quotes
+                        path_str = line.split('=', 1)[1].strip().strip('"')
+                        if path_str:
+                            # Expand ~ to home directory
+                            state_path = Path(path_str).expanduser()
+                            if state_path.exists():
+                                save_dirs['states'] = state_path
+                                print(f"📁 Using configured savestate_directory: {state_path}")
+                            else:
+                                print(f"⚠️ Configured savestate_directory doesn't exist: {state_path}")
+
+        except Exception as e:
+            print(f"⚠️ Error reading retroarch.cfg: {e}")
+
+        return save_dirs
+
     def find_retroarch_dirs(self):
         """Find RetroArch save directories with comprehensive installation support"""
         save_dirs = {}
-        
+
+        # First, try to get the config directory and read configured paths
+        config_dir = self.find_retroarch_config_dir()
+        if config_dir:
+            save_dirs = self.parse_retroarch_save_dirs_from_config(config_dir)
+            if save_dirs:
+                # User has configured paths and they exist - use them
+                return save_dirs
+
+        # If no configured paths found, fall back to auto-detection
         # All possible RetroArch config locations (ordered by likelihood)
         possible_dirs = [
-        
+
             # RetroDECK
             Path.home() / 'retrodeck',
 
@@ -3904,25 +3970,25 @@ class RetroArchInterface:
             # Native/Steam installations
             Path.home() / '.config/retroarch',
             Path.home() / '/.retroarch',
-            
+
             # Steam specific locations
             Path.home() / '.steam/steam/steamapps/common/RetroArch',
             Path.home() / '.local/share/Steam/steamapps/common/RetroArch',
 
             Path.home() / '.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/RetroArch',
             Path.home() / '.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/RetroArch/config',
-            
+
             # Snap
             Path.home() / 'snap/retroarch/current/.config/retroarch',
-            
+
             # AppImage (usually creates config in user dir)
             Path.home() / '.retroarch-appimage',
-            
+
             # System-wide installations
             Path('/etc/retroarch'),
             Path('/usr/local/etc/retroarch'),
         ]
-        
+
         for base_dir in possible_dirs:
             if base_dir.exists():
                 # RetroDECK uses different structure
@@ -3933,17 +3999,17 @@ class RetroArchInterface:
                     # Standard RetroArch structure
                     saves_dir = base_dir / 'saves'
                     states_dir = base_dir / 'states'
-                
+
                 if saves_dir.exists():
                     save_dirs['saves'] = saves_dir
                 if states_dir.exists():
                     save_dirs['states'] = states_dir
-                    
+
                 # If we found both or either, we're done
                 if save_dirs:
-                    print(f"📁 Found RetroArch save dirs: {base_dir}")
+                    print(f"📁 Found RetroArch save dirs (auto-detected): {base_dir}")
                     break
-        
+
         return save_dirs
 
     def find_retroarch_config_dir(self):
