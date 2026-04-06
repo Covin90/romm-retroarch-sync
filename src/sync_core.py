@@ -1072,7 +1072,7 @@ class SteamGridImageGenerator:
 
             # Generate portrait (600x900) - typical for cover art
             portrait_path = output_dir / f"{unsigned_appid}p.png"
-            portrait = SteamGridImageGenerator._resize_and_pad(
+            portrait = SteamGridImageGenerator._resize_and_crop(
                 source.copy(),
                 SteamGridImageGenerator.GRID_PORTRAIT
             )
@@ -1125,8 +1125,16 @@ class SteamGridImageGenerator:
         """
         from PIL import Image
 
-        # Calculate aspect-ratio-preserving size
-        image.thumbnail(target_size, Image.Resampling.LANCZOS)
+        # Calculate aspect-ratio-preserving size (scale to fit, up or down)
+        img_ratio = image.width / image.height
+        target_ratio = target_size[0] / target_size[1]
+        if img_ratio > target_ratio:
+            new_width = target_size[0]
+            new_height = int(new_width / img_ratio)
+        else:
+            new_height = target_size[1]
+            new_width = int(new_height * img_ratio)
+        image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
 
         # Create new image with black background
         result = Image.new('RGB', target_size, (0, 0, 0))

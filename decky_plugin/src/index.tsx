@@ -10,7 +10,7 @@ import {
 } from "@decky/ui";
 import { callable, definePlugin, toaster, routerHook, openFilePicker, FileSelectionType } from "@decky/api";
 import { useState, useEffect, useRef, ChangeEvent } from "react";
-import { FaSync, FaTrash, FaCog, FaSteam } from "react-icons/fa";
+import { FaSync, FaTrash, FaCog, FaSteam, FaGithub, FaBug } from "react-icons/fa";
 import { BsGearFill } from "react-icons/bs";
 
 // Call backend methods
@@ -443,6 +443,32 @@ function SettingsPage() {
             onChange={handleLoggingToggle}
             disabled={loading}
           />
+        </PanelSectionRow>
+      </PanelSection>
+      <PanelSection title="About">
+        <PanelSectionRow>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', padding: '4px 0 8px' }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px' }}>
+              <span style={{ fontWeight: 'bold', fontSize: '15px' }}>RomM RetroArch Sync</span>
+              <span style={{ color: '#9ca3af', fontSize: '11px' }}>v1.5.0</span>
+            </div>
+            <div style={{ color: '#9ca3af', fontSize: '11px' }}>by Covin</div>
+            <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
+              {[
+                { icon: <FaGithub size={12} />, label: 'GitHub', url: 'https://github.com/Covin90/romm-retroarch-sync' },
+                { icon: <FaBug size={12} />, label: 'Report Issue', url: 'https://github.com/Covin90/romm-retroarch-sync/issues' },
+              ].map(({ icon, label, url }) => (
+                <div
+                  key={label}
+                  onClick={() => Navigation.NavigateToExternalWeb(url)}
+                  style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '4px 10px', borderRadius: '4px', background: 'rgba(255,255,255,0.08)', cursor: 'pointer', fontSize: '12px' }}
+                >
+                  {icon}
+                  <span>{label}</span>
+                </div>
+              ))}
+            </div>
+          </div>
         </PanelSectionRow>
       </PanelSection>
       <PanelSection title="Danger Zone">
