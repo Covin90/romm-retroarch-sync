@@ -347,8 +347,8 @@ class Plugin:
                 self._bios_tracking.scan_library_bios()
 
             # Register this device with RomM so save-sync (the /negotiate engine)
-            # has a device_id. Without it, sync_single_save returns 'error' and
-            # battery saves never sync. Mirrors the GTK app's initialize_device().
+            # has a device_id. Without it the session sync can't run and battery
+            # saves never sync. Mirrors the GTK app's initialize_device().
             self._ensure_device_registered()
 
             # AutoSyncManager (save/state sync)
@@ -1206,8 +1206,8 @@ class Plugin:
     def _ensure_device_registered(self):
         """Ensure this device is registered with RomM and device_id is stored.
 
-        Save-sync (/negotiate) needs a device_id; without it sync_single_save
-        returns 'error' and battery saves never sync. Mirrors the GTK app's
+        Save-sync (/negotiate) needs a device_id; without it the session sync
+        can't run and battery saves never sync. Mirrors the GTK app's
         initialize_device(): reuse an existing valid registration, else register
         a new device. New devices default to sync_enabled on the server.
         """
