@@ -5292,6 +5292,10 @@ class AutoSyncManager:
             self.start_retroarch_monitoring()
             self.start_playlist_monitoring()
 
+            # RomM session-based sync on connect: pull saves changed on other
+            # devices (and push any local changes) as a single batch negotiate.
+            self.trigger_session_save_sync("connect")
+
             self.log("🔄 Auto-sync started (file monitoring + RetroArch + playlist monitoring)")
             
         except Exception as e:
@@ -5452,9 +5456,12 @@ class AutoSyncManager:
                         else:
                             self.log("🎮 RetroArch closed")
                             network_retry_count = 0  # Reset on close
-                            # Clear pending uploads — saves were already uploaded during gameplay
-                            # RetroArch flushes saves on exit, which would trigger duplicate uploads
+                            # Clear per-file debounce; the session boundary (close)
+                            # is where we push this play session's saves as a batch.
                             self.upload_debounce.clear()
+                            # RomM session-based sync: reconcile all saves now that
+                            # RetroArch has flushed them on exit.
+                            self.trigger_session_save_sync("RetroArch closed")
                         retroarch_was_running = retroarch_running
 
                     # 3. PRIORITY: Network state detection (content loaded/unloaded)
@@ -5979,26 +5986,15 @@ class AutoSyncManager:
 
             # Determine save type and slot info
             if file_path.suffix.lower() in ['.srm', '.sav']:
-                # SAVES: route through RomM 4.9.0's /negotiate engine (server-side
-                # conflict detection + per-device attribution) instead of the legacy
-                # push-and-409 flow. States are NOT engine-managed and fall through.
-                status = self.sync_single_save(file_path, rom_id)
-                if status in ('uploaded', 'in_sync', 'downloaded', 'conflict'):
-                    self.last_uploaded[str(file_path)] = current_fingerprint
-                    self._save_upload_fingerprints()
-                    if status == 'uploaded':
-                        self.log(f"✅ Synced {file_path.name} → server")
-                        self.retroarch.send_notification("Save uploaded")
-                    elif status == 'downloaded':
-                        self.log(f"⬇️ Pulled newer server save for {file_path.name}")
-                        self.retroarch.send_notification("Save updated from server")
-                    elif status == 'conflict':
-                        self.retroarch.send_notification(f"Sync conflict: {file_path.name}")
-                    else:
-                        self.log(f"✓ {file_path.name} already in sync")
-                else:
-                    self.log(f"❌ Save-sync failed for {file_path.name}")
-                    self.retroarch.send_notification(f"Sync failed: {file_path.name}")
+                # SAVES: RomM's protocol is session-based ("sync once per session,
+                # not per save"). Rather than negotiate on this single file, mark it
+                # synced (so RetroArch's exit-flush doesn't re-trigger) and kick a
+                # coalesced full-inventory session sync. The primary push happens on
+                # RetroArch close; this watcher trigger is a debounced safety net.
+                # States are NOT engine-managed and fall through to the legacy path.
+                self.last_uploaded[str(file_path)] = current_fingerprint
+                self._save_upload_fingerprints()
+                self.trigger_session_save_sync("save changed")
                 return
             elif 'state' in file_path.suffix.lower():
                 save_type = 'states'
@@ -6285,6 +6281,38 @@ class AutoSyncManager:
             })
 
         return inventory
+
+    def trigger_session_save_sync(self, reason=""):
+        """Run a session-based save-sync in the background (coalesced).
+
+        RomM's protocol is session-based ("sync once per session, not per save"),
+        so instead of negotiating on every individual file write we run one
+        full-inventory negotiate at session boundaries (RetroArch close, connect)
+        and as a debounced safety net from the file watcher.
+
+        Coalesced via a non-blocking lock: if a sync is already in flight it
+        already captures current on-disk state, so overlapping triggers are
+        dropped rather than queued.
+        """
+        if not (self.romm_client and self.romm_client.authenticated):
+            return
+        if not getattr(self, '_session_sync_lock', None):
+            self._session_sync_lock = threading.Lock()
+
+        def _run():
+            if not self._session_sync_lock.acquire(blocking=False):
+                logging.debug("Session save-sync already running; coalescing trigger")
+                return
+            try:
+                if reason:
+                    self.log(f"🔄 Save-sync session ({reason})")
+                self.run_negotiated_save_sync()
+            except Exception as e:
+                self.log(f"❌ Session save-sync failed: {e}")
+            finally:
+                self._session_sync_lock.release()
+
+        threading.Thread(target=_run, daemon=True, name="romm-session-sync").start()
 
     def run_negotiated_save_sync(self, conflict_resolver=None):
         """Run one save-sync cycle via RomM 4.9.0's /negotiate engine (SAVES ONLY).
