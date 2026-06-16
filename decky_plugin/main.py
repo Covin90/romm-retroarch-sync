@@ -346,6 +346,11 @@ class Plugin:
                 )
                 self._bios_tracking.scan_library_bios()
 
+            # Register this device with RomM so save-sync (the /negotiate engine)
+            # has a device_id. Without it, sync_single_save returns 'error' and
+            # battery saves never sync. Mirrors the GTK app's initialize_device().
+            self._ensure_device_registered()
+
             # AutoSyncManager (save/state sync)
             if self._auto_sync is None:
                 self._auto_sync = AutoSyncManager(
@@ -1197,6 +1202,39 @@ class Plugin:
         except Exception as e:
             logging.error(f"reset_all_settings error: {e}", exc_info=True)
             return {'success': False, 'error': str(e)}
+
+    def _ensure_device_registered(self):
+        """Ensure this device is registered with RomM and device_id is stored.
+
+        Save-sync (/negotiate) needs a device_id; without it sync_single_save
+        returns 'error' and battery saves never sync. Mirrors the GTK app's
+        initialize_device(): reuse an existing valid registration, else register
+        a new device. New devices default to sync_enabled on the server.
+        """
+        if not (self._romm_client and self._romm_client.authenticated and self._settings):
+            return None
+        try:
+            existing = self._settings.get('Device', 'device_id', '')
+            if existing and self._romm_client.get_device(existing):
+                logging.info(f"[DEVICE] verified on server: {existing}")
+                return existing
+
+            import socket as _socket
+            device_id = self._romm_client.register_device(
+                device_name=self._settings.get('Device', 'device_name', _socket.gethostname()),
+                platform=self._settings.get('Device', 'device_platform', 'SteamOS'),
+                client=self._settings.get('Device', 'client', 'RomM-RetroArch-Sync-Decky'),
+                client_version=self._settings.get('Device', 'client_version', '1.5'),
+            )
+            if device_id:
+                self._settings.set('Device', 'device_id', device_id)
+                logging.info(f"[DEVICE] registered: {device_id}")
+                return device_id
+            logging.warning("[DEVICE] registration failed; save-sync will be disabled")
+            return None
+        except Exception as e:
+            logging.error(f"[DEVICE] registration error: {e}", exc_info=True)
+            return None
 
     async def delete_device(self):
         """Unregister the current device from the server and clear local device ID."""
