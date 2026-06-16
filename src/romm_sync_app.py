@@ -6674,8 +6674,6 @@ class SyncWindow(Gtk.ApplicationWindow):
 
         # Timestamps for efficient polling with updated_after parameter
         self._last_full_fetch_time = None  # ISO 8601 datetime of last full data fetch
-        self._polling_thread = None  # Background polling thread
-        self._stop_polling = threading.Event()  # Event to stop polling thread
 
         self.download_progress = {}
         self._last_progress_update = {}  # rom_id -> timestamp
@@ -8829,8 +8827,8 @@ class SyncWindow(Gtk.ApplicationWindow):
                         self.update_status_dot(self.autosync_status_dot, 'green')
                         self.log_message("🔄 Auto-sync enabled")
 
-                    # Start background polling for new games
-                    self._start_background_polling()
+                    # Library is fetched on connect and on manual refresh (the
+                    # reference client's on-demand model) — no background polling.
 
                     total_time = time.time() - start_time
                     self.log_message(f"🎉 Total connection time: {total_time:.2f}s")
@@ -8864,9 +8862,6 @@ class SyncWindow(Gtk.ApplicationWindow):
             self.autosync_enable_switch.handler_unblock_by_func(self.on_autosync_toggle)
             self.autosync_expander.set_subtitle("Disabled - not connected to RomM")
             self.update_status_dot(self.autosync_status_dot, 'red')
-
-        # Stop background polling
-        self._stop_background_polling()
 
         self.update_connection_ui("disconnected")
         self.log_message("Disconnected from RomM")
@@ -9805,106 +9800,6 @@ class SyncWindow(Gtk.ApplicationWindow):
             # Fall back to full sync on error
             self.log_message("Falling back to full sync...")
             self.perform_full_sync(download_dir, server_url)
-
-    def _start_background_polling(self):
-        """Start background polling thread for incremental updates"""
-        if self._polling_thread and self._polling_thread.is_alive():
-            return  # Already running
-
-        self._stop_polling.clear()
-        self._polling_thread = threading.Thread(
-            target=self._polling_loop,
-            daemon=True,
-            name="romm-gtk-polling"
-        )
-        self._polling_thread.start()
-        self.log_message("📡 Background polling started (30s interval)")
-
-    def _stop_background_polling(self):
-        """Stop background polling thread"""
-        if self._polling_thread:
-            self._stop_polling.set()
-            self._polling_thread.join(timeout=2)
-            self._polling_thread = None
-            self.log_message("📡 Background polling stopped")
-
-    def _polling_loop(self):
-        """Background polling loop - checks for new games every 30 seconds"""
-        # Wait a bit before starting to let the initial connection settle
-        time.sleep(10)
-
-        while not self._stop_polling.is_set():
-            # Sleep for 30 seconds (or until stopped)
-            if self._stop_polling.wait(timeout=30):
-                break  # Event was set, exit loop
-
-            try:
-                # Skip if not connected or no timestamp yet
-                if not (self.romm_client and self.romm_client.authenticated):
-                    continue
-                if self._last_full_fetch_time is None:
-                    continue
-
-                # Fetch only ROMs updated since last check
-                download_dir = Path(self.rom_dir_row.get_text())
-                new_roms_data = self.romm_client.get_roms(
-                    limit=1000,
-                    offset=0,
-                    updated_after=self._last_full_fetch_time
-                )
-
-                if not new_roms_data or len(new_roms_data) != 2:
-                    continue
-
-                new_roms, _ = new_roms_data
-
-                if new_roms:
-                    # Process new/updated ROMs
-                    existing_games_map = {g['rom_id']: g for g in self.available_games if 'rom_id' in g}
-                    new_count = 0
-                    updated_count = 0
-
-                    for rom in new_roms:
-                        rom_id = rom.get('id')
-                        was_existing = rom_id in existing_games_map
-
-                        processed_game = self.process_single_rom(rom, download_dir)
-                        existing_games_map[rom_id] = processed_game
-
-                        if was_existing:
-                            updated_count += 1
-                        else:
-                            new_count += 1
-
-                    # Update the games list
-                    updated_games = list(existing_games_map.values())
-                    updated_games = self.library_section.sort_games_consistently(updated_games)
-
-                    def update_ui():
-                        self.available_games = updated_games
-                        if hasattr(self, 'library_section'):
-                            self.library_section.update_games_library(updated_games)
-                        return False
-
-                    GLib.idle_add(update_ui)
-
-                    # Update timestamp
-                    self._last_full_fetch_time = datetime.datetime.now(timezone.utc).isoformat()
-
-                    if new_count > 0 or updated_count > 0:
-                        def log_update():
-                            self.log_message(f"📡 Auto-detected {new_count} new, {updated_count} updated games")
-                            return False
-                        GLib.idle_add(log_update)
-
-            except Exception as e:
-                # Log errors but don't crash the polling thread
-                def log_error():
-                    self.log_message(f"📡 Polling error: {e}")
-                    return False
-                GLib.idle_add(log_error)
-
-        self.log_message("📡 Polling loop exited")
 
     def scan_local_games_only(self, download_dir):
         """Enhanced local game scanning that handles both slug and full platform names"""

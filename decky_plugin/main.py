@@ -40,7 +40,7 @@ try:
     from sync_core import (
         SettingsManager, RomMClient, RetroArchInterface,
         AutoSyncManager, CollectionSyncManager,
-        GameListPollingManager, BiosTrackingManager,
+        BiosTrackingManager,
         SteamShortcutManager, CoverArtManager,
         build_sync_status, is_path_validly_downloaded, detect_retrodeck,
     )
@@ -132,8 +132,6 @@ class Plugin:
     # Timestamp for efficient polling with updated_after parameter
     _last_full_fetch_time: str = None  # ISO 8601 datetime of last full data fetch
 
-    # New manager instances (handle polling and BIOS tracking)
-    _game_polling: 'GameListPollingManager' = None
     _bios_tracking: 'BiosTrackingManager' = None
     _steam_manager: 'SteamShortcutManager' = None
 
@@ -202,9 +200,6 @@ class Plugin:
             self._retry_thread.join(timeout=5)
 
         # Stop managers
-        if self._game_polling:
-            self._game_polling.stop()
-            self._game_polling = None
         if self._bios_tracking:
             # No explicit stop needed (downloads run to completion)
             self._bios_tracking = None
@@ -323,20 +318,9 @@ class Plugin:
                     })
                 logging.info(f"Loaded {len(self._available_games)} games")
 
-                # Set initial timestamp for efficient future polling
                 self._last_full_fetch_time = datetime.now(timezone.utc).isoformat()
-
-                # Initialize GameListPollingManager
-                self._game_polling = GameListPollingManager(
-                    romm_client=self._romm_client,
-                    settings=self._settings,
-                    available_games_list=self._available_games,
-                    platform_slug_to_name=self._platform_slug_to_name,
-                    log_callback=lambda msg: logging.info(f"[POLLING] {msg}"),
-                    update_callback=None,  # Optional: add callback if needed
-                )
-                self._game_polling.set_last_poll_time(self._last_full_fetch_time)
-                self._game_polling.start()
+                # Library is fetched on connect and on manual refresh (the reference
+                # client's on-demand model) — no background polling.
 
                 # Initialize BiosTrackingManager
                 self._bios_tracking = BiosTrackingManager(
@@ -755,10 +739,7 @@ class Plugin:
                         })
                     logging.info(f"Full refresh: loaded {len(self._available_games)} games")
 
-            # Update timestamp for both local tracking and polling manager
             self._last_full_fetch_time = current_time
-            if self._game_polling:
-                self._game_polling.set_last_poll_time(current_time)
 
             # Get updated status
             status = await self.get_service_status()
