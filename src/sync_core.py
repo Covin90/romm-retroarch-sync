@@ -1617,6 +1617,9 @@ class RomMClient:
                 params = {
                     'limit': limit,
                     'offset': offset,
+                    # RomM 4.9.0 made file expansion opt-in (with_files defaults to
+                    # False); without this the `files` field comes back empty.
+                    'with_files': 'true',
                     'fields': 'id,name,fs_name,platform_name,platform_slug,files,multi,path_cover_large,path_cover_small'
                 }
 
@@ -1701,7 +1704,9 @@ class RomMClient:
                 urljoin(self.base_url, '/api/roms'),
                 params={
                     'collection_id': collection_id,
-                    'fields': 'id,name,fs_name,fs_extension,platform_name,platform_slug,files,multi,path_cover_large,path_cover_small,siblings,rom_user'
+                    # RomM 4.9.0: file expansion is opt-in (with_files default False).
+                    'with_files': 'true',
+                    'fields': 'id,name,fs_name,fs_extension,platform_name,platform_slug,files,multi,path_cover_large,path_cover_small,sibling_roms,rom_user'
                 },
                 timeout=30
             )
@@ -1732,13 +1737,14 @@ class RomMClient:
             List of ROMs with siblings grouped under _sibling_files
         """
         # Group sibling ROMs (regional variants, etc.) under a main ROM
-        # ROMs with 'siblings' arrays are related regional/language variants
+        # ROMs with 'sibling_roms' arrays are related regional/language variants
+        # (RomM 4.9.0 renamed this field from 'siblings' to 'sibling_roms')
         sibling_groups = {}  # Map of group_key -> list of ROMs in that group
         standalone_roms = []  # ROMs without siblings
 
         # First pass: build sibling groups
         for rom in items:
-            siblings_list = rom.get('siblings', [])
+            siblings_list = rom.get('sibling_roms', [])
             rom_id = rom.get('id')
 
             if siblings_list:
@@ -1889,7 +1895,9 @@ class RomMClient:
                     params={
                         'limit': page_size,
                         'offset': offset,
-                        'fields': 'id,name,fs_name,fs_extension,platform_name,platform_slug,files,multi,path_cover_large,path_cover_small,siblings,rom_user'
+                        # RomM 4.9.0: file expansion is opt-in (with_files default False).
+                        'with_files': 'true',
+                        'fields': 'id,name,fs_name,fs_extension,platform_name,platform_slug,files,multi,path_cover_large,path_cover_small,sibling_roms,rom_user'
                     },
                     timeout=60
                 )
@@ -2153,14 +2161,15 @@ class RomMClient:
                 # Extract from temporary file
                 try:
                     with zipfile.ZipFile(temp_path, 'r') as zip_ref:
-                        # Filter out .m3u files (playlist files that don't exist in RomM)
-                        # and other non-ROM files that might cause download errors
-                        excluded_extensions = {'.m3u', '.m3u8'}
-
+                        # Extract everything, INCLUDING the .m3u playlist. RomM's
+                        # download endpoint generates a "<fs_name>.m3u" inside the zip
+                        # for multi-disc/multi-file ROMs (listing the disc .chd/.cue
+                        # files). RetroArch needs that playlist to boot multi-disc
+                        # games and to swap discs — without it, the game lands on the
+                        # console BIOS. (Previously these were stripped on the false
+                        # assumption that RomM doesn't provide them.)
                         for member in zip_ref.namelist():
-                            # Skip files with excluded extensions
-                            if not any(member.lower().endswith(ext) for ext in excluded_extensions):
-                                zip_ref.extract(member, download_path)
+                            zip_ref.extract(member, download_path)
                 finally:
                     # Clean up temporary file
                     if temp_path and os.path.exists(temp_path):
@@ -2484,7 +2493,7 @@ class RomMClient:
             logging.warning(f"Error confirming download: {e}")
             return False
 
-    def download_save_by_id(self, save_id, save_type, download_path, device_id=None, fallback_url=None):
+    def download_save_by_id(self, save_id, save_type, download_path, device_id=None, fallback_url=None, session_id=None):
         """Download a specific save/state by its ID.
 
         Args:
@@ -2503,6 +2512,8 @@ class RomMClient:
             download_url = urljoin(self.base_url, f"/api/{save_type}/{save_id}/content")
             if device_id:
                 download_url += f"?device_id={device_id}&optimistic=true"
+                if session_id:
+                    download_url += f"&session_id={session_id}"
 
             response = self.session.get(download_url, stream=True, timeout=30)
             used_device_id = True
@@ -2726,10 +2737,6 @@ class RomMClient:
         import re
         suffix = Path(file_path).suffix.lower()
 
-        # Battery saves — no slot, no cleanup
-        if suffix in ('.srm', '.sav'):
-            return None, False, None
-
         # Numbered state slots: .state1 through .state9
         match = re.match(r'\.state(\d+)$', suffix)
         if match:
@@ -2739,9 +2746,118 @@ class RomMClient:
         if 'state' in suffix:
             return "quicksave", True, 10
 
+        # Battery / memory-card saves (.srm, .sav, .mcr, .eep, ...): one logical save
+        # channel per ROM. RomM 4.9.0's save-sync engine ignores slot=None rows
+        # (slot_not_null filter), so a stable non-null slot is required for them to
+        # sync. Use the extension (sans dot) — stable across devices and distinct
+        # between battery types (e.g. .srm vs .mcr) so they don't collide on
+        # (rom_id, slot). Bounded history keeps the per-slot row count in check.
+        if suffix:
+            return suffix.lstrip('.'), True, 10
+
         return None, False, None
 
-    def upload_save(self, rom_id, save_type, file_path, emulator=None, device_id=None, overwrite=False, slot=None, autocleanup=False, autocleanup_limit=None):
+    @staticmethod
+    def compute_content_hash(file_path):
+        """Compute a save file's content hash matching RomM 4.9.0's save-sync engine.
+
+        Must byte-for-byte match the server (backend assets_handler.compute_content_hash)
+        or the /negotiate engine flags every save as a conflict. The server uses MD5:
+          - Plain files: md5 of the raw bytes, read in 8192-byte chunks.
+          - Zip files: per-entry "name:md5(content)" lines (entries sorted by name,
+            directories skipped) joined by "\\n", then md5 of that combined string.
+        RetroArch saves (.srm/.state) are plain files; the zip branch mirrors the
+        server for completeness.
+
+        Returns the hex digest string, or None on error.
+        """
+        import zipfile
+        import hashlib
+        try:
+            file_path = Path(file_path)
+            if zipfile.is_zipfile(file_path):
+                with zipfile.ZipFile(file_path, 'r') as zf:
+                    file_hashes = []
+                    for name in sorted(zf.namelist()):
+                        if not name.endswith('/'):
+                            content = zf.read(name)
+                            file_hash = hashlib.md5(content, usedforsecurity=False).hexdigest()
+                            file_hashes.append(f"{name}:{file_hash}")
+                    combined = "\n".join(file_hashes)
+                    return hashlib.md5(combined.encode(), usedforsecurity=False).hexdigest()
+
+            hash_obj = hashlib.md5(usedforsecurity=False)
+            with open(file_path, 'rb') as f:
+                while chunk := f.read(8192):
+                    hash_obj.update(chunk)
+            return hash_obj.hexdigest()
+        except Exception as e:
+            logging.debug(f"Failed to compute content hash for {file_path}: {e}")
+            return None
+
+    def negotiate_sync(self, device_id, saves):
+        """Negotiate a save-sync session with RomM 4.9.0's engine.
+
+        Args:
+            device_id: This device's registered ID (must be sync_enabled server-side).
+            saves: list of ClientSaveState dicts (see AutoSyncManager.build_sync_inventory).
+                   Keys beginning with '_' are stripped before sending (local-only data).
+
+        Returns:
+            (session_id, operations) on success, or (None, []) on failure.
+            Each operation is a dict with action in {upload, download, conflict, no_op}.
+        """
+        if not self.ensure_authenticated() or not device_id:
+            return None, []
+
+        # Strip local-only keys (e.g. '_path') the server doesn't expect.
+        clean_saves = [
+            {k: v for k, v in s.items() if not k.startswith('_')}
+            for s in saves
+        ]
+
+        try:
+            response = self.session.post(
+                urljoin(self.base_url, '/api/sync/negotiate'),
+                json={'device_id': device_id, 'saves': clean_saves},
+                timeout=30
+            )
+            if response.status_code == 200:
+                data = response.json()
+                return data.get('session_id'), data.get('operations', [])
+
+            logging.warning(f"Sync negotiate failed: HTTP {response.status_code}: {response.text[:300]}")
+            return None, []
+        except Exception as e:
+            logging.warning(f"Error during sync negotiate: {e}")
+            return None, []
+
+    def complete_sync_session(self, session_id, play_sessions=None):
+        """Mark a sync session complete (optionally ingesting play sessions).
+
+        Returns True on success, False otherwise.
+        """
+        if not self.ensure_authenticated() or not session_id:
+            return False
+
+        try:
+            payload = {}
+            if play_sessions:
+                payload['play_sessions'] = play_sessions
+            response = self.session.post(
+                urljoin(self.base_url, f'/api/sync/sessions/{session_id}/complete'),
+                json=payload,
+                timeout=15
+            )
+            if response.status_code == 200:
+                return True
+            logging.warning(f"Complete sync session {session_id} failed: HTTP {response.status_code}")
+            return False
+        except Exception as e:
+            logging.warning(f"Error completing sync session {session_id}: {e}")
+            return False
+
+    def upload_save(self, rom_id, save_type, file_path, emulator=None, device_id=None, overwrite=False, slot=None, autocleanup=False, autocleanup_limit=None, session_id=None):
         """Upload save file using RomM naming convention with timestamps"""
         if not self.ensure_authenticated():
             return False
@@ -2761,10 +2877,12 @@ class RomMClient:
                 params.append(f'emulator={emulator}')
             if device_id:
                 params.append(f'device_id={device_id}')
+            if session_id:
+                params.append(f'session_id={session_id}')
             if overwrite:
                 params.append('overwrite=true')
             if slot:
-                params.append(f'slot={slot}')
+                params.append(f'slot={quote(str(slot))}')
             if autocleanup:
                 params.append('autocleanup=true')
                 if autocleanup_limit:
@@ -2953,7 +3071,7 @@ class RomMClient:
             logging.error(f"Error in screenshot upload: {e}")
             return False
 
-    def upload_save_and_get_id(self, rom_id, save_type, file_path, emulator=None, device_id=None, overwrite=False, slot=None, autocleanup=False, autocleanup_limit=None):
+    def upload_save_and_get_id(self, rom_id, save_type, file_path, emulator=None, device_id=None, overwrite=False, slot=None, autocleanup=False, autocleanup_limit=None, session_id=None):
         try:
             file_path = Path(file_path)
 
@@ -2963,10 +3081,12 @@ class RomMClient:
                 params.append(f'emulator={emulator}')
             if device_id:
                 params.append(f'device_id={device_id}')
+            if session_id:
+                params.append(f'session_id={session_id}')
             if overwrite:
                 params.append('overwrite=true')
             if slot:
-                params.append(f'slot={slot}')
+                params.append(f'slot={quote(str(slot))}')
             if autocleanup:
                 params.append('autocleanup=true')
                 if autocleanup_limit:
@@ -3604,7 +3724,7 @@ class RetroArchInterface:
         # Platform to core mapping
         self.platform_core_map = {
             'Super Nintendo Entertainment System': ['snes9x', 'bsnes', 'mesen-s'],
-            'PlayStation': ['beetle_psx', 'beetle_psx_hw', 'pcsx_rearmed', 'swanstation'],
+            'PlayStation': ['pcsx_rearmed', 'swanstation', 'beetle_psx', 'beetle_psx_hw'],
             'Nintendo Entertainment System': ['nestopia', 'fceumm', 'mesen'],
             'Game Boy': ['gambatte', 'sameboy', 'tgbdual'],
             'Game Boy Color': ['gambatte', 'sameboy', 'tgbdual'],
@@ -3620,7 +3740,7 @@ class RetroArchInterface:
             'Nintendo GameCube': ['dolphin'],
             'Sega Dreamcast': ['flycast', 'redream'],
             'Atari 2600': ['stella'],
-            'Sony - PlayStation': ['beetle_psx', 'beetle_psx_hw', 'pcsx_rearmed', 'swanstation'],
+            'Sony - PlayStation': ['pcsx_rearmed', 'swanstation', 'beetle_psx', 'beetle_psx_hw'],
             'Sony - PlayStation 2': ['pcsx2', 'play'],
             'Sony - PlayStation Portable': ['ppsspp'],
             'Nintendo - Nintendo 3DS': ['citra'],
@@ -3975,9 +4095,14 @@ class RetroArchInterface:
             'gb': ['gambatte', 'sameboy', 'tgbdual'],
             'playstation 2': ['pcsx2', 'play'],
             'ps2': ['pcsx2', 'play'],
-            'playstation': ['beetle_psx', 'beetle_psx_hw', 'mednafen_psx_hw', 'mednafen_psx', 'pcsx_rearmed', 'swanstation'],
-            'psx': ['beetle_psx', 'beetle_psx_hw', 'mednafen_psx_hw', 'mednafen_psx', 'pcsx_rearmed', 'swanstation'],
-            'ps1': ['beetle_psx', 'beetle_psx_hw', 'mednafen_psx_hw', 'mednafen_psx', 'pcsx_rearmed', 'swanstation'],
+            # Prefer SOFTWARE-rendered PSX cores first. The hardware-renderer
+            # variants (*_hw) require a conformant Vulkan/GL driver and boot to a
+            # black screen / BIOS on systems without one (e.g. mesa radv flagged as
+            # "not a conformant Vulkan implementation"). Software cores run anywhere,
+            # so they're the safe automatic default; _hw cores are last-resort.
+            'playstation': ['pcsx_rearmed', 'swanstation', 'beetle_psx', 'mednafen_psx', 'beetle_psx_hw', 'mednafen_psx_hw'],
+            'psx': ['pcsx_rearmed', 'swanstation', 'beetle_psx', 'mednafen_psx', 'beetle_psx_hw', 'mednafen_psx_hw'],
+            'ps1': ['pcsx_rearmed', 'swanstation', 'beetle_psx', 'mednafen_psx', 'beetle_psx_hw', 'mednafen_psx_hw'],
             'genesis': ['genesis_plus_gx', 'blastem', 'picodrive'],
             'mega drive': ['genesis_plus_gx', 'blastem', 'picodrive'],
             'nintendo ds': ['desmume', 'melonds', 'melondsds'],
@@ -5572,7 +5697,24 @@ class AutoSyncManager:
                 elif is_content_label and (game_stem == rom_stem or game.get('name', '') == rom_stem):
                     matching_game = game
                     break
-                
+
+                # Multi-disc / multi-file ROMs: the launched content (e.g.
+                # "Final Fantasy VII (Europe) (Disc 1)") is one entry in the parent
+                # ROM's `files` array, not its fs_name. Match against those files so
+                # multi-disc games don't fall through to the destructive fallback.
+                # (Requires with_files=true on the ROM list — see get_roms.)
+                rom_files = (game.get('romm_data') or {}).get('files') or []
+                for rf in rom_files:
+                    rf_name = rf.get('file_name', '')
+                    if not rf_name:
+                        continue
+                    if (rom_filename and rf_name == rom_filename) or \
+                       (Path(rf_name).stem == rom_stem):
+                        matching_game = game
+                        break
+                if matching_game:
+                    break
+
                 # Check regional variants (_sibling_files)
                 if game.get('_sibling_files'):
                     for sibling in game['_sibling_files']:
@@ -5608,8 +5750,14 @@ class AutoSyncManager:
                 self.log(f"📥 Syncing saves for: {matching_game.get('name')}")
                 self.download_saves_for_specific_game(matching_game)
             else:
-                self.log(f"⚠️ ROM not in library - downloading all recent saves as fallback")
-                self.sync_recent_saves()
+                # Do NOT fall back to sync_recent_saves() here: that downloads and
+                # overwrites local saves for EVERY locally-present game, which is
+                # both wrong (we only care about the launched ROM) and dangerous —
+                # especially after a RomM upgrade bumps every save's updated_at,
+                # making the legacy "server is newer" check clobber local saves.
+                # Better to do nothing than to touch unrelated games.
+                self.log(f"⚠️ ROM not in library ({rom_stem!r}) - skipping pre-launch sync "
+                         f"(no destructive recent-saves fallback)")
                 
         except Exception as e:
             self.log(f"❌ ROM-specific sync error: {e}")
@@ -5798,8 +5946,27 @@ class AutoSyncManager:
 
             # Determine save type and slot info
             if file_path.suffix.lower() in ['.srm', '.sav']:
-                save_type = 'saves'
-                thumbnail_path = None  # Save files typically don't have thumbnails
+                # SAVES: route through RomM 4.9.0's /negotiate engine (server-side
+                # conflict detection + per-device attribution) instead of the legacy
+                # push-and-409 flow. States are NOT engine-managed and fall through.
+                status = self.sync_single_save(file_path, rom_id)
+                if status in ('uploaded', 'in_sync', 'downloaded', 'conflict'):
+                    self.last_uploaded[str(file_path)] = current_fingerprint
+                    self._save_upload_fingerprints()
+                    if status == 'uploaded':
+                        self.log(f"✅ Synced {file_path.name} → server")
+                        self.retroarch.send_notification("Save uploaded")
+                    elif status == 'downloaded':
+                        self.log(f"⬇️ Pulled newer server save for {file_path.name}")
+                        self.retroarch.send_notification("Save updated from server")
+                    elif status == 'conflict':
+                        self.retroarch.send_notification(f"Sync conflict: {file_path.name}")
+                    else:
+                        self.log(f"✓ {file_path.name} already in sync")
+                else:
+                    self.log(f"❌ Save-sync failed for {file_path.name}")
+                    self.retroarch.send_notification(f"Sync failed: {file_path.name}")
+                return
             elif 'state' in file_path.suffix.lower():
                 save_type = 'states'
                 # Look for thumbnail for save states
@@ -5864,6 +6031,369 @@ class AutoSyncManager:
                 
         except Exception as e:
             self.log(f"❌ Upload error for {file_path}: {e}")
+
+    def sync_single_save(self, file_path, rom_id):
+        """Sync one battery/memory-card save via RomM 4.9.0's /negotiate engine.
+
+        Replaces the legacy push-and-409 path for SAVES (states stay on the old
+        upload flow — the engine is saves-only). Returns one of:
+        'uploaded' | 'in_sync' | 'downloaded' | 'conflict' | 'error'.
+
+        On 'download' the server copy (newer since last sync) overwrites the local
+        file. On 'conflict' (both sides changed) the local file is backed up first,
+        then the server copy is pulled — never silently lose local work.
+        """
+        import datetime as _dt
+        file_path = Path(file_path)
+
+        device_id = self.settings.get('Device', 'device_id', '') or None
+        if not device_id:
+            self.log("⚠️ Save-sync: no device_id; falling back is not available for saves")
+            return 'error'
+
+        slot, autocleanup, limit = RomMClient.get_slot_info(file_path)
+        emulator = self.retroarch.get_emulator_info_from_path(file_path).get('romm_emulator')
+        stat = file_path.stat()
+        client_save = {
+            'rom_id': rom_id,
+            'file_name': file_path.name,
+            'slot': slot,
+            'emulator': emulator,
+            'content_hash': RomMClient.compute_content_hash(file_path),
+            'updated_at': _dt.datetime.fromtimestamp(stat.st_mtime, tz=_dt.timezone.utc).isoformat(),
+            'file_size_bytes': stat.st_size,
+        }
+
+        session_id, operations = self.romm_client.negotiate_sync(device_id, [client_save])
+        if session_id is None:
+            return 'error'
+
+        # Only act on the op for THIS file; a single-file negotiate may also return
+        # download ops for unrelated server saves — those belong to a full sync.
+        op = next((o for o in operations
+                   if o.get('rom_id') == rom_id and o.get('slot') == slot), None)
+        action = op.get('action') if op else 'no_op'
+        status = 'error'
+
+        try:
+            if action == 'no_op':
+                status = 'in_sync'
+            elif action == 'upload':
+                ok = self.romm_client.upload_save(
+                    rom_id, 'saves', file_path, emulator=emulator, device_id=device_id,
+                    slot=slot, autocleanup=autocleanup, autocleanup_limit=limit,
+                    session_id=session_id,
+                )
+                status = 'uploaded' if ok is True else 'error'
+            elif action == 'download':
+                # Server is newer since last sync — pull it over local.
+                ok = self.romm_client.download_save_by_id(
+                    op.get('save_id'), 'saves', file_path,
+                    device_id=device_id, session_id=session_id,
+                )
+                status = 'downloaded' if ok else 'error'
+            elif action == 'conflict':
+                # Both sides changed since last sync. Resolve per the user's
+                # overwrite-behavior preference (local / server / ask). Local is
+                # ALWAYS backed up first so no version is ever lost, whatever the
+                # choice.
+                backup = file_path.with_suffix(
+                    file_path.suffix + f".local-{_dt.datetime.now().strftime('%Y%m%d-%H%M%S')}")
+                shutil.copy2(file_path, backup)
+                choice = self._resolve_save_conflict(op, file_path)
+                self.log(f"⚠️ Conflict on {file_path.name}: resolved as '{choice}' (local backed up to {backup.name})")
+
+                if choice == 'local':
+                    ok = self.romm_client.upload_save(
+                        rom_id, 'saves', file_path, emulator=emulator, device_id=device_id,
+                        slot=slot, overwrite=True, autocleanup=autocleanup,
+                        autocleanup_limit=limit, session_id=session_id,
+                    )
+                    status = 'uploaded' if ok is True else 'error'
+                else:
+                    # 'server' (or any deferred/unknown choice) — pull server copy.
+                    ok = self.romm_client.download_save_by_id(
+                        op.get('save_id'), 'saves', file_path,
+                        device_id=device_id, session_id=session_id,
+                    )
+                    status = 'conflict' if ok else 'error'
+        finally:
+            self.romm_client.complete_sync_session(session_id)
+
+        return status
+
+    def _resolve_save_conflict(self, op, local_path):
+        """Decide how to resolve a save conflict: 'local' or 'server'.
+
+        Maps the user's existing overwrite-behavior preference:
+          - "Always prefer local"          -> 'local'
+          - "Always download from server"  -> 'server'
+          - "Smart (prefer newer)"         -> newer of local mtime vs server_updated_at
+          - "Ask each time"                -> modal dialog (GTK); 'server' if unavailable
+        Defaults to 'server' (safe: local is always backed up by the caller).
+        """
+        pref = "Smart (prefer newer)"
+        if self.parent_window and hasattr(self.parent_window, 'get_overwrite_behavior'):
+            try:
+                pref = self.parent_window.get_overwrite_behavior()
+            except Exception:
+                pass
+
+        if pref == "Always prefer local":
+            return 'local'
+        if pref == "Always download from server":
+            return 'server'
+        if pref == "Ask each time":
+            return self._ask_conflict_dialog(op, local_path)
+
+        # Smart (prefer newer): compare local mtime to server's updated_at.
+        import datetime as _dt
+        try:
+            local_ts = Path(local_path).stat().st_mtime
+            sv = op.get('server_updated_at')
+            server_ts = 0.0
+            if sv:
+                sdt = _dt.datetime.fromisoformat(sv.replace('Z', '+00:00'))
+                if sdt.tzinfo is None:
+                    sdt = sdt.replace(tzinfo=_dt.timezone.utc)
+                server_ts = sdt.timestamp()
+            return 'local' if local_ts >= server_ts else 'server'
+        except Exception:
+            return 'server'
+
+    def _ask_conflict_dialog(self, op, local_path):
+        """Prompt the user to resolve a save conflict on the main thread.
+
+        Returns 'local' or 'server'. Falls back to 'server' when GTK/Adw is not
+        available (e.g. headless / Decky), since the local copy is backed up.
+        """
+        try:
+            from gi.repository import Adw as _Adw
+        except Exception:
+            return 'server'
+
+        import threading as _th
+        done = _th.Event()
+        choice = ['server']
+        name = Path(local_path).name
+        server_when = op.get('server_updated_at') or 'unknown'
+
+        def ask():
+            try:
+                dialog = _Adw.AlertDialog.new(
+                    "Save Conflict",
+                    f"Both this device and the server changed “{name}” since the last sync.\n\n"
+                    f"Server version: {server_when}\n\n"
+                    f"Your local copy has been backed up either way. Which version should win?"
+                )
+                dialog.add_response("server", "Use Server")
+                dialog.add_response("local", "Keep Local")
+                dialog.set_default_response("server")
+
+                def on_response(_d, response):
+                    choice[0] = response if response in ('local', 'server') else 'server'
+                    done.set()
+
+                dialog.connect('response', on_response)
+                parent = getattr(self.parent_window, 'window', None) or self.parent_window
+                dialog.present(parent)
+            except Exception:
+                done.set()
+
+        _idle_add(ask)
+        # Avoid blocking forever if the UI never responds.
+        done.wait(timeout=120)
+        return choice[0]
+
+    def build_sync_inventory(self):
+        """Build the local save inventory for RomM 4.9.0's /api/sync/negotiate.
+
+        Returns a list of ClientSaveState dicts:
+            {rom_id, file_name, slot, emulator, content_hash, updated_at}
+        one per local save file that maps to a known ROM. The save-sync engine
+        is SAVES-ONLY (states stay on the legacy flow), so only the 'saves'
+        bucket from RetroArchInterface.get_save_files() is walked.
+
+        updated_at is the file mtime as a UTC ISO-8601 string; slot/content_hash
+        mirror exactly what the server keys/compares on.
+        """
+        import datetime as _dt
+
+        inventory = []
+        save_files = self.retroarch.get_save_files() or {}
+        for entry in save_files.get('saves', []):
+            path = Path(entry['path'])
+            rom_id = self.find_rom_id_for_save_file(path)
+            if not rom_id:
+                # Unmatched local save — server can't pair it; skip rather than
+                # uploading against a guessed ROM.
+                continue
+
+            slot, _autocleanup, _limit = RomMClient.get_slot_info(path)
+            content_hash = RomMClient.compute_content_hash(path)
+            stat = path.stat()
+            updated_at = _dt.datetime.fromtimestamp(
+                entry.get('modified') or stat.st_mtime,
+                tz=_dt.timezone.utc,
+            ).isoformat()
+
+            inventory.append({
+                'rom_id': rom_id,
+                'file_name': entry['name'],
+                'slot': slot,
+                'emulator': entry.get('retroarch_emulator'),
+                'content_hash': content_hash,
+                'updated_at': updated_at,
+                'file_size_bytes': stat.st_size,
+                # Local-only fields (stripped before negotiate; used by the executor)
+                '_path': entry['path'],
+                '_autocleanup': _autocleanup,
+                '_autocleanup_limit': _limit,
+            })
+
+        return inventory
+
+    def run_negotiated_save_sync(self, conflict_resolver=None):
+        """Run one save-sync cycle via RomM 4.9.0's /negotiate engine (SAVES ONLY).
+
+        Builds the local inventory, negotiates with the server, then executes the
+        returned operations:
+          - upload   -> push the local file (with session_id for attribution)
+          - download -> pull the server save into the RetroArch saves dir
+          - conflict -> defer to conflict_resolver(op) -> 'local'|'server'|'skip'
+                        (default: 'skip' — never auto-clobber; collected for UI)
+          - no_op    -> nothing
+        Finally marks the session complete.
+
+        Returns a summary dict: {uploaded, downloaded, conflicts, no_op, errors, session_id}.
+        """
+        summary = {'uploaded': 0, 'downloaded': 0, 'conflicts': [], 'no_op': 0,
+                   'errors': 0, 'session_id': None}
+
+        if not self.romm_client or not self.romm_client.authenticated:
+            self.log("⚠️ Save-sync: not connected")
+            return summary
+
+        device_id = self.settings.get('Device', 'device_id', '') or None
+        if not device_id:
+            self.log("⚠️ Save-sync: no device_id registered")
+            return summary
+
+        inventory = self.build_sync_inventory()
+        session_id, operations = self.romm_client.negotiate_sync(device_id, inventory)
+        summary['session_id'] = session_id
+        if session_id is None:
+            self.log("⚠️ Save-sync: negotiate failed")
+            return summary
+
+        # Lookup local inventory entry by (rom_id, slot) for upload operations.
+        inv_by_key = {(e['rom_id'], e['slot']): e for e in inventory}
+        saves_dir = self.retroarch.save_dirs.get('saves')
+
+        for op in operations:
+            action = op.get('action')
+            rom_id = op.get('rom_id')
+            slot = op.get('slot')
+            try:
+                if action == 'no_op':
+                    summary['no_op'] += 1
+
+                elif action == 'upload':
+                    entry = inv_by_key.get((rom_id, slot))
+                    if not entry:
+                        self.log(f"⚠️ Save-sync: no local file for upload op rom={rom_id} slot={slot!r}")
+                        summary['errors'] += 1
+                        continue
+                    ok = self.romm_client.upload_save(
+                        rom_id, 'saves', entry['_path'],
+                        emulator=entry.get('emulator'), device_id=device_id,
+                        slot=slot, autocleanup=entry.get('_autocleanup', False),
+                        autocleanup_limit=entry.get('_autocleanup_limit'),
+                        session_id=session_id,
+                    )
+                    if ok is True:
+                        summary['uploaded'] += 1
+                    else:
+                        summary['errors'] += 1
+
+                elif action == 'download':
+                    target = self._resolve_download_target(op, saves_dir)
+                    ok = self.romm_client.download_save_by_id(
+                        op.get('save_id'), 'saves', target,
+                        device_id=device_id, session_id=session_id,
+                    )
+                    if ok:
+                        summary['downloaded'] += 1
+                    else:
+                        summary['errors'] += 1
+
+                elif action == 'conflict':
+                    # Default to the user's overwrite-behavior preference (back up
+                    # local first so nothing is lost); an explicit resolver overrides.
+                    entry = inv_by_key.get((rom_id, slot))
+                    if conflict_resolver:
+                        choice = conflict_resolver(op)
+                    elif entry:
+                        try:
+                            shutil.copy2(entry['_path'], Path(entry['_path']).with_suffix(
+                                Path(entry['_path']).suffix +
+                                f".local-{__import__('datetime').datetime.now().strftime('%Y%m%d-%H%M%S')}"))
+                        except Exception:
+                            pass
+                        choice = self._resolve_save_conflict(op, entry['_path'])
+                    else:
+                        choice = 'skip'
+                    if choice == 'local':
+                        entry = inv_by_key.get((rom_id, slot))
+                        if entry and self.romm_client.upload_save(
+                            rom_id, 'saves', entry['_path'], emulator=entry.get('emulator'),
+                            device_id=device_id, slot=slot, overwrite=True,
+                            autocleanup=entry.get('_autocleanup', False),
+                            autocleanup_limit=entry.get('_autocleanup_limit'),
+                            session_id=session_id,
+                        ) is True:
+                            summary['uploaded'] += 1
+                        else:
+                            summary['errors'] += 1
+                    elif choice == 'server':
+                        target = self._resolve_download_target(op, saves_dir)
+                        if self.romm_client.download_save_by_id(
+                            op.get('save_id'), 'saves', target,
+                            device_id=device_id, session_id=session_id):
+                            summary['downloaded'] += 1
+                        else:
+                            summary['errors'] += 1
+                    else:
+                        # Defer — record for UI resolution, leave both sides untouched.
+                        summary['conflicts'].append(op)
+            except Exception as e:
+                self.log(f"❌ Save-sync op {action} rom={rom_id} failed: {e}")
+                summary['errors'] += 1
+
+        self.romm_client.complete_sync_session(session_id)
+        self.log(f"🔄 Save-sync: {summary['uploaded']} up, {summary['downloaded']} down, "
+                 f"{len(summary['conflicts'])} conflict(s), {summary['no_op']} in-sync, "
+                 f"{summary['errors']} error(s)")
+        return summary
+
+    def _resolve_download_target(self, op, saves_dir):
+        """Resolve the local RetroArch path for a server save download operation.
+
+        Places the file in the saves dir, inside the emulator's core subdirectory
+        when that emulator maps to a known directory, with the filename converted
+        back to RetroArch's expected form.
+        """
+        target_dir = Path(saves_dir)
+        emulator = op.get('emulator')
+        if emulator:
+            mapped = self.retroarch.emulator_directory_map.get(emulator.lower())
+            if mapped:
+                target_dir = target_dir / mapped
+        target_dir.mkdir(parents=True, exist_ok=True)
+        local_name = self.retroarch.convert_to_retroarch_filename(
+            op.get('file_name', ''), 'saves', target_dir, op.get('slot')
+        )
+        return target_dir / local_name
 
     def find_rom_id_for_save_file(self, file_path):
         """Find ROM ID by matching save filename to game library"""
@@ -6258,16 +6788,34 @@ class AutoSyncManager:
                 return None
 
             def should_download_file(local_path, server_file, file_type):
-                """Determine if we should download based on metadata timestamps only"""
+                """Determine if we should download.
+
+                Content hash (RomM 4.9.0's save-sync signal) is checked FIRST: if the
+                local file and the server's content_hash are identical, the save is
+                already in sync — skip regardless of timestamps. This is essential
+                because RomM 4.9.0's content-hash recompute bumped every save's
+                updated_at to the upgrade date, which would otherwise make the legacy
+                timestamp comparison think the server is always newer and clobber
+                every local save on launch. Only when content differs do we fall back
+                to timestamp comparison / user preference.
+                """
                 if not local_path.exists():
                     return True, f"Local {file_type} doesn't exist"
-                
+
+                # Content-hash short-circuit (mirrors negotiate's "Content is identical").
+                server_hash = server_file.get('content_hash') if isinstance(server_file, dict) else None
+                if server_hash:
+                    local_hash = RomMClient.compute_content_hash(local_path)
+                    if local_hash and local_hash == server_hash:
+                        self.log(f"     → Content identical (hash match), skipping {file_type}")
+                        return False, f"{file_type} content is identical (hash match)"
+
                 if overwrite_behavior == "Always prefer local":
                     return False, f"User preference: always prefer local {file_type}"
-                
+
                 if overwrite_behavior == "Always download from server":
                     return True, f"User preference: always download from server"
-                
+
                 # Get local file timestamp
                 local_mtime = local_path.stat().st_mtime
                 local_dt = datetime.datetime.fromtimestamp(local_mtime, tz=datetime.timezone.utc)
@@ -7284,7 +7832,7 @@ class CollectionSyncManager:
         """
         from urllib.parse import urljoin
 
-        siblings = rom.get('siblings', [])
+        siblings = rom.get('sibling_roms', [])
         if not siblings:
             # No sibling data — try fetching ROM details to find the parent
             try:
@@ -7293,7 +7841,7 @@ class CollectionSyncManager:
                     timeout=10
                 )
                 if resp.status_code == 200:
-                    siblings = resp.json().get('siblings', [])
+                    siblings = resp.json().get('sibling_roms', [])
             except Exception:
                 pass
 
