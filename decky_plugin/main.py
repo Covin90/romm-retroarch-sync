@@ -236,16 +236,19 @@ class Plugin:
         url      = self._settings.get('RomM', 'url')
         username = self._settings.get('RomM', 'username')
         password = self._settings.get('RomM', 'password')
+        client_token = self._settings.get('RomM', 'client_token', '')
         remember     = self._settings.get('RomM', 'remember_credentials') == 'true'
         auto_connect = self._settings.get('RomM', 'auto_connect') == 'true'
 
-        if not (url and username and password and remember and auto_connect):
+        # A paired Client API Token is sufficient on its own (RomM's recommended
+        # companion-app auth); otherwise fall back to stored username/password.
+        if not (url and auto_connect and (client_token or (username and password and remember))):
             logging.info("Auto-connect disabled or credentials missing")
             return False
 
         try:
             logging.info(f"Connecting to RomM at {url}...")
-            self._romm_client = RomMClient(url, username, password)
+            self._romm_client = RomMClient(url, username, password, client_token=client_token or None)
             if not self._romm_client.authenticated:
                 logging.error("RomM authentication failed")
                 return False
@@ -1235,6 +1238,37 @@ class Plugin:
         except Exception as e:
             logging.error(f"[DEVICE] registration error: {e}", exc_info=True)
             return None
+
+    async def pair_device(self, url: str, code: str):
+        """Pair with RomM using an 8-digit Client API Token code (no password).
+
+        Exchanges the code for a token, stores it, and connects. This is RomM's
+        recommended companion-app auth — far better UX on a Steam Deck than
+        typing a username/password.
+        """
+        try:
+            url = (url or self._settings.get('RomM', 'url', '')).strip().rstrip('/')
+            if not url:
+                return {'success': False, 'message': 'RomM URL is required'}
+            if not code or not str(code).strip():
+                return {'success': False, 'message': 'Pairing code is required'}
+
+            token = RomMClient(url).exchange_pair_code(str(code).strip())
+            if not token:
+                return {'success': False, 'message': 'Invalid or expired pairing code'}
+
+            self._settings.set('RomM', 'url', url)
+            self._settings.set('RomM', 'client_token', token)
+            self._settings.set('RomM', 'auto_connect', 'true')
+            logging.info("Paired with RomM via Client API Token")
+
+            connected = self._connect_to_romm()
+            return {'success': bool(connected),
+                    'message': 'Paired and connected' if connected
+                    else 'Paired, but connection failed'}
+        except Exception as e:
+            logging.error(f"pair_device error: {e}", exc_info=True)
+            return {'success': False, 'message': str(e)}
 
     async def delete_device(self):
         """Unregister the current device from the server and clear local device ID."""

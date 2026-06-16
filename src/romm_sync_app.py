@@ -8578,9 +8578,11 @@ class SyncWindow(Gtk.ApplicationWindow):
             
             GLib.idle_add(lambda: self.update_connection_ui("connecting"))
             
-            # STEP 1: Initialize client
+            # STEP 1: Initialize client. Prefer a paired Client API Token (RomM's
+            # recommended companion-app auth) over the stored password.
             init_start = time.time()
-            self.romm_client = RomMClient(url, username, password)
+            client_token = self.settings.get('RomM', 'client_token', '')
+            self.romm_client = RomMClient(url, username, password, client_token=client_token or None)
 
             # Initialize cover art manager for Steam grid images
             self.romm_client.cover_manager = CoverArtManager(self.settings, self.romm_client)

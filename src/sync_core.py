@@ -871,7 +871,7 @@ class SettingsManager:
         value = self.config.get(section, key, fallback=fallback)
         
         # Decrypt sensitive fields
-        if section == 'RomM' and key in ['username', 'password'] and value:
+        if section == 'RomM' and key in ['username', 'password', 'client_token'] and value:
             value = self._decrypt(value)
         
         return value
@@ -882,7 +882,7 @@ class SettingsManager:
             self.config[section] = {}
         
         # Encrypt sensitive fields
-        if section == 'RomM' and key in ['username', 'password'] and value:
+        if section == 'RomM' and key in ['username', 'password', 'client_token'] and value:
             value = self._encrypt(value)
         
         self.config[section][key] = str(value)
@@ -1247,10 +1247,11 @@ class SteamGridImageGenerator:
 class RomMClient:
     """Client for interacting with RomM API"""
     
-    def __init__(self, base_url, username=None, password=None):
+    def __init__(self, base_url, username=None, password=None, client_token=None):
         self.base_url = base_url.rstrip('/')
         self.session = requests.Session()
         self.authenticated = False
+        self.client_token = None  # RomM Client API Token (rmm_...) if used
 
         # OAuth2 token storage
         self.access_token = None
@@ -1282,9 +1283,70 @@ class RomMClient:
             'Keep-Alive': 'timeout=30, max=100'
         })
         
-        if username and password:
+        # Prefer a Client API Token (RomM's recommended companion-app auth) over
+        # storing the user's password. Fall back to Basic auth if no token.
+        if client_token:
+            self.authenticate_with_token(client_token)
+        elif username and password:
             self.authenticate(username, password)
-    
+
+    def authenticate_with_token(self, client_token):
+        """Authenticate using a RomM Client API Token (Authorization: Bearer rmm_...).
+
+        This is RomM's recommended auth for companion apps — scope-narrowed and
+        revocable, unlike Basic auth which needs the account password. Returns
+        True on success.
+        """
+        if not client_token:
+            return False
+        try:
+            self.session.headers.update({'Authorization': f'Bearer {client_token}'})
+            test = self.session.get(
+                urljoin(self.base_url, '/api/roms'), params={'limit': 1}, timeout=10
+            )
+            if test.status_code == 200:
+                self.client_token = client_token
+                self.authenticated = True
+                print("✅ Client API Token authentication successful")
+                return True
+            # Bad/expired token — drop the header so we don't poison later attempts.
+            self.session.headers.pop('Authorization', None)
+            print(f"❌ Client API Token rejected: HTTP {test.status_code}")
+            return False
+        except Exception as e:
+            self.session.headers.pop('Authorization', None)
+            print(f"❌ Client API Token auth error: {e}")
+            return False
+
+    def exchange_pair_code(self, code):
+        """Exchange an 8-digit pairing code for a Client API Token.
+
+        The user creates a token in the RomM web UI and starts pairing, which
+        shows a short code. The device posts that code to the unauthenticated
+        /api/client-tokens/exchange endpoint and receives the full rmm_ token.
+        Returns the raw token string on success, else None.
+        """
+        if not code:
+            return None
+        try:
+            resp = self.session.post(
+                urljoin(self.base_url, '/api/client-tokens/exchange'),
+                json={'code': str(code).strip()},
+                timeout=15,
+            )
+            if resp.status_code in (200, 201):
+                raw = resp.json().get('raw_token')
+                if raw:
+                    print("✅ Pairing code exchanged for Client API Token")
+                    return raw
+                print("⚠️ Exchange succeeded but no raw_token in response")
+                return None
+            print(f"❌ Pairing exchange failed: HTTP {resp.status_code}: {resp.text[:200]}")
+            return None
+        except Exception as e:
+            print(f"❌ Pairing exchange error: {e}")
+            return None
+
     def authenticate(self, username, password):
         """Authenticate with RomM using Basic Auth, Token, or Session fallback"""
         try:
