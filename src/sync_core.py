@@ -1244,6 +1244,78 @@ class SteamGridImageGenerator:
             logging.warning(f"Icon generation failed: {e}")
             return False, f"Icon generation failed: {e}"
 
+
+def _archive_member_names(archive_path):
+    """List member names in a .zip or .7z archive. Returns [] on failure/unsupported.
+
+    .7z uses py7zr if installed, else the system 7z/7za CLI. Returns [] (rather
+    than raising) when no .7z backend is available so callers degrade gracefully.
+    """
+    archive_path = Path(archive_path)
+    ext = archive_path.suffix.lower()
+    try:
+        if ext == '.zip':
+            import zipfile
+            with zipfile.ZipFile(archive_path, 'r') as zf:
+                return zf.namelist()
+        if ext == '.7z':
+            try:
+                import py7zr
+                with py7zr.SevenZipFile(archive_path, 'r') as z:
+                    return z.getnames()
+            except ImportError:
+                import shutil as _sh, subprocess
+                for exe in ('7z', '7za', '7zr'):
+                    if _sh.which(exe):
+                        out = subprocess.run([exe, 'l', '-slt', str(archive_path)],
+                                             capture_output=True, text=True).stdout
+                        return [ln[len('Path = '):] for ln in out.splitlines()
+                                if ln.startswith('Path = ')][1:]  # [0] is the archive itself
+                logging.info("No .7z lister available (install py7zr or p7zip)")
+                return []
+    except Exception as e:
+        logging.warning(f"Could not list archive {archive_path}: {e}")
+    return []
+
+
+def _extract_archive(archive_path, dest_dir):
+    """Extract a .zip or .7z archive to dest_dir. Returns True on success.
+
+    .7z uses py7zr if installed, else the system 7z/7za/7zr CLI. Returns False
+    (without raising) when .7z support is unavailable, so the caller can leave the
+    archive in place (RetroArch reads .zip/.7z natively for most cores anyway).
+    """
+    archive_path = Path(archive_path)
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    ext = archive_path.suffix.lower()
+    try:
+        if ext == '.zip':
+            import zipfile
+            with zipfile.ZipFile(archive_path, 'r') as zf:
+                zf.extractall(dest_dir)
+            return True
+        if ext == '.7z':
+            try:
+                import py7zr
+                with py7zr.SevenZipFile(archive_path, 'r') as z:
+                    z.extractall(path=dest_dir)
+                return True
+            except ImportError:
+                import shutil as _sh, subprocess
+                for exe in ('7z', '7za', '7zr'):
+                    if _sh.which(exe):
+                        subprocess.run([exe, 'x', '-y', f'-o{dest_dir}', str(archive_path)],
+                                       check=True, capture_output=True)
+                        return True
+                logging.warning("No .7z extractor available (install py7zr or p7zip); "
+                                "leaving archive as-is for RetroArch to load")
+                return False
+    except Exception as e:
+        logging.warning(f"Failed to extract {archive_path}: {e}")
+    return False
+
+
 class RomMClient:
     """Client for interacting with RomM API"""
     
@@ -2267,32 +2339,22 @@ class RomMClient:
                                     }
                                 progress_callback(progress_info)
                 
-                # After successful download, check if extraction is needed (only for single files)
-                if download_path.suffix.lower() == '.zip' and actual_downloaded > 0:
-                    should_extract = False
-                    
-                    # For single files that happen to be zipped, apply heuristics
-                    import zipfile
-                    try:
-                        with zipfile.ZipFile(download_path, 'r') as zip_ref:
-                            file_list = zip_ref.namelist()
-                            
-                            # Only extract if it looks like a directory-based game
-                            has_subdirs = any('/' in f and not f.endswith('/') for f in file_list)
-                            has_pc_game_files = any(f.lower().endswith(('.exe', '.bat', '.cfg', '.ini', '.dll')) for f in file_list)
-                            
-                            should_extract = has_subdirs and has_pc_game_files
-                            
-                    except zipfile.BadZipFile:
-                        should_extract = False
-                    
+                # After successful download, check if extraction is needed (only for
+                # single-file archives: .zip or .7z). Console ROM archives are left
+                # as-is (RetroArch loads them natively); only directory-based PC games
+                # are extracted.
+                if download_path.suffix.lower() in ('.zip', '.7z') and actual_downloaded > 0:
+                    file_list = _archive_member_names(download_path)
+
+                    # Only extract if it looks like a directory-based game
+                    has_subdirs = any('/' in f and not f.endswith('/') for f in file_list)
+                    has_pc_game_files = any(f.lower().endswith(('.exe', '.bat', '.cfg', '.ini', '.dll')) for f in file_list)
+                    should_extract = has_subdirs and has_pc_game_files
+
                     if should_extract:
-                        import zipfile
                         extract_dir = download_path.parent / download_path.stem
-                        extract_dir.mkdir(exist_ok=True)
-                        with zipfile.ZipFile(download_path, 'r') as zip_ref:
-                            zip_ref.extractall(extract_dir)
-                        download_path.unlink()
+                        if _extract_archive(download_path, extract_dir):
+                            download_path.unlink()
 
             # Verify the download
             if actual_downloaded == 0:
