@@ -2895,8 +2895,12 @@ class RomMClient:
             logging.warning(f"Error during sync negotiate: {e}")
             return None, []
 
-    def complete_sync_session(self, session_id, play_sessions=None):
+    def complete_sync_session(self, session_id, play_sessions=None,
+                              operations_completed=None, operations_failed=None):
         """Mark a sync session complete (optionally ingesting play sessions).
+
+        operations_completed/operations_failed report how the planned operations
+        actually went, matching RomM's reference client (grout) SyncCompletePayload.
 
         Returns True on success, False otherwise.
         """
@@ -2905,6 +2909,10 @@ class RomMClient:
 
         try:
             payload = {}
+            if operations_completed is not None:
+                payload['operations_completed'] = int(operations_completed)
+            if operations_failed is not None:
+                payload['operations_failed'] = int(operations_failed)
             if play_sessions:
                 payload['play_sessions'] = play_sessions
             response = self.session.post(
@@ -6404,7 +6412,12 @@ class AutoSyncManager:
                 self.log(f"❌ Save-sync op {action} rom={rom_id} failed: {e}")
                 summary['errors'] += 1
 
-        self.romm_client.complete_sync_session(session_id)
+        completed = summary['uploaded'] + summary['downloaded'] + summary['no_op']
+        self.romm_client.complete_sync_session(
+            session_id,
+            operations_completed=completed,
+            operations_failed=summary['errors'],
+        )
         self.log(f"🔄 Save-sync: {summary['uploaded']} up, {summary['downloaded']} down, "
                  f"{len(summary['conflicts'])} conflict(s), {summary['no_op']} in-sync, "
                  f"{summary['errors']} error(s)")
