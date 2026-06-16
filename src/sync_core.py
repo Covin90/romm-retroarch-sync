@@ -1245,6 +1245,29 @@ class SteamGridImageGenerator:
             return False, f"Icon generation failed: {e}"
 
 
+def _find_7z():
+    """Locate a 7-Zip CLI binary, returning its path or None.
+
+    Search order: $ROMM_7ZIP env override, a bundled static binary shipped with
+    the app (bin/7zz next to sync_core or one level up — e.g. the Decky plugin's
+    bin/, since SteamOS has no system 7z), then anything on PATH. The bundled
+    static 7zz has no dependencies, avoiding py7zr's C-extension bundling issues.
+    """
+    import shutil as _sh
+    env = os.environ.get('ROMM_7ZIP')
+    if env and os.path.isfile(env) and os.access(env, os.X_OK):
+        return env
+    here = Path(__file__).resolve().parent
+    for cand in (here / 'bin' / '7zz', here.parent / 'bin' / '7zz'):
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+    for exe in ('7zz', '7z', '7za', '7zr'):
+        found = _sh.which(exe)
+        if found:
+            return found
+    return None
+
+
 def _archive_member_names(archive_path):
     """List member names in a .zip or .7z archive. Returns [] on failure/unsupported.
 
@@ -1264,13 +1287,13 @@ def _archive_member_names(archive_path):
                 with py7zr.SevenZipFile(archive_path, 'r') as z:
                     return z.getnames()
             except ImportError:
-                import shutil as _sh, subprocess
-                for exe in ('7z', '7za', '7zr'):
-                    if _sh.which(exe):
-                        out = subprocess.run([exe, 'l', '-slt', str(archive_path)],
-                                             capture_output=True, text=True).stdout
-                        return [ln[len('Path = '):] for ln in out.splitlines()
-                                if ln.startswith('Path = ')][1:]  # [0] is the archive itself
+                import subprocess
+                exe = _find_7z()
+                if exe:
+                    out = subprocess.run([exe, 'l', '-slt', str(archive_path)],
+                                         capture_output=True, text=True).stdout
+                    return [ln[len('Path = '):] for ln in out.splitlines()
+                            if ln.startswith('Path = ')][1:]  # [0] is the archive itself
                 logging.info("No .7z lister available (install py7zr or p7zip)")
                 return []
     except Exception as e:
@@ -1302,12 +1325,12 @@ def _extract_archive(archive_path, dest_dir):
                     z.extractall(path=dest_dir)
                 return True
             except ImportError:
-                import shutil as _sh, subprocess
-                for exe in ('7z', '7za', '7zr'):
-                    if _sh.which(exe):
-                        subprocess.run([exe, 'x', '-y', f'-o{dest_dir}', str(archive_path)],
-                                       check=True, capture_output=True)
-                        return True
+                import subprocess
+                exe = _find_7z()
+                if exe:
+                    subprocess.run([exe, 'x', '-y', f'-o{dest_dir}', str(archive_path)],
+                                   check=True, capture_output=True)
+                    return True
                 logging.warning("No .7z extractor available (install py7zr or p7zip); "
                                 "leaving archive as-is for RetroArch to load")
                 return False
