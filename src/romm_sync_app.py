@@ -6966,17 +6966,54 @@ class SyncWindow(Gtk.ApplicationWindow):
         url = self.settings.get('RomM', 'url')
         username = self.settings.get('RomM', 'username')
         password = self.settings.get('RomM', 'password')
+        client_token = self.settings.get('RomM', 'client_token', '')
 
-        if (auto_connect_enabled == 'true' and remember_enabled == 'true'):
-            if url and username and password:
-                self.log_message("🔄 Auto-connecting to RomM...")
-                self.connection_enable_switch.set_active(True)
-            else:
-                self.log_message("⚠️ Auto-connect enabled but credentials incomplete")
+        # A paired Client API Token is sufficient on its own; otherwise require
+        # remembered username/password.
+        have_creds = bool(client_token) or (remember_enabled == 'true' and username and password)
+        if auto_connect_enabled == 'true' and url and have_creds:
+            self.log_message("🔄 Auto-connecting to RomM...")
+            self.connection_enable_switch.set_active(True)
+        elif auto_connect_enabled != 'true':
+            self.log_message("⚠️ Auto-connect disabled")
         else:
-            self.log_message("⚠️ Auto-connect or remember credentials disabled")
-        
+            self.log_message("⚠️ Auto-connect enabled but credentials incomplete")
+
         return False
+
+    def on_pair_clicked(self, button):
+        """Exchange the entered pairing code for a Client API Token and connect."""
+        code = self.pair_code_row.get_text().strip()
+        url = self.url_row.get_text().strip().rstrip('/')
+        if not url:
+            self.log_message("⚠️ Enter the Server URL before pairing")
+            return
+        if not code:
+            self.log_message("⚠️ Enter a pairing code (from the RomM web UI)")
+            return
+
+        button.set_sensitive(False)
+        self.log_message("🔗 Exchanging pairing code…")
+
+        def work():
+            token = RomMClient(url).exchange_pair_code(code)
+
+            def done():
+                button.set_sensitive(True)
+                if token:
+                    self.settings.set('RomM', 'url', url)
+                    self.settings.set('RomM', 'client_token', token)
+                    self.settings.set('RomM', 'auto_connect', 'true')
+                    self.pair_code_row.set_text("")
+                    self.log_message("✅ Paired with RomM (Client API Token)")
+                    self.connection_enable_switch.set_active(True)
+                else:
+                    self.log_message("❌ Pairing failed: invalid or expired code")
+                return False
+
+            GLib.idle_add(done)
+
+        threading.Thread(target=work, daemon=True).start()
 
     def set_application_identity(self):
         """Set proper application identity for dock/taskbar"""
@@ -8144,7 +8181,18 @@ class SyncWindow(Gtk.ApplicationWindow):
         self.password_row = Adw.PasswordEntryRow()
         self.password_row.set_title("Password")
         self.connection_expander.add_row(self.password_row)
-        
+
+        # Pairing code (RomM Client API Token) — recommended over username/password.
+        # Create a token in the RomM web UI, start pairing, and enter the code here.
+        self.pair_code_row = Adw.EntryRow()
+        self.pair_code_row.set_title("Pairing code (recommended)")
+        pair_button = Gtk.Button(label="Pair")
+        pair_button.set_valign(Gtk.Align.CENTER)
+        pair_button.add_css_class("suggested-action")
+        pair_button.connect("clicked", self.on_pair_clicked)
+        self.pair_code_row.add_suffix(pair_button)
+        self.connection_expander.add_row(self.pair_code_row)
+
         # Remember credentials switch
         self.remember_switch = Adw.SwitchRow()
         self.remember_switch.set_title("Remember credentials")
