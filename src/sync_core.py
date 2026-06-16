@@ -2746,14 +2746,15 @@ class RomMClient:
         if 'state' in suffix:
             return "quicksave", True, 10
 
-        # Battery / memory-card saves (.srm, .sav, .mcr, .eep, ...): one logical save
-        # channel per ROM. RomM 4.9.0's save-sync engine ignores slot=None rows
-        # (slot_not_null filter), so a stable non-null slot is required for them to
-        # sync. Use the extension (sans dot) — stable across devices and distinct
-        # between battery types (e.g. .srm vs .mcr) so they don't collide on
-        # (rom_id, slot). Bounded history keeps the per-slot row count in check.
+        # Battery / memory-card saves (.srm, .sav, .mcr, .eep, ...): the primary
+        # per-ROM save. RomM's save-sync engine ignores slot=None rows
+        # (slot_not_null filter), so a stable non-null slot is required. Use the
+        # canonical "autosave" slot — the same value RomM's reference clients
+        # (grout, muos-app, etc.) report the primary save under — so a game's
+        # battery save pairs across ALL clients on (rom_id, slot) instead of
+        # fragmenting per-client. Autocleanup matches grout (keep last 10).
         if suffix:
-            return suffix.lstrip('.'), True, 10
+            return "autosave", True, 10
 
         return None, False, None
 
