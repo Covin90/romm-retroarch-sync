@@ -4662,6 +4662,39 @@ class RetroArchInterface:
         romm_name = retroarch_directory_name.lower().replace(' ', '_').replace('-', '_')
         return romm_name
 
+    @staticmethod
+    def ensure_m3u_for_disc_folder(folder_path, base_name=None):
+        """Generate an <base_name>.m3u playlist for a multi-disc folder if missing.
+
+        Mirrors RomM's own download-zip behaviour (which our whole-ROM download
+        path preserves): list the disc images so RetroArch can boot the game and
+        swap discs. Needed for the variant/individual-file download path, where
+        RomM serves each disc as a bare file with no playlist.
+
+        Rules (matching RomM): if .cue files are present, list those (avoids
+        listing raw .bin tracks); otherwise list disc images. Only writes when
+        there are 2+ disc entries and no .m3u already exists. Returns the m3u
+        Path if written/empty-handed, else None.
+        """
+        folder = Path(folder_path)
+        if not folder.is_dir():
+            return None
+        files = [f for f in folder.iterdir() if f.is_file()]
+        if any(f.suffix.lower() == '.m3u' for f in files):
+            return None  # RomM already provided one (or we already wrote it)
+
+        cue = sorted(f for f in files if f.suffix.lower() == '.cue')
+        disc_exts = {'.chd', '.iso', '.img', '.pbp', '.cso'}
+        discs = cue if cue else sorted(f for f in files if f.suffix.lower() in disc_exts)
+        if len(discs) < 2:
+            return None  # single-disc (or non-disc) — no playlist needed
+
+        base_name = base_name or folder.name
+        m3u_path = folder / f"{base_name}.m3u"
+        m3u_path.write_text("\n".join(d.name for d in discs) + "\n", encoding='utf-8')
+        logging.info(f"Generated multi-disc playlist: {m3u_path.name} ({len(discs)} discs)")
+        return m3u_path
+
     def convert_to_retroarch_filename(self, original_filename, save_type, target_directory, slot=None):
         """
         Convert RomM filename with timestamp to RetroArch expected format.
@@ -7887,6 +7920,13 @@ class CollectionSyncManager:
                 file_ids=str(file_id)
             )
             if success:
+                # Per-disc fallback downloads land in a parent folder with no
+                # playlist; generate one once 2+ discs are present so multi-disc
+                # games boot and swap discs (idempotent — no-op for single disc).
+                try:
+                    RetroArchInterface.ensure_m3u_for_disc_folder(actual_path.parent, parent_folder_name)
+                except Exception as e:
+                    logging.debug(f"m3u generation skipped for {actual_path.parent}: {e}")
                 return True, actual_path
 
         return False, None

@@ -11320,6 +11320,18 @@ class SyncWindow(Gtk.ApplicationWindow):
                             success = False
                             message = "No variant files could be downloaded (file IDs not found in parent ROM)"
                             self.log_message(f"  ❌ {message}")
+
+                        # Individual-file downloads arrive without RomM's generated
+                        # .m3u, so multi-disc variants would boot a single disc with
+                        # no disc-swap. Generate the playlist locally to match the
+                        # whole-ROM zip path.
+                        if success:
+                            try:
+                                m3u = self.retroarch.ensure_m3u_for_disc_folder(local_folder, parent_folder_name)
+                                if m3u:
+                                    self.log_message(f"  🎵 Created multi-disc playlist: {m3u.name}")
+                            except Exception as e:
+                                logging.warning(f"Could not generate .m3u for {local_folder}: {e}")
                 else:
                     # Single file download - use existing logic
                     def update_all_progress(progress):
