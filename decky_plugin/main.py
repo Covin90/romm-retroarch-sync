@@ -40,7 +40,7 @@ try:
     from sync_core import (
         SettingsManager, RomMClient, RetroArchInterface,
         AutoSyncManager, CollectionSyncManager,
-        GameListPollingManager, BiosTrackingManager,
+        BiosTrackingManager,
         SteamShortcutManager, CoverArtManager,
         build_sync_status, is_path_validly_downloaded, detect_retrodeck,
     )
@@ -132,8 +132,6 @@ class Plugin:
     # Timestamp for efficient polling with updated_after parameter
     _last_full_fetch_time: str = None  # ISO 8601 datetime of last full data fetch
 
-    # New manager instances (handle polling and BIOS tracking)
-    _game_polling: 'GameListPollingManager' = None
     _bios_tracking: 'BiosTrackingManager' = None
     _steam_manager: 'SteamShortcutManager' = None
 
@@ -202,9 +200,6 @@ class Plugin:
             self._retry_thread.join(timeout=5)
 
         # Stop managers
-        if self._game_polling:
-            self._game_polling.stop()
-            self._game_polling = None
         if self._bios_tracking:
             # No explicit stop needed (downloads run to completion)
             self._bios_tracking = None
@@ -236,16 +231,19 @@ class Plugin:
         url      = self._settings.get('RomM', 'url')
         username = self._settings.get('RomM', 'username')
         password = self._settings.get('RomM', 'password')
+        client_token = self._settings.get('RomM', 'client_token', '')
         remember     = self._settings.get('RomM', 'remember_credentials') == 'true'
         auto_connect = self._settings.get('RomM', 'auto_connect') == 'true'
 
-        if not (url and username and password and remember and auto_connect):
+        # A paired Client API Token is sufficient on its own (RomM's recommended
+        # companion-app auth); otherwise fall back to stored username/password.
+        if not (url and auto_connect and (client_token or (username and password and remember))):
             logging.info("Auto-connect disabled or credentials missing")
             return False
 
         try:
             logging.info(f"Connecting to RomM at {url}...")
-            self._romm_client = RomMClient(url, username, password)
+            self._romm_client = RomMClient(url, username, password, client_token=client_token or None)
             if not self._romm_client.authenticated:
                 logging.error("RomM authentication failed")
                 return False
@@ -320,20 +318,9 @@ class Plugin:
                     })
                 logging.info(f"Loaded {len(self._available_games)} games")
 
-                # Set initial timestamp for efficient future polling
                 self._last_full_fetch_time = datetime.now(timezone.utc).isoformat()
-
-                # Initialize GameListPollingManager
-                self._game_polling = GameListPollingManager(
-                    romm_client=self._romm_client,
-                    settings=self._settings,
-                    available_games_list=self._available_games,
-                    platform_slug_to_name=self._platform_slug_to_name,
-                    log_callback=lambda msg: logging.info(f"[POLLING] {msg}"),
-                    update_callback=None,  # Optional: add callback if needed
-                )
-                self._game_polling.set_last_poll_time(self._last_full_fetch_time)
-                self._game_polling.start()
+                # Library is fetched on connect and on manual refresh (the reference
+                # client's on-demand model) — no background polling.
 
                 # Initialize BiosTrackingManager
                 self._bios_tracking = BiosTrackingManager(
@@ -345,6 +332,11 @@ class Plugin:
                     log_callback=lambda msg: logging.info(f"[BIOS] {msg}"),
                 )
                 self._bios_tracking.scan_library_bios()
+
+            # Register this device with RomM so save-sync (the /negotiate engine)
+            # has a device_id. Without it the session sync can't run and battery
+            # saves never sync. Mirrors the GTK app's initialize_device().
+            self._ensure_device_registered()
 
             # AutoSyncManager (save/state sync)
             if self._auto_sync is None:
@@ -747,10 +739,7 @@ class Plugin:
                         })
                     logging.info(f"Full refresh: loaded {len(self._available_games)} games")
 
-            # Update timestamp for both local tracking and polling manager
             self._last_full_fetch_time = current_time
-            if self._game_polling:
-                self._game_polling.set_last_poll_time(current_time)
 
             # Get updated status
             status = await self.get_service_status()
@@ -1197,6 +1186,70 @@ class Plugin:
         except Exception as e:
             logging.error(f"reset_all_settings error: {e}", exc_info=True)
             return {'success': False, 'error': str(e)}
+
+    def _ensure_device_registered(self):
+        """Ensure this device is registered with RomM and device_id is stored.
+
+        Save-sync (/negotiate) needs a device_id; without it the session sync
+        can't run and battery saves never sync. Mirrors the GTK app's
+        initialize_device(): reuse an existing valid registration, else register
+        a new device. New devices default to sync_enabled on the server.
+        """
+        if not (self._romm_client and self._romm_client.authenticated and self._settings):
+            return None
+        try:
+            existing = self._settings.get('Device', 'device_id', '')
+            if existing and self._romm_client.get_device(existing):
+                logging.info(f"[DEVICE] verified on server: {existing}")
+                return existing
+
+            import socket as _socket
+            device_id = self._romm_client.register_device(
+                device_name=self._settings.get('Device', 'device_name', _socket.gethostname()),
+                platform=self._settings.get('Device', 'device_platform', 'SteamOS'),
+                client=self._settings.get('Device', 'client', 'RomM-RetroArch-Sync-Decky'),
+                client_version=self._settings.get('Device', 'client_version', '1.5'),
+            )
+            if device_id:
+                self._settings.set('Device', 'device_id', device_id)
+                logging.info(f"[DEVICE] registered: {device_id}")
+                return device_id
+            logging.warning("[DEVICE] registration failed; save-sync will be disabled")
+            return None
+        except Exception as e:
+            logging.error(f"[DEVICE] registration error: {e}", exc_info=True)
+            return None
+
+    async def pair_device(self, url: str, code: str):
+        """Pair with RomM using an 8-digit Client API Token code (no password).
+
+        Exchanges the code for a token, stores it, and connects. This is RomM's
+        recommended companion-app auth — far better UX on a Steam Deck than
+        typing a username/password.
+        """
+        try:
+            url = (url or self._settings.get('RomM', 'url', '')).strip().rstrip('/')
+            if not url:
+                return {'success': False, 'message': 'RomM URL is required'}
+            if not code or not str(code).strip():
+                return {'success': False, 'message': 'Pairing code is required'}
+
+            token = RomMClient(url).exchange_pair_code(str(code).strip())
+            if not token:
+                return {'success': False, 'message': 'Invalid or expired pairing code'}
+
+            self._settings.set('RomM', 'url', url)
+            self._settings.set('RomM', 'client_token', token)
+            self._settings.set('RomM', 'auto_connect', 'true')
+            logging.info("Paired with RomM via Client API Token")
+
+            connected = self._connect_to_romm()
+            return {'success': bool(connected),
+                    'message': 'Paired and connected' if connected
+                    else 'Paired, but connection failed'}
+        except Exception as e:
+            logging.error(f"pair_device error: {e}", exc_info=True)
+            return {'success': False, 'message': str(e)}
 
     async def delete_device(self):
         """Unregister the current device from the server and clear local device ID."""

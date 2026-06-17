@@ -6674,8 +6674,6 @@ class SyncWindow(Gtk.ApplicationWindow):
 
         # Timestamps for efficient polling with updated_after parameter
         self._last_full_fetch_time = None  # ISO 8601 datetime of last full data fetch
-        self._polling_thread = None  # Background polling thread
-        self._stop_polling = threading.Event()  # Event to stop polling thread
 
         self.download_progress = {}
         self._last_progress_update = {}  # rom_id -> timestamp
@@ -6966,17 +6964,54 @@ class SyncWindow(Gtk.ApplicationWindow):
         url = self.settings.get('RomM', 'url')
         username = self.settings.get('RomM', 'username')
         password = self.settings.get('RomM', 'password')
+        client_token = self.settings.get('RomM', 'client_token', '')
 
-        if (auto_connect_enabled == 'true' and remember_enabled == 'true'):
-            if url and username and password:
-                self.log_message("🔄 Auto-connecting to RomM...")
-                self.connection_enable_switch.set_active(True)
-            else:
-                self.log_message("⚠️ Auto-connect enabled but credentials incomplete")
+        # A paired Client API Token is sufficient on its own; otherwise require
+        # remembered username/password.
+        have_creds = bool(client_token) or (remember_enabled == 'true' and username and password)
+        if auto_connect_enabled == 'true' and url and have_creds:
+            self.log_message("🔄 Auto-connecting to RomM...")
+            self.connection_enable_switch.set_active(True)
+        elif auto_connect_enabled != 'true':
+            self.log_message("⚠️ Auto-connect disabled")
         else:
-            self.log_message("⚠️ Auto-connect or remember credentials disabled")
-        
+            self.log_message("⚠️ Auto-connect enabled but credentials incomplete")
+
         return False
+
+    def on_pair_clicked(self, button):
+        """Exchange the entered pairing code for a Client API Token and connect."""
+        code = self.pair_code_row.get_text().strip()
+        url = self.url_row.get_text().strip().rstrip('/')
+        if not url:
+            self.log_message("⚠️ Enter the Server URL before pairing")
+            return
+        if not code:
+            self.log_message("⚠️ Enter a pairing code (from the RomM web UI)")
+            return
+
+        button.set_sensitive(False)
+        self.log_message("🔗 Exchanging pairing code…")
+
+        def work():
+            token = RomMClient(url).exchange_pair_code(code)
+
+            def done():
+                button.set_sensitive(True)
+                if token:
+                    self.settings.set('RomM', 'url', url)
+                    self.settings.set('RomM', 'client_token', token)
+                    self.settings.set('RomM', 'auto_connect', 'true')
+                    self.pair_code_row.set_text("")
+                    self.log_message("✅ Paired with RomM (Client API Token)")
+                    self.connection_enable_switch.set_active(True)
+                else:
+                    self.log_message("❌ Pairing failed: invalid or expired code")
+                return False
+
+            GLib.idle_add(done)
+
+        threading.Thread(target=work, daemon=True).start()
 
     def set_application_identity(self):
         """Set proper application identity for dock/taskbar"""
@@ -8144,7 +8179,18 @@ class SyncWindow(Gtk.ApplicationWindow):
         self.password_row = Adw.PasswordEntryRow()
         self.password_row.set_title("Password")
         self.connection_expander.add_row(self.password_row)
-        
+
+        # Pairing code (RomM Client API Token) — recommended over username/password.
+        # Create a token in the RomM web UI, start pairing, and enter the code here.
+        self.pair_code_row = Adw.EntryRow()
+        self.pair_code_row.set_title("Pairing code (recommended)")
+        pair_button = Gtk.Button(label="Pair")
+        pair_button.set_valign(Gtk.Align.CENTER)
+        pair_button.add_css_class("suggested-action")
+        pair_button.connect("clicked", self.on_pair_clicked)
+        self.pair_code_row.add_suffix(pair_button)
+        self.connection_expander.add_row(self.pair_code_row)
+
         # Remember credentials switch
         self.remember_switch = Adw.SwitchRow()
         self.remember_switch.set_title("Remember credentials")
@@ -8578,9 +8624,11 @@ class SyncWindow(Gtk.ApplicationWindow):
             
             GLib.idle_add(lambda: self.update_connection_ui("connecting"))
             
-            # STEP 1: Initialize client
+            # STEP 1: Initialize client. Prefer a paired Client API Token (RomM's
+            # recommended companion-app auth) over the stored password.
             init_start = time.time()
-            self.romm_client = RomMClient(url, username, password)
+            client_token = self.settings.get('RomM', 'client_token', '')
+            self.romm_client = RomMClient(url, username, password, client_token=client_token or None)
 
             # Initialize cover art manager for Steam grid images
             self.romm_client.cover_manager = CoverArtManager(self.settings, self.romm_client)
@@ -8779,8 +8827,8 @@ class SyncWindow(Gtk.ApplicationWindow):
                         self.update_status_dot(self.autosync_status_dot, 'green')
                         self.log_message("🔄 Auto-sync enabled")
 
-                    # Start background polling for new games
-                    self._start_background_polling()
+                    # Library is fetched on connect and on manual refresh (the
+                    # reference client's on-demand model) — no background polling.
 
                     total_time = time.time() - start_time
                     self.log_message(f"🎉 Total connection time: {total_time:.2f}s")
@@ -8814,9 +8862,6 @@ class SyncWindow(Gtk.ApplicationWindow):
             self.autosync_enable_switch.handler_unblock_by_func(self.on_autosync_toggle)
             self.autosync_expander.set_subtitle("Disabled - not connected to RomM")
             self.update_status_dot(self.autosync_status_dot, 'red')
-
-        # Stop background polling
-        self._stop_background_polling()
 
         self.update_connection_ui("disconnected")
         self.log_message("Disconnected from RomM")
@@ -9755,106 +9800,6 @@ class SyncWindow(Gtk.ApplicationWindow):
             # Fall back to full sync on error
             self.log_message("Falling back to full sync...")
             self.perform_full_sync(download_dir, server_url)
-
-    def _start_background_polling(self):
-        """Start background polling thread for incremental updates"""
-        if self._polling_thread and self._polling_thread.is_alive():
-            return  # Already running
-
-        self._stop_polling.clear()
-        self._polling_thread = threading.Thread(
-            target=self._polling_loop,
-            daemon=True,
-            name="romm-gtk-polling"
-        )
-        self._polling_thread.start()
-        self.log_message("📡 Background polling started (30s interval)")
-
-    def _stop_background_polling(self):
-        """Stop background polling thread"""
-        if self._polling_thread:
-            self._stop_polling.set()
-            self._polling_thread.join(timeout=2)
-            self._polling_thread = None
-            self.log_message("📡 Background polling stopped")
-
-    def _polling_loop(self):
-        """Background polling loop - checks for new games every 30 seconds"""
-        # Wait a bit before starting to let the initial connection settle
-        time.sleep(10)
-
-        while not self._stop_polling.is_set():
-            # Sleep for 30 seconds (or until stopped)
-            if self._stop_polling.wait(timeout=30):
-                break  # Event was set, exit loop
-
-            try:
-                # Skip if not connected or no timestamp yet
-                if not (self.romm_client and self.romm_client.authenticated):
-                    continue
-                if self._last_full_fetch_time is None:
-                    continue
-
-                # Fetch only ROMs updated since last check
-                download_dir = Path(self.rom_dir_row.get_text())
-                new_roms_data = self.romm_client.get_roms(
-                    limit=1000,
-                    offset=0,
-                    updated_after=self._last_full_fetch_time
-                )
-
-                if not new_roms_data or len(new_roms_data) != 2:
-                    continue
-
-                new_roms, _ = new_roms_data
-
-                if new_roms:
-                    # Process new/updated ROMs
-                    existing_games_map = {g['rom_id']: g for g in self.available_games if 'rom_id' in g}
-                    new_count = 0
-                    updated_count = 0
-
-                    for rom in new_roms:
-                        rom_id = rom.get('id')
-                        was_existing = rom_id in existing_games_map
-
-                        processed_game = self.process_single_rom(rom, download_dir)
-                        existing_games_map[rom_id] = processed_game
-
-                        if was_existing:
-                            updated_count += 1
-                        else:
-                            new_count += 1
-
-                    # Update the games list
-                    updated_games = list(existing_games_map.values())
-                    updated_games = self.library_section.sort_games_consistently(updated_games)
-
-                    def update_ui():
-                        self.available_games = updated_games
-                        if hasattr(self, 'library_section'):
-                            self.library_section.update_games_library(updated_games)
-                        return False
-
-                    GLib.idle_add(update_ui)
-
-                    # Update timestamp
-                    self._last_full_fetch_time = datetime.datetime.now(timezone.utc).isoformat()
-
-                    if new_count > 0 or updated_count > 0:
-                        def log_update():
-                            self.log_message(f"📡 Auto-detected {new_count} new, {updated_count} updated games")
-                            return False
-                        GLib.idle_add(log_update)
-
-            except Exception as e:
-                # Log errors but don't crash the polling thread
-                def log_error():
-                    self.log_message(f"📡 Polling error: {e}")
-                    return False
-                GLib.idle_add(log_error)
-
-        self.log_message("📡 Polling loop exited")
 
     def scan_local_games_only(self, download_dir):
         """Enhanced local game scanning that handles both slug and full platform names"""
@@ -11320,6 +11265,18 @@ class SyncWindow(Gtk.ApplicationWindow):
                             success = False
                             message = "No variant files could be downloaded (file IDs not found in parent ROM)"
                             self.log_message(f"  ❌ {message}")
+
+                        # Individual-file downloads arrive without RomM's generated
+                        # .m3u, so multi-disc variants would boot a single disc with
+                        # no disc-swap. Generate the playlist locally to match the
+                        # whole-ROM zip path.
+                        if success:
+                            try:
+                                m3u = self.retroarch.ensure_m3u_for_disc_folder(local_folder, parent_folder_name)
+                                if m3u:
+                                    self.log_message(f"  🎵 Created multi-disc playlist: {m3u.name}")
+                            except Exception as e:
+                                logging.warning(f"Could not generate .m3u for {local_folder}: {e}")
                 else:
                     # Single file download - use existing logic
                     def update_all_progress(progress):

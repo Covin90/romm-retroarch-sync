@@ -24,6 +24,7 @@ const getConfig = callable<[], any>("get_config");
 const resetAllSettings = callable<[], any>("reset_all_settings");
 const saveConfig = callable<[string, string, string, string, string, string, string], any>("save_config");
 const testRommConnection = callable<[string, string, string], any>("test_connection");
+const pairDevice = callable<[string, string], any>("pair_device");
 const toggleCollectionSteamSync = callable<[string, boolean], any>("toggle_collection_steam_sync");
 
 const formatSpeed = (bytesPerSec: number): string => {
@@ -147,6 +148,8 @@ function ConfigPage() {
   const [loading, setLoading] = useState(true);
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [pairCode, setPairCode] = useState('');
+  const [pairing, setPairing] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
 
   useEffect(() => {
@@ -182,6 +185,25 @@ function ConfigPage() {
       setTestResult({ success: false, message: 'Test failed unexpectedly.' });
     } finally {
       setTesting(false);
+    }
+  };
+
+  const handlePair = async () => {
+    if (!url.trim() || !pairCode.trim()) return;
+    setPairing(true);
+    try {
+      const result = await pairDevice(url.trim(), pairCode.trim());
+      if (result.success) {
+        toaster.toast({ title: 'RomM Sync', body: 'Paired — connecting…', duration: 3000 });
+        setPairCode('');
+        Navigation.NavigateBack();
+      } else {
+        toaster.toast({ title: 'RomM Sync Error', body: result.message || 'Pairing failed.', duration: 5000 });
+      }
+    } catch (e) {
+      toaster.toast({ title: 'RomM Sync Error', body: 'Pairing failed unexpectedly.', duration: 5000 });
+    } finally {
+      setPairing(false);
     }
   };
 
@@ -275,6 +297,22 @@ function ConfigPage() {
         <PanelSectionRow>
           <ButtonItem layout="below" onClick={handleTest} disabled={testing || saving || !url.trim() || !username.trim()}>
             {testing ? 'Testing…' : '🔌 Test Connection'}
+          </ButtonItem>
+        </PanelSectionRow>
+      </PanelSection>
+
+      <PanelSection title="Pair with code (recommended)">
+        <PanelSectionRow>
+          <TextField
+            label="Pairing code"
+            value={pairCode}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setPairCode(e.target.value)}
+            description="Create a token in the RomM web UI, start pairing, and enter the code here — no password needed."
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={handlePair} disabled={pairing || saving || !url.trim() || !pairCode.trim()}>
+            {pairing ? 'Pairing…' : '🔗 Pair Device'}
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
