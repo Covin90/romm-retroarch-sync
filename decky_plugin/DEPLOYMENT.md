@@ -29,11 +29,12 @@ PLUGIN_NAME="romm-sync-monitor"
 PLUGIN_DIR="decky_plugin"
 OUT_ZIP="${PLUGIN_NAME}.zip"
 TMP_DIR=$(mktemp -d)
-mkdir -p "${TMP_DIR}/${PLUGIN_NAME}/dist" "${TMP_DIR}/${PLUGIN_NAME}/assets"
+mkdir -p "${TMP_DIR}/${PLUGIN_NAME}/dist" "${TMP_DIR}/${PLUGIN_NAME}/assets" "${TMP_DIR}/${PLUGIN_NAME}/bin"
 cp "${PLUGIN_DIR}/plugin.json" "${PLUGIN_DIR}/package.json" "${PLUGIN_DIR}/LICENSE" "${PLUGIN_DIR}/main.py" "${TMP_DIR}/${PLUGIN_NAME}/"
 cp "${PLUGIN_DIR}/dist/index.js" "${PLUGIN_DIR}/dist/index.js.map" "${TMP_DIR}/${PLUGIN_NAME}/dist/"
 cp -rL "${PLUGIN_DIR}/py_modules" "${TMP_DIR}/${PLUGIN_NAME}/"
 cp "${PLUGIN_DIR}/assets/logo.png" "${TMP_DIR}/${PLUGIN_NAME}/assets/"
+cp "${PLUGIN_DIR}/bin/7zz" "${TMP_DIR}/${PLUGIN_NAME}/bin/" && chmod +x "${TMP_DIR}/${PLUGIN_NAME}/bin/7zz"
 (cd "$TMP_DIR" && zip -r "$OUT_ZIP" "${PLUGIN_NAME}/")
 mv "$TMP_DIR/$OUT_ZIP" .
 rm -rf "$TMP_DIR"
@@ -84,6 +85,7 @@ Decky Loader's installer validates all of these. **Any missing file causes silen
 | `py_modules/pillow.libs/` | YES | Bundled shared libs for Pillow C extensions |
 | `py_modules/urllib3/`, `certifi/`, `charset_normalizer/`, `idna/` | YES | Transitive deps of requests |
 | `assets/logo.png` | NO | Plugin icon |
+| `bin/7zz` | NO | Static 7-Zip (x64) for `.7z` extraction — SteamOS has no system 7z. `sync_core._find_7z()` resolves `<plugin>/bin/7zz`. Must be `chmod +x`. Without it: `.7z` console ROMs still load via RetroArch, `.7z` PC games won't auto-extract. |
 
 ### ZIP structure
 
