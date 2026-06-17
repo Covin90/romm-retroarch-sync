@@ -91,7 +91,7 @@ except ValueError:
                 escaped_title = decoded_title.replace('&', '&amp;')
                 try:
                     self._title_label.set_markup(f"<b>{escaped_title}</b>")
-                except:
+                except Exception:
                     # Fallback to plain text if markup fails
                     self._title_label.set_text(decoded_title)
 
@@ -414,7 +414,7 @@ except ValueError:
                 while self.combo.get_active() >= 0 or self.combo.get_has_entry():
                     try:
                         self.combo.remove(0)
-                    except:
+                    except Exception:
                         break
 
                 # Add new items
@@ -2813,7 +2813,7 @@ class EnhancedLibrarySection:
             auto_sync_enabled = self.parent.settings.get('Collections', 'auto_sync_enabled', 'false') == 'true'
             
             return recent_use or auto_sync_enabled
-        except:
+        except Exception:
             return False
 
     def cache_collections_data(self, force_refresh=False):
@@ -2921,7 +2921,7 @@ class EnhancedLibrarySection:
                                 return
                             else:
                                 print(f"🔄 Collections changed, fetching fresh data from server")
-                    except:
+                    except Exception:
                         pass
                 
                 # Load ROM cache if no games cache
@@ -2933,7 +2933,7 @@ class EnhancedLibrarySection:
                         with open(roms_cache_file, 'r') as f:
                             self._collections_rom_cache = json.load(f)
                         print(f"📁 Loaded {len(self._collections_rom_cache)} collections from disk")
-                    except:
+                    except Exception:
                         self._collections_rom_cache = {}
                 else:
                     self._collections_rom_cache = {}
@@ -3041,7 +3041,7 @@ class EnhancedLibrarySection:
                     collection_ids = [str(c.get('id')) for c in custom_collections]
                     with open(collections_meta_file, 'w') as f:
                         json.dump({'collection_ids': collection_ids}, f)
-                except:
+                except Exception:
                     pass
                 
                 self.collections_games = all_collection_games
@@ -5727,7 +5727,7 @@ class EnhancedLibrarySection:
                         if selection_model:
                             selection_model.unselect_all()
                         self.update_action_buttons()
-                    except:
+                    except Exception:
                         pass
                     return False
                 GLib.idle_add(clear_selection)
@@ -5775,7 +5775,7 @@ class EnhancedLibrarySection:
                             selection_model.unselect_all()
                         # Also update button states
                         self.update_action_buttons()
-                    except:
+                    except Exception:
                         pass
                     return False
 
@@ -6001,7 +6001,7 @@ class EnhancedLibrarySection:
                         checkbox.set_active(should_be_active)
                         checkbox._updating = False
                         return False
-                    except:
+                    except Exception:
                         return False
 
                 GLib.idle_add(force_checkbox_update)
@@ -7283,7 +7283,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             result = subprocess.run(['systemctl', '--user', 'is-enabled', 'romm-retroarch-sync.service'], 
                                 capture_output=True, text=True)
             return result.returncode == 0 and 'enabled' in result.stdout
-        except:
+        except Exception:
             return False
 
     def filter_to_downloaded_games_only(self, cached_games, download_dir):
@@ -7916,7 +7916,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                     geometry = monitor.get_geometry()
                     max_height = int(geometry.height * 0.9)  # 90% of screen height
                     self.set_size_request(800, min(900, max_height))  # Set minimum/initial size
-            except:
+            except Exception:
                 pass  # Fallback if display detection fails
 
             # Add custom CSS - using very specific targeting
@@ -9334,7 +9334,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                     import datetime
                     timestamp = datetime.datetime.now().strftime("%H:%M:%S")
                     f.write(f"[{timestamp}] {message}\n")
-            except:
+            except Exception:
                 pass
 
         def update_ui():
@@ -9355,7 +9355,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                 end_mark = buffer.get_insert()
                 buffer.place_cursor(buffer.get_end_iter())
                 self.log_view.scroll_to_mark(end_mark, 0.0, False, 0.0, 0.0)
-            except:
+            except Exception:
                 pass
         
         GLib.idle_add(update_ui)
@@ -10371,7 +10371,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                             platform_dir.rmdir()
                             GLib.idle_add(lambda d=platform_dir.name: 
                                         self.log_message(f"Removed empty directory: {d}"))
-                    except:
+                    except Exception:
                         pass  # Directory not empty or other error, ignore
                         
                 else:
@@ -11766,7 +11766,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                     # Try to get file size from ROM data
                     romm_data = game.get('romm_data', {})
                     expected_size = romm_data.get('fs_size_bytes', 0)
-                except:
+                except Exception:
                     pass
 
                 # Download with throttled progress tracking and cancellation support
@@ -12350,7 +12350,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                                 else:
                                     GLib.idle_add(lambda p=str(relative_path): 
                                                  self.log_message(f"    ✓ {p} appears to be binary data"))
-                            except:
+                            except Exception:
                                 GLib.idle_add(lambda p=str(relative_path): 
                                              self.log_message(f"    ✓ {p} is binary (good sign)"))
                 
