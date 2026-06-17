@@ -83,7 +83,7 @@ class GameDataCache:
     
     def __init__(self, settings_manager):
         self.settings = settings_manager
-        self.cache_dir = Path.home() / '.config' / 'romm-retroarch-sync' / 'cache'
+        self.cache_dir = Path(os.environ.get('ROMM_CONFIG_DIR', Path.home() / '.config' / 'romm-retroarch-sync'))
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         
         # Cache files
@@ -703,7 +703,7 @@ class SettingsManager:
     """Handle saving and loading application settings"""
     
     def __init__(self):
-        self.config_dir = Path.home() / '.config' / 'romm-retroarch-sync'
+        self.config_dir = Path(os.environ.get('ROMM_CONFIG_DIR', Path.home() / '.config' / 'romm-retroarch-sync'))
         self.config_file = self.config_dir / 'settings.ini'
         self.config_dir.mkdir(parents=True, exist_ok=True)
 
@@ -763,8 +763,8 @@ class SettingsManager:
                 'auto_refresh': 'false'
             }
             self.config['Download'] = {
-                'rom_directory': str(Path.home() / 'RomMSync' / 'roms'),
-                'save_directory': str(Path.home() / 'RomMSync' / 'saves'),
+                'rom_directory': str(Path(os.environ.get('ROMM_SYNC_DIR', Path.home() / 'RomMSync' / 'roms'))),
+                'saves_directory': str(Path(os.environ.get('RETROARCH_SAVES_DIR', Path.home() / 'RomMSync' / 'saves'))),
             }
             self.config['BIOS'] = {
                 'verify_on_launch': 'false',
@@ -3855,17 +3855,13 @@ class RetroArchInterface:
         self._is_retrodeck_cache = None
 
         # Check for custom path override first
-        custom_path = self.settings.get('RetroArch', 'custom_path', '').strip()
+        custom_path = os.environ.get('RETROARCH_DIR') or self.settings.get('RetroArch', 'custom_path', '').strip()
 
         if custom_path and Path(custom_path).exists():
             self.retroarch_executable = custom_path
             print(f"🎮 Using custom RetroArch path: {custom_path}")
             
-            # ALSO CHECK FOR CORES RELATIVE TO CUSTOM PATH
-            custom_config_dir = Path(custom_path).parent
-            if (custom_config_dir / 'config/retroarch').exists():
-                custom_config_dir = custom_config_dir / 'config/retroarch'
-            custom_cores_dir = custom_config_dir / 'cores'
+            custom_cores_dir = Path(custom_path) / 'cores'
             if custom_cores_dir.exists():
                 self.cores_dir = custom_cores_dir
                 print(f"🔧 Using custom cores directory: {custom_cores_dir}")
@@ -4305,8 +4301,10 @@ class RetroArchInterface:
         
         try:
             import subprocess
-            
             # Build command based on RetroArch type - REPLACE THIS SECTION
+
+            self.retroarch_executable = os.environ.get('RETROARCH_EXECUTABLE') or self.retroarch_executable
+
             if 'retrodeck' in self.retroarch_executable.lower():
                 # RetroDECK launches games differently - try multiple approaches
                 cmd = ['flatpak', 'run', 'net.retrodeck.retrodeck', '--pass-args', str(rom_path)]
@@ -4316,7 +4314,7 @@ class RetroArchInterface:
                 cmd = ['snap', 'run', 'retroarch', '-L', core_path, str(rom_path)]
             else:
                 cmd = [self.retroarch_executable, '-L', core_path, str(rom_path)]
-            
+
             logging.debug(f"Launching: {' '.join(cmd)}")
             logging.debug(f"ROM path exists: {os.path.exists(rom_path)}, Core path exists: {os.path.exists(core_path)}")
 
@@ -4484,6 +4482,9 @@ class RetroArchInterface:
         # All possible RetroArch config locations (ordered by likelihood)
         possible_dirs = [
 
+            # Custom defined install
+            Path(os.environ['RETROARCH_DIR']) if os.environ.get('RETROARCH_DIR') else None,
+
             # RetroDECK
             Path.home() / 'retrodeck',
 
@@ -4549,6 +4550,8 @@ class RetroArchInterface:
 
         # Standard detection logic
         possible_dirs = [
+            # Custom defined install
+            Path(os.environ['RETROARCH_DIR']) if os.environ.get('RETROARCH_DIR') else None,
             # RetroDECK (correct path)
             Path.home() / '.var/app/net.retrodeck.retrodeck/config/retroarch',
             # Flatpak RetroArch (prioritize over generic retrodeck folder)
@@ -7406,7 +7409,7 @@ class AutoSyncLock:
     """Linux-only file locking to prevent multiple auto-sync instances"""
     
     def __init__(self):
-        self.lock_file = Path.home() / '.config' / 'romm-retroarch-sync' / 'autosync.lock'
+        self.lock_file = Path(os.environ.get('ROMM_CONFIG_DIR', Path.home() / '.config' / 'romm-retroarch-sync'))
         self.lock_file.parent.mkdir(parents=True, exist_ok=True)
         self.lock_fd = None
     
