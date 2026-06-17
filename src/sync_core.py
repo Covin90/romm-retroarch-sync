@@ -2657,10 +2657,14 @@ class RomMClient:
 
         try:
             download_url = urljoin(self.base_url, f"/api/{save_type}/{save_id}/content")
+            params = []
             if device_id:
-                download_url += f"?device_id={device_id}&optimistic=true"
-                if session_id:
-                    download_url += f"&session_id={session_id}"
+                params.append(f"device_id={device_id}")
+                params.append("optimistic=true")
+            if session_id:
+                params.append(f"session_id={session_id}")
+            if params:
+                download_url += "?" + "&".join(params)
 
             response = self.session.get(download_url, stream=True, timeout=30)
             used_device_id = True
@@ -5372,6 +5376,8 @@ class AutoSyncManager:
         self.upload_queue = queue.Queue()
         self.upload_debounce = defaultdict(float)  # file_path -> last_change_time
         self.last_uploaded = {}  # file_path -> (size, mtime) of last successful upload
+        # Coalesces concurrent session syncs (connect vs RetroArch-close triggers).
+        self._session_sync_lock = threading.Lock()
         
         # Game session tracking
         self.current_game = None
@@ -6362,8 +6368,6 @@ class AutoSyncManager:
         """
         if not (self.romm_client and self.romm_client.authenticated):
             return
-        if not getattr(self, '_session_sync_lock', None):
-            self._session_sync_lock = threading.Lock()
 
         def _run():
             if not self._session_sync_lock.acquire(blocking=False):
@@ -6455,23 +6459,16 @@ class AutoSyncManager:
                         summary['errors'] += 1
 
                 elif action == 'conflict':
-                    # Default to the user's overwrite-behavior preference (back up
-                    # local first so nothing is lost); an explicit resolver overrides.
+                    # Resolve via an explicit resolver, else the user's
+                    # overwrite-behavior preference.
                     entry = inv_by_key.get((rom_id, slot))
                     if conflict_resolver:
                         choice = conflict_resolver(op)
                     elif entry:
-                        try:
-                            shutil.copy2(entry['_path'], Path(entry['_path']).with_suffix(
-                                Path(entry['_path']).suffix +
-                                f".local-{__import__('datetime').datetime.now().strftime('%Y%m%d-%H%M%S')}"))
-                        except Exception:
-                            pass
                         choice = self._resolve_save_conflict(op, entry['_path'])
                     else:
                         choice = 'skip'
                     if choice == 'local':
-                        entry = inv_by_key.get((rom_id, slot))
                         if entry and self.romm_client.upload_save(
                             rom_id, 'saves', entry['_path'], emulator=entry.get('emulator'),
                             device_id=device_id, slot=slot, overwrite=True,
@@ -6483,6 +6480,15 @@ class AutoSyncManager:
                         else:
                             summary['errors'] += 1
                     elif choice == 'server':
+                        # Back up local before overwriting it — whatever chose
+                        # 'server' (resolver or preference), never lose local work.
+                        if entry:
+                            try:
+                                src = Path(entry['_path'])
+                                shutil.copy2(src, src.with_suffix(
+                                    src.suffix + f".local-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"))
+                            except Exception:
+                                pass
                         target = self._resolve_download_target(op, saves_dir)
                         if self.romm_client.download_save_by_id(
                             op.get('save_id'), 'saves', target,
