@@ -2103,7 +2103,9 @@ class EnhancedLibrarySection:
 
                     # Respect concurrent download limit for auto-sync
                     max_concurrent = int(self.parent.settings.get('Download', 'max_concurrent', '3'))
-                    active_downloads = sum(1 for p in self.parent.download_progress.values()
+                    # Snapshot: a download worker thread may add/remove keys
+                    # concurrently, which would crash a live iteration.
+                    active_downloads = sum(1 for p in list(self.parent.download_progress.values())
                                         if p.get('downloading', False))
 
                     if active_downloads < max_concurrent:
@@ -2792,9 +2794,10 @@ class EnhancedLibrarySection:
         """Check if any downloads are currently in progress"""
         if not hasattr(self.parent, 'download_progress'):
             return False
+        # Snapshot: a download worker thread may mutate the dict concurrently.
         return any(
-            progress.get('downloading', False) 
-            for progress in self.parent.download_progress.values()
+            progress.get('downloading', False)
+            for progress in list(self.parent.download_progress.values())
         )
 
     def should_cache_collections_at_startup(self):
@@ -4081,10 +4084,11 @@ class EnhancedLibrarySection:
         # Restore saved selection and refresh checkboxes after the view is loaded
         def restore_and_refresh():
             self.restore_saved_selection()
-            # Force checkbox sync after data is loaded and expanded
-            GLib.timeout_add(100, self.force_checkbox_sync)
-            GLib.timeout_add(200, self.force_checkbox_sync)
-            GLib.timeout_add(300, self.force_checkbox_sync)
+            # Sync currently-realized checkboxes after the selection state is
+            # restored. Rows realized later are handled at bind time
+            # (bind_checkbox_cell already sets their state), so a single
+            # idle-time pass suffices — no staggered retry timers needed.
+            GLib.idle_add(self.force_checkbox_sync)
             return False
         GLib.idle_add(restore_and_refresh)
 
@@ -4127,10 +4131,11 @@ class EnhancedLibrarySection:
         # Restore saved selection and refresh checkboxes after the view is loaded
         def restore_and_refresh():
             self.restore_saved_selection()
-            # Force checkbox sync after data is loaded and expanded
-            GLib.timeout_add(100, self.force_checkbox_sync)
-            GLib.timeout_add(200, self.force_checkbox_sync)
-            GLib.timeout_add(300, self.force_checkbox_sync)
+            # Sync currently-realized checkboxes after the selection state is
+            # restored. Rows realized later are handled at bind time
+            # (bind_checkbox_cell already sets their state), so a single
+            # idle-time pass suffices — no staggered retry timers needed.
+            GLib.idle_add(self.force_checkbox_sync)
             return False
         GLib.idle_add(restore_and_refresh)
 
@@ -4178,10 +4183,11 @@ class EnhancedLibrarySection:
             # Restore saved selection and refresh checkboxes after the view is loaded
             def restore_and_refresh():
                 self.restore_saved_selection()
-                # Force checkbox sync after data is loaded and expanded
-                GLib.timeout_add(100, self.force_checkbox_sync)
-                GLib.timeout_add(200, self.force_checkbox_sync)
-                GLib.timeout_add(300, self.force_checkbox_sync)
+                # Sync currently-realized checkboxes after the selection state is
+                # restored. Rows realized later are handled at bind time
+                # (bind_checkbox_cell already sets their state), so a single
+                # idle-time pass suffices — no staggered retry timers needed.
+                GLib.idle_add(self.force_checkbox_sync)
                 return False
             GLib.idle_add(restore_and_refresh)
         else:
@@ -4214,10 +4220,11 @@ class EnhancedLibrarySection:
             # Restore saved selection and refresh checkboxes after the view is loaded
             def restore_and_refresh():
                 self.restore_saved_selection()
-                # Force checkbox sync after data is loaded and expanded
-                GLib.timeout_add(100, self.force_checkbox_sync)
-                GLib.timeout_add(200, self.force_checkbox_sync)
-                GLib.timeout_add(300, self.force_checkbox_sync)
+                # Sync currently-realized checkboxes after the selection state is
+                # restored. Rows realized later are handled at bind time
+                # (bind_checkbox_cell already sets their state), so a single
+                # idle-time pass suffices — no staggered retry timers needed.
+                GLib.idle_add(self.force_checkbox_sync)
                 return False
             GLib.idle_add(restore_and_refresh)
 
@@ -5017,8 +5024,10 @@ class EnhancedLibrarySection:
         if selected_games:
             downloaded_games = [g for g in selected_games if g.get('is_downloaded', False)]
             # Exclude games that are currently downloading from not_downloaded list
-            downloading_rom_ids = set(rom_id for rom_id in self.parent.download_progress.keys()
-                                     if self.parent.download_progress[rom_id].get('downloading', False))
+            # Snapshot items: a worker thread may add/remove keys concurrently,
+            # so iterate a copy and read the value from it (no re-indexing).
+            downloading_rom_ids = set(rid for rid, p in dict(self.parent.download_progress).items()
+                                     if p.get('downloading', False))
             not_downloaded_games = [g for g in selected_games
                                    if not g.get('is_downloaded', False)
                                    and g.get('rom_id') not in downloading_rom_ids]
@@ -5401,7 +5410,8 @@ class EnhancedLibrarySection:
             if self.selected_game:
                 rom_id = self.selected_game.get('rom_id')
             if not rom_id and self.parent.download_progress:
-                rom_id = next(iter(self.parent.download_progress.keys()), None)
+                # Snapshot keys: worker threads may mutate the dict concurrently.
+                rom_id = next(iter(list(self.parent.download_progress.keys())), None)
 
             if rom_id and hasattr(self.parent, 'cancel_download'):
                 self.parent.cancel_download(rom_id)
@@ -5994,7 +6004,7 @@ class EnhancedLibrarySection:
                     except:
                         return False
 
-                GLib.timeout_add(1, force_checkbox_update)
+                GLib.idle_add(force_checkbox_update)
 
         elif isinstance(item, PlatformItem):
             # In collections view, use a switch for collections
@@ -6979,6 +6989,32 @@ class SyncWindow(Gtk.ApplicationWindow):
 
         return False
 
+    def refresh_credential_fields(self):
+        """Show credential entry fields only when not paired; once a Client API
+        Token exists, hide them and show the compact 'Paired' status row."""
+        if not hasattr(self, 'paired_status_row'):
+            return
+        has_token = bool(self.settings.get('RomM', 'client_token', ''))
+        self.pair_code_row.set_visible(not has_token)
+        self.pair_hint_row.set_visible(not has_token)
+        self.password_login_expander.set_visible(not has_token)
+        self.paired_status_row.set_visible(has_token)
+
+    def on_unpair_clicked(self, button):
+        """Forget the stored Client API Token, disconnect, and restore the
+        credential fields."""
+        # Disconnect any live session first. Flipping the switch off drives
+        # on_connection_toggle -> disconnect_from_romm (and updates the switch UI).
+        if self.connection_enable_switch.get_active():
+            self.connection_enable_switch.set_active(False)
+        elif self.romm_client:
+            self.disconnect_from_romm()
+
+        self.settings.set('RomM', 'client_token', '')
+        self.log_message("🔓 Unpaired — pairing token removed")
+        self.refresh_credential_fields()
+        self.connection_expander.set_expanded(True)
+
     def on_pair_clicked(self, button):
         """Exchange the entered pairing code for a Client API Token and connect."""
         code = self.pair_code_row.get_text().strip()
@@ -7004,6 +7040,7 @@ class SyncWindow(Gtk.ApplicationWindow):
                     self.settings.set('RomM', 'auto_connect', 'true')
                     self.pair_code_row.set_text("")
                     self.log_message("✅ Paired with RomM (Client API Token)")
+                    self.refresh_credential_fields()
                     self.connection_enable_switch.set_active(True)
                 else:
                     self.log_message("❌ Pairing failed: invalid or expired code")
@@ -7833,11 +7870,25 @@ class SyncWindow(Gtk.ApplicationWindow):
     def load_saved_settings(self):
         """Load saved settings into UI"""
         self.url_row.set_text(self.settings.get('RomM', 'url'))
-        
+
+        has_password_creds = False
         if self.settings.get('RomM', 'remember_credentials') == 'true':
             self.username_row.set_text(self.settings.get('RomM', 'username'))
             self.password_row.set_text(self.settings.get('RomM', 'password'))
             self.remember_switch.set_active(True)
+            has_password_creds = bool(self.settings.get('RomM', 'username'))
+
+        # First-run / unconfigured: expand the connection panel so the pairing
+        # flow is visible immediately instead of hidden behind a collapsed row.
+        has_token = bool(self.settings.get('RomM', 'client_token', ''))
+        if not has_token and not has_password_creds:
+            self.connection_expander.set_expanded(True)
+        elif has_password_creds and not has_token:
+            # Returning password user: surface their saved fields.
+            self.password_login_expander.set_expanded(True)
+
+        # Hide credential fields when already paired; show the 'Paired' row.
+        self.refresh_credential_fields()
 
         if hasattr(self, 'autostart_row'):
             # Defer autostart check until UI is fully ready
@@ -8170,18 +8221,10 @@ class SyncWindow(Gtk.ApplicationWindow):
         self.url_row.set_text("")
         self.connection_expander.add_row(self.url_row)
         
-        # Username entry
-        self.username_row = Adw.EntryRow()
-        self.username_row.set_title("Username")
-        self.connection_expander.add_row(self.username_row)
-        
-        # Password entry
-        self.password_row = Adw.PasswordEntryRow()
-        self.password_row.set_title("Password")
-        self.connection_expander.add_row(self.password_row)
-
-        # Pairing code (RomM Client API Token) — recommended over username/password.
-        # Create a token in the RomM web UI, start pairing, and enter the code here.
+        # Pairing code (RomM Client API Token) — the recommended sign-in method.
+        # Shown first and prominently (above password login) so it isn't missed
+        # on first launch. Create a token in the RomM web UI, start pairing, and
+        # enter the code here.
         self.pair_code_row = Adw.EntryRow()
         self.pair_code_row.set_title("Pairing code (recommended)")
         pair_button = Gtk.Button(label="Pair")
@@ -8191,11 +8234,50 @@ class SyncWindow(Gtk.ApplicationWindow):
         self.pair_code_row.add_suffix(pair_button)
         self.connection_expander.add_row(self.pair_code_row)
 
-        # Remember credentials switch
+        # Short hint explaining where the pairing code comes from.
+        self.pair_hint_row = Adw.ActionRow()
+        self.pair_hint_row.set_subtitle(
+            "In RomM, open Settings, generate a pairing code, then enter it above "
+            "and press Pair. No username or password needed."
+        )
+        self.pair_hint_row.set_subtitle_lines(0)
+        self.pair_hint_row.add_css_class("dim-label")
+        self.connection_expander.add_row(self.pair_hint_row)
+
+        # "Paired" status row — shown instead of the credential fields once a
+        # Client API Token exists, with an Unpair action to revert.
+        self.paired_status_row = Adw.ActionRow()
+        self.paired_status_row.set_title("Paired with RomM")
+        self.paired_status_row.set_subtitle("Signed in with a pairing token")
+        unpair_button = Gtk.Button(label="Unpair")
+        unpair_button.set_valign(Gtk.Align.CENTER)
+        unpair_button.add_css_class("destructive-action")
+        unpair_button.connect("clicked", self.on_unpair_clicked)
+        self.paired_status_row.add_suffix(unpair_button)
+        self.paired_status_row.set_visible(False)
+        self.connection_expander.add_row(self.paired_status_row)
+
+        # Secondary, collapsible username/password login — tucked away so the
+        # pairing flow stays the primary path.
+        self.password_login_expander = Adw.ExpanderRow()
+        self.password_login_expander.set_title("Sign in with password instead")
+        self.connection_expander.add_row(self.password_login_expander)
+
+        # Username entry
+        self.username_row = Adw.EntryRow()
+        self.username_row.set_title("Username")
+        self.password_login_expander.add_row(self.username_row)
+
+        # Password entry
+        self.password_row = Adw.PasswordEntryRow()
+        self.password_row.set_title("Password")
+        self.password_login_expander.add_row(self.password_row)
+
+        # Remember credentials switch (applies to password login)
         self.remember_switch = Adw.SwitchRow()
         self.remember_switch.set_title("Remember credentials")
         self.remember_switch.set_subtitle("Save login details locally")
-        self.connection_expander.add_row(self.remember_switch)
+        self.password_login_expander.add_row(self.remember_switch)
 
         # Auto-connect switch
         self.auto_connect_switch = Adw.SwitchRow()
@@ -10953,6 +11035,133 @@ class SyncWindow(Gtk.ApplicationWindow):
 
         return False, None, None
 
+    def _download_folder_rom_bundle(self, rom_id, rom_name, platform_dir, parent_details,
+                                    sibling_files, child_sizes, is_cancelled):
+        """Download a multi-file 'folder' ROM as a single zip (one request).
+
+        RomM serves the whole bundle — every disc/file plus a generated .m3u —
+        from /api/roms/{id}/content with no file_ids. This mirrors grout's
+        whole-ROM download and avoids per-file matching and manual playlist
+        generation. The grouped sibling entries are this bundle's own contents,
+        so they are marked complete rather than fetched again.
+
+        Returns (success, message, local_folder).
+        """
+        fs_name = parent_details.get('fs_name') or rom_name
+        local_folder = platform_dir / fs_name
+
+        self.log_message(
+            f"Downloading bundled ROM '{rom_name}' "
+            f"({len(parent_details.get('files', []))} files) as a single archive…"
+        )
+
+        def progress_cb(progress):
+            self.update_download_progress(progress, rom_id)
+
+        # No file_ids → download_rom fetches the whole folder ROM as a zip and
+        # extracts it (keeping RomM's bundled .m3u) into platform_dir / fs_name.
+        success, message = self.romm_client.download_rom(
+            rom_id, rom_name, local_folder,
+            progress_callback=progress_cb,
+            cancellation_checker=is_cancelled,
+        )
+
+        if success:
+            for sib in sibling_files:
+                cid = sib.get('id')
+                if not cid:
+                    continue
+                csize = child_sizes.get(cid, 0)
+                self.download_progress[cid] = {
+                    'progress': 1.0, 'downloading': False, 'completed': True,
+                    'filename': sib.get('name', ''), 'downloaded': csize, 'total': csize,
+                }
+                GLib.idle_add(lambda c=cid: self.library_section.update_game_progress(c, self.download_progress[c])
+                              if hasattr(self, 'library_section') else None)
+
+        return success, message, local_folder
+
+    def _download_variant_roms_by_id(self, rom_id, rom_name, platform_dir, parent_details,
+                                     sibling_files, child_sizes, is_cancelled):
+        """Download a group of independent single-file ROMs (regional/version
+        variants) by fetching each one by its own ROM id.
+
+        Unlike a folder bundle, these siblings are NOT files inside the main ROM,
+        so they cannot be resolved via the parent's file_ids. Each variant —
+        including the main ROM — is a standalone ROM downloaded by id into a
+        shared folder named after the game. A local .m3u is generated afterwards
+        so multi-disc groups still support disc-swap.
+
+        Returns (success, message, local_folder).
+        """
+        from urllib.parse import urljoin
+        local_folder = platform_dir / rom_name
+        local_folder.mkdir(parents=True, exist_ok=True)
+
+        # Main ROM first, then each grouped sibling — all standalone ROMs.
+        variants = [{'id': rom_id, 'name': rom_name, '_details': parent_details}]
+        variants += list(sibling_files)
+        total = len(variants)
+
+        completed = 0
+        for idx, variant in enumerate(variants):
+            if is_cancelled():
+                return False, "Download cancelled", local_folder
+
+            vid = variant.get('id')
+            vname = variant.get('name', 'Unknown')
+            if not vid:
+                continue
+
+            # Resolve the on-disk filename from the variant's own metadata.
+            details = variant.get('_details')
+            if details is None:
+                try:
+                    details = self.romm_client.session.get(
+                        urljoin(self.romm_client.base_url, f'/api/roms/{vid}'), timeout=10
+                    ).json()
+                except Exception:
+                    details = {}
+            file_name = details.get('fs_name') or vname
+            dest = local_folder / file_name
+
+            self.log_message(f"  [{idx+1}/{total}] Downloading {vname}…")
+
+            def progress_cb(progress, cid=vid):
+                self.update_download_progress(progress, cid)
+
+            v_success, v_message = self.romm_client.download_rom(
+                vid, file_name, dest,
+                progress_callback=progress_cb,
+                cancellation_checker=is_cancelled,
+            )
+
+            if not v_success:
+                return False, f"Failed to download {vname}: {v_message}", local_folder
+
+            completed += 1
+            csize = child_sizes.get(vid, 0)
+            self.download_progress[vid] = {
+                'progress': 1.0, 'downloading': False, 'completed': True,
+                'filename': vname, 'downloaded': csize, 'total': csize,
+            }
+            GLib.idle_add(lambda c=vid: self.library_section.update_game_progress(c, self.download_progress[c])
+                          if hasattr(self, 'library_section') else None)
+
+        if completed == 0:
+            return False, "No variants could be downloaded", local_folder
+
+        # Multi-disc groups arrive as separate files with no playlist; generate
+        # one so disc-swap works (the whole-zip path gets RomM's bundled .m3u).
+        try:
+            m3u = self.retroarch.ensure_m3u_for_disc_folder(local_folder, rom_name)
+            if m3u:
+                self.log_message(f"  🎵 Created multi-disc playlist: {m3u.name}")
+        except Exception as e:
+            logging.warning(f"Could not generate .m3u for {local_folder}: {e}")
+
+        return True, "Download complete", local_folder
+
     def download_game(self, game, is_bulk_operation=False):
         """Download a single game from RomM and its saves (with BIOS check)"""
 
@@ -11091,192 +11300,49 @@ class SyncWindow(Gtk.ApplicationWindow):
                         return rom_id in self._cancelled_downloads
 
                 # Check if this is a multi-file ROM with regional variants
+                sibling_local_folder = None
                 if game.get('_sibling_files'):
-                    self.log_message(f"Downloading {len(game['_sibling_files'])} variant file(s) individually...")
-
-                    # Fetch parent ROM details to get file IDs
+                    # Resolve how this grouped ROM should be downloaded. A "folder"
+                    # parent (multiple entries in its `files` array, or multi=true) is
+                    # a single bundle: download it as one zip so we get every disc/file
+                    # plus RomM's generated .m3u in one request. Otherwise the group is
+                    # a set of independent single-file ROMs (regional/version variants)
+                    # that must each be fetched by their own ROM id.
                     from urllib.parse import urljoin
-                    parent_response = self.romm_client.session.get(
-                        urljoin(self.romm_client.base_url, f'/api/roms/{rom_id}'),
-                        timeout=10
-                    )
-                    if parent_response.status_code != 200:
-                        GLib.idle_add(lambda: self.log_message(f"⚠️ Could not fetch ROM details"))
+                    try:
+                        parent_details = self.romm_client.session.get(
+                            urljoin(self.romm_client.base_url, f'/api/roms/{rom_id}'),
+                            timeout=10
+                        ).json()
+                    except Exception as e:
+                        parent_details = None
+                        GLib.idle_add(lambda msg=str(e): self.log_message(f"⚠️ Could not fetch ROM details: {msg}"))
+
+                    if not parent_details:
                         success = False
                         message = "Failed to fetch ROM details"
                     else:
-                        parent_details = parent_response.json()
                         parent_files = parent_details.get('files', [])
+                        is_folder_rom = bool(parent_details.get('multi')) or len(parent_files) > 1
 
-                        # Use parent folder name for local path
-                        parent_folder_name = game.get('fs_name') or game.get('name', 'unknown')
-                        local_folder = platform_dir / parent_folder_name
-                        local_folder.mkdir(parents=True, exist_ok=True)
-
-                        # Track cumulative progress across all files
-                        cumulative_downloaded = 0
-                        completed_count = 0
-                        success = True
-                        message = "Download complete"
-                        current_child_progress = 0  # Track progress of current file
-                        
-                        # Update parent progress to show cumulative progress during multi-file downloads
-                        # Uses THROTTLED updates to avoid UI flooding
-                        def update_parent_cumulative_progress():
-                            if rom_id in self.download_progress:
-                                # Update parent progress data
-                                self.download_progress[rom_id]['downloaded'] = cumulative_downloaded + current_child_progress
-                                self.download_progress[rom_id]['progress'] = (cumulative_downloaded + current_child_progress) / total_children_size if total_children_size > 0 else 0
-                                self.download_progress[rom_id]['speed'] = 0
-                                
-                                # Use THROTTLED update (same mechanism as update_download_progress)
-                                current_time = time.time()
-                                last_update = self._last_progress_update.get(rom_id, 0)
-                                if current_time - last_update >= self._progress_update_interval:
-                                    self._last_progress_update[rom_id] = current_time
-                                    GLib.idle_add(lambda: self.library_section.update_game_progress(rom_id, self.download_progress[rom_id])
-                                                if hasattr(self, 'library_section') else None)
-
-                        # Download each variant file individually
-                        for idx, sibling in enumerate(game['_sibling_files']):
-                            if is_cancelled():
-                                success = False
-                                message = "Download cancelled"
-                                break
-
-                            child_rom_id = sibling.get('id')
-                            variant_name = sibling.get('name', 'Unknown')
-                            fs_name = sibling.get('fs_name', '')
-                            fs_extension = sibling.get('fs_extension', '')
-                            
-                            # Build filename - fs_name may or may not include extension
-                            if fs_name:
-                                # Check if fs_name already has the extension
-                                if fs_extension and not fs_name.lower().endswith(f'.{fs_extension.lower()}'):
-                                    full_fs_name = f"{fs_name}.{fs_extension}"
-                                else:
-                                    full_fs_name = fs_name
-                            else:
-                                full_fs_name = sibling.get('name', 'Unknown')
-                            
-                            child_size = child_sizes.get(child_rom_id, 0)
-
-                            matching_file = None
-                            for file_obj in parent_files:
-                                file_name_in_obj = file_obj.get('filename') or file_obj.get('file_name', '')
-                                
-                                # Match by filename only (rom_id in files array is parent's ID)
-                                if file_name_in_obj == full_fs_name:
-                                    matching_file = file_obj
-                                    break
-
-                            if not matching_file:
-                                self.log_message(f"  ⚠️ Could not find file ID for {variant_name}, skipping")
-                                continue
-
-                            file_id = matching_file.get('id')
-                            if not file_id:
-                                self.log_message(f"  ⚠️ No file ID found for {variant_name}, skipping")
-                                continue
-
-                            self.log_message(f"  [{idx+1}/{len(game['_sibling_files'])}] Downloading {variant_name}...")
-
-                            # Reset current child progress tracker
-                            current_child_progress = 0
-
-                            # Progress callback that updates both child and parent cumulative
-                            def update_child_progress(progress, cid=child_rom_id, csize=child_size):
-                                nonlocal current_child_progress
-                                # Update child with actual progress
-                                self.update_download_progress(progress, cid)
-                                
-                                # Track current file progress for parent cumulative update
-                                if 'downloaded' in progress:
-                                    current_child_progress = progress['downloaded']
-                                elif 'progress' in progress and csize > 0:
-                                    current_child_progress = int(progress['progress'] * csize)
-                                
-                                # Update parent cumulative progress
-                                update_parent_cumulative_progress()
-
-                            # Download this specific file
-                            file_success, file_message = self.romm_client.download_rom(
-                                rom_id,  # Use parent ROM ID
-                                full_fs_name,  # Filename with extension
-                                local_folder,
-                                progress_callback=update_child_progress,
-                                cancellation_checker=is_cancelled,
-                                file_ids=str(file_id)  # Download specific file
+                        if is_folder_rom:
+                            success, message, sibling_local_folder = self._download_folder_rom_bundle(
+                                rom_id, rom_name, platform_dir, parent_details,
+                                game['_sibling_files'], child_sizes, is_cancelled,
+                            )
+                        else:
+                            success, message, sibling_local_folder = self._download_variant_roms_by_id(
+                                rom_id, rom_name, platform_dir, parent_details,
+                                game['_sibling_files'], child_sizes, is_cancelled,
                             )
 
-                            if file_success:
-                                # Mark this child as complete
-                                self.download_progress[child_rom_id] = {
-                                    'progress': 1.0,
-                                    'downloading': False,
-                                    'completed': True,
-                                    'filename': variant_name,
-                                    'downloaded': child_size,
-                                    'total': child_size
-                                }
-                                GLib.idle_add(lambda cid=child_rom_id: self.library_section.update_game_progress(cid, self.download_progress[cid])
-                                            if hasattr(self, 'library_section') else None)
-
-                                # Update cumulative progress (add completed file size)
-                                cumulative_downloaded += child_size
-                                current_child_progress = 0  # Reset current file progress
-
-                                # Update parent progress to show completed variant count
-                                completed_count = idx + 1
-                                total_count = len(game['_sibling_files'])
-                                self.download_progress[rom_id]['downloaded'] = cumulative_downloaded
-                                self.download_progress[rom_id]['progress'] = cumulative_downloaded / total_children_size if total_children_size > 0 else 0
-                                self.download_progress[rom_id]['filename'] = f"{rom_name} ({completed_count}/{total_count} variants)"
-                                GLib.idle_add(lambda: self.library_section.update_game_progress(rom_id, self.download_progress[rom_id])
-                                            if hasattr(self, 'library_section') else None)
-
-                                # Update parent game status after each variant downloads
-                                game['is_downloaded'] = local_folder.exists() and any(local_folder.iterdir())
-                                game['local_path'] = str(local_folder)
-                                if local_folder.exists():
-                                    game['local_size'] = sum(f.stat().st_size for f in local_folder.rglob('*') if f.is_file())
-
-                                # Update in available_games
-                                for i, existing_game in enumerate(self.available_games):
-                                    if existing_game.get('rom_id') == rom_id:
-                                        self.available_games[i] = game
-                                        break
-
-                                # Update UI
-                                GLib.idle_add(lambda g=game.copy(): self.library_section.update_single_game(g)
-                                            if hasattr(self, 'library_section') else None)
-
-                                self.log_message(f"  ✅ {variant_name} ({completed_count}/{total_count} complete)")
-                            else:
-                                self.log_message(f"  ❌ Failed: {file_message}")
-                                success = False
-                                message = f"Failed to download {variant_name}"
-                                break
-
-                        # If the loop completed without downloading anything (all siblings
-                        # skipped because no file IDs were found), treat as failure so the
-                        # game is not falsely marked as downloaded.
-                        if success and completed_count == 0:
-                            success = False
-                            message = "No variant files could be downloaded (file IDs not found in parent ROM)"
-                            self.log_message(f"  ❌ {message}")
-
-                        # Individual-file downloads arrive without RomM's generated
-                        # .m3u, so multi-disc variants would boot a single disc with
-                        # no disc-swap. Generate the playlist locally to match the
-                        # whole-ROM zip path.
-                        if success:
-                            try:
-                                m3u = self.retroarch.ensure_m3u_for_disc_folder(local_folder, parent_folder_name)
-                                if m3u:
-                                    self.log_message(f"  🎵 Created multi-disc playlist: {m3u.name}")
-                            except Exception as e:
-                                logging.warning(f"Could not generate .m3u for {local_folder}: {e}")
+                        if success and sibling_local_folder:
+                            game['is_downloaded'] = True
+                            game['local_path'] = str(sibling_local_folder)
+                            if sibling_local_folder.exists():
+                                game['local_size'] = sum(
+                                    f.stat().st_size for f in sibling_local_folder.rglob('*') if f.is_file()
+                                )
                 else:
                     # Single file download - use existing logic
                     def update_all_progress(progress):
@@ -11367,10 +11433,12 @@ class SyncWindow(Gtk.ApplicationWindow):
                                 if disc_path.exists():
                                     # Calculate total size including all related files (e.g., .bin + .cue)
                                     disc['size'] = self.get_disc_total_size(disc_path, actual_folder)
-                        # Update status for regional variants
+                        # Update status for grouped variants / bundles
                         elif game.get('_sibling_files'):
-                            # For regional variants, folder contains multiple variant files
-                            game['local_path'] = str(actual_folder)
+                            # Use the actual folder the download helper wrote to: a
+                            # folder bundle uses the ROM's fs_name, the by-id path uses
+                            # the game name. Fall back to the name-based path.
+                            game['local_path'] = str(sibling_local_folder or actual_folder)
                             # Note: We don't update _sibling_files here because they're API data
                             # The UI will check file existence in rebuild_children() when displaying
                         elif actual_folder.exists() and actual_folder.is_dir():
