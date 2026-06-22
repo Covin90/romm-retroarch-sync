@@ -3459,8 +3459,26 @@ class EnhancedLibrarySection:
         # The refresh button itself morphs: refresh icon → spinner → green ✓ →
         # back to refresh. A left-anchored status label sits next to it.
         self._history_refresh_btn = Gtk.Button()
+        self._history_refresh_btn.add_css_class('image-button')
         self._history_refresh_btn.set_tooltip_text("Refresh history from server")
         self._history_refresh_btn.connect('clicked', lambda b: self._refresh_history())
+        # Keep the button a constant size across states: a homogeneous Stack holds
+        # all three indicators so switching the visible page never resizes the
+        # button (a swapped Label child would otherwise widen it to a rectangle).
+        self._rb_icon = Gtk.Image.new_from_icon_name("view-refresh-symbolic")
+        self._rb_icon.set_pixel_size(16)
+        self._rb_spinner = Gtk.Spinner()
+        self._rb_check = Gtk.Label()
+        self._rb_check.set_markup('<span foreground="#4ade80">✓</span>')
+        self._rb_stack = Gtk.Stack()
+        self._rb_stack.set_hhomogeneous(True)
+        self._rb_stack.set_vhomogeneous(True)
+        for nm, w in (('idle', self._rb_icon), ('busy', self._rb_spinner), ('done', self._rb_check)):
+            w.set_halign(Gtk.Align.CENTER)
+            w.set_valign(Gtk.Align.CENTER)
+            w.set_size_request(16, 16)
+            self._rb_stack.add_named(w, nm)
+        self._history_refresh_btn.set_child(self._rb_stack)
         self._history_busy_label = Gtk.Label()
         self._history_busy_label.add_css_class('dim-label')
         self._history_busy_label.set_xalign(0)
@@ -3614,25 +3632,29 @@ class EnhancedLibrarySection:
                            if isinstance(e, dict) and e.get('id') is not None}
 
     def _set_refresh_btn_state(self, state):
-        """Morph the header refresh button: 'idle' (refresh icon) | 'busy'
-        (spinner) | 'done' (green ✓)."""
+        """Morph the header refresh button by flipping the indicator Stack page:
+        'idle' (refresh icon) | 'busy' (spinner) | 'done' (green ✓). The Stack is
+        homogeneous so the button keeps a constant size in every state."""
         btn = getattr(self, '_history_refresh_btn', None)
-        if btn is None:
+        stack = getattr(self, '_rb_stack', None)
+        if btn is None or stack is None:
             return
         btn.set_opacity(1)
+        sp = getattr(self, '_rb_spinner', None)
         if state == 'busy':
-            sp = Gtk.Spinner()
-            sp.set_size_request(16, 16)
-            sp.start()
-            btn.set_child(sp)
+            if sp is not None:
+                sp.start()
+            stack.set_visible_child_name('busy')
             btn.set_sensitive(False)
         elif state == 'done':
-            chk = Gtk.Label()
-            chk.set_markup('<span foreground="#4ade80">✓</span>')
-            btn.set_child(chk)
+            if sp is not None:
+                sp.stop()
+            stack.set_visible_child_name('done')
             btn.set_sensitive(False)
         else:  # idle
-            btn.set_child(Gtk.Image.new_from_icon_name("view-refresh-symbolic"))
+            if sp is not None:
+                sp.stop()
+            stack.set_visible_child_name('idle')
             btn.set_sensitive(True)
 
     def _set_history_busy(self, busy, text=""):
