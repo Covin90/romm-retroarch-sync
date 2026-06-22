@@ -3378,6 +3378,406 @@ class EnhancedLibrarySection:
                     except Exception as e:
                         self.parent.log_message(f"❌ Could not open platform page: {e}")
 
+    # ------------------------------------------------------------------ #
+    # Save / state history browser (restore older versions)
+    # ------------------------------------------------------------------ #
+    def on_save_history_clicked(self, button):
+        """Open the save/state history browser for the selected game."""
+        game = self.selected_game
+        rom_id = None
+        if self.selected_disc:
+            game = self.selected_disc
+            rom_id = self.selected_disc.get('rom_id')
+        elif game:
+            rom_id = game.get('rom_id')
+        if not rom_id or not (self.parent.romm_client and self.parent.romm_client.authenticated):
+            return
+        name = (game or {}).get('name', 'Game')
+        self.parent.log_message(f"📜 Loading save history for {name}…")
+
+        def worker():
+            saves, states = self._fetch_save_history(rom_id)
+            GLib.idle_add(self._show_history_dialog, game, name, saves, states)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _fetch_save_history(self, rom_id):
+        """Fetch all server saves/states for a ROM via its detail endpoint."""
+        try:
+            from urllib.parse import urljoin
+            r = self.parent.romm_client.session.get(
+                urljoin(self.parent.romm_client.base_url, f'/api/roms/{rom_id}'), timeout=15)
+            d = r.json() if r.status_code == 200 else {}
+            return (d.get('user_saves') or [], d.get('user_states') or [])
+        except Exception as e:
+            GLib.idle_add(self.parent.log_message, f"❌ Could not load save history: {e}")
+            return [], []
+
+    def _fmt_ts(self, iso):
+        if not iso:
+            return "Unknown time"
+        try:
+            import datetime
+            dt = datetime.datetime.fromisoformat(str(iso).replace('Z', '+00:00'))
+            return dt.astimezone().strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return str(iso)
+
+    def _fmt_size(self, n):
+        try:
+            n = float(n)
+        except Exception:
+            return ""
+        for unit in ('B', 'KB', 'MB', 'GB'):
+            if n < 1024:
+                return f"{n:.0f} {unit}" if unit == 'B' else f"{n:.1f} {unit}"
+            n /= 1024
+        return f"{n:.1f} TB"
+
+    def _entry_device(self, e):
+        ds = e.get('device_syncs') or e.get('deviceSyncs')
+        if isinstance(ds, list) and ds and isinstance(ds[0], dict):
+            return ds[0].get('device_name') or ds[0].get('name')
+        return None
+
+    def _show_history_dialog(self, game, name, saves, states):
+        """Master–detail browser: version list (left) + screenshot preview (right)."""
+        self._shot_cache = {}
+        self._current_entry = None
+        self._current_type = None
+
+        win = Adw.Window()
+        self._history_win = win
+        win.set_title(f"Save History — {name}")
+        win.set_modal(True)
+        win.set_transient_for(self.parent)
+        win.set_default_size(840, 600)
+        toolbar_view = Adw.ToolbarView()
+        toolbar_view.add_top_bar(Adw.HeaderBar())
+
+        content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+
+        # LEFT: grouped version list
+        left_scroll = Gtk.ScrolledWindow()
+        left_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        left_scroll.set_size_request(320, -1)
+        listbox = Gtk.ListBox()
+        listbox.add_css_class('navigation-sidebar')
+        listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        listbox.connect('row-selected', self._on_history_row_selected)
+        left_scroll.set_child(listbox)
+
+        first_row = [None]
+
+        def add_section(label, entries, save_type):
+            groups = {}
+            for e in entries:
+                if not isinstance(e, dict):
+                    continue
+                slot = e.get('slot') or RomMClient.get_slot_info(e.get('file_name', ''))[0] or 'default'
+                groups.setdefault(slot, []).append(e)
+            for slot in sorted(groups):
+                items = sorted(groups[slot],
+                               key=lambda x: x.get('updated_at') or x.get('created_at') or '',
+                               reverse=True)
+                header = Gtk.ListBoxRow()
+                header.set_selectable(False)
+                header.set_activatable(False)
+                hl = Gtk.Label()
+                hl.set_xalign(0)
+                hl.set_markup(f"<b>{GLib.markup_escape_text(f'{label} — slot: {slot}')}</b>")
+                hl.set_margin_top(8); hl.set_margin_bottom(2)
+                hl.set_margin_start(8); hl.set_margin_end(8)
+                header.set_child(hl)
+                listbox.append(header)
+                for idx, e in enumerate(items):
+                    row = Gtk.ListBoxRow()
+                    row._entry = e
+                    row._save_type = save_type
+                    rb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+                    rb.set_margin_top(6); rb.set_margin_bottom(6)
+                    rb.set_margin_start(10); rb.set_margin_end(10)
+                    ts = self._fmt_ts(e.get('updated_at') or e.get('created_at') or '')
+                    t = Gtk.Label()
+                    t.set_xalign(0)
+                    t.set_markup(f"{GLib.markup_escape_text(ts)}" +
+                                 ("  <small>• current</small>" if idx == 0 else ""))
+                    rb.append(t)
+                    sub = []
+                    sz = e.get('size_bytes') or e.get('file_size_bytes')
+                    if sz:
+                        sub.append(self._fmt_size(sz))
+                    dev = self._entry_device(e)
+                    if dev:
+                        sub.append(dev)
+                    if sub:
+                        s = Gtk.Label()
+                        s.set_xalign(0)
+                        s.add_css_class('dim-label')
+                        s.set_markup(f"<small>{GLib.markup_escape_text(' · '.join(sub))}</small>")
+                        rb.append(s)
+                    row.set_child(rb)
+                    listbox.append(row)
+                    if first_row[0] is None:
+                        first_row[0] = row
+
+        add_section("State", states, 'states')
+        add_section("Save", saves, 'saves')
+
+        # RIGHT: preview pane
+        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        right.set_margin_top(12); right.set_margin_bottom(12)
+        right.set_margin_start(12); right.set_margin_end(12)
+        right.set_hexpand(True)
+
+        self._preview_picture = Gtk.Picture()
+        self._preview_picture.set_vexpand(True)
+        self._preview_picture.set_size_request(360, 260)
+        if hasattr(self._preview_picture, 'set_content_fit') and hasattr(Gtk, 'ContentFit'):
+            self._preview_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+        pic_frame = Gtk.Frame()
+        pic_frame.set_child(self._preview_picture)
+        right.append(pic_frame)
+
+        self._preview_status = Gtk.Label(label="Select a version to preview")
+        self._preview_status.add_css_class('dim-label')
+        self._preview_status.set_wrap(True)
+        right.append(self._preview_status)
+
+        self._preview_info = Gtk.Label()
+        self._preview_info.set_xalign(0)
+        self._preview_info.set_wrap(True)
+        right.append(self._preview_info)
+
+        btn_row = Gtk.Box(spacing=8)
+        btn_row.set_halign(Gtk.Align.END)
+        self._copy_btn = Gtk.Button(label="As copy")
+        self._copy_btn.set_tooltip_text("Restore into a free slot without overwriting")
+        self._copy_btn.set_sensitive(False)
+        self._copy_btn.connect('clicked', lambda b: self._current_entry and self._confirm_restore(
+            win, game, self._current_entry, self._current_type, True))
+        self._restore_btn = Gtk.Button(label="Restore")
+        self._restore_btn.add_css_class('suggested-action')
+        self._restore_btn.set_sensitive(False)
+        self._restore_btn.connect('clicked', lambda b: self._current_entry and self._confirm_restore(
+            win, game, self._current_entry, self._current_type, False))
+        btn_row.append(self._copy_btn)
+        btn_row.append(self._restore_btn)
+        right.append(btn_row)
+
+        content.append(left_scroll)
+        content.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
+        content.append(right)
+
+        if not saves and not states:
+            self._preview_status.set_text("This game has no saves or states on the server.")
+
+        toolbar_view.set_content(content)
+        win.set_content(toolbar_view)
+        win.present()
+        if first_row[0] is not None:
+            listbox.select_row(first_row[0])
+
+    def _on_history_row_selected(self, listbox, row):
+        if row is None or not hasattr(row, '_entry'):
+            return
+        self._set_history_preview(row._entry, row._save_type)
+
+    def _set_history_preview(self, entry, save_type):
+        self._current_entry = entry
+        self._current_type = save_type
+        self._restore_btn.set_sensitive(True)
+        self._copy_btn.set_visible(save_type == 'states')
+        self._copy_btn.set_sensitive(save_type == 'states')
+
+        ts = self._fmt_ts(entry.get('updated_at') or entry.get('created_at') or '')
+        info = [f"<b>{GLib.markup_escape_text(ts)}</b>"]
+        fn = entry.get('file_name')
+        if fn:
+            info.append(f"<small>{GLib.markup_escape_text(fn)}</small>")
+        self._preview_info.set_markup("\n".join(info))
+
+        sid = entry.get('id')
+        if save_type != 'states':
+            self._preview_picture.set_paintable(None)
+            self._preview_status.set_text("Battery saves have no screenshot")
+            self._preview_status.set_visible(True)
+            return
+        if sid in self._shot_cache:
+            tex = self._shot_cache[sid]
+            self._preview_picture.set_paintable(tex)
+            self._preview_status.set_visible(tex is None)
+            if tex is None:
+                self._preview_status.set_text("No screenshot for this version")
+            return
+        self._preview_picture.set_paintable(None)
+        self._preview_status.set_visible(True)
+        self._preview_status.set_text("Loading screenshot…")
+
+        def worker():
+            data = self._fetch_screenshot_bytes(entry, save_type)
+            GLib.idle_add(self._apply_screenshot, sid, data)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _fetch_screenshot_bytes(self, entry, save_type):
+        """Return screenshot image bytes for a save/state entry, or None."""
+        from urllib.parse import urljoin
+        try:
+            client = self.parent.romm_client
+            sd = entry.get('screenshot')
+            url = sd.get('download_path') if isinstance(sd, dict) else None
+            if not url:
+                sid = entry.get('id')
+                if sid:
+                    r = client.session.get(
+                        urljoin(client.base_url, f'/api/{save_type}/{sid}'), timeout=10)
+                    if r.status_code == 200:
+                        sd = r.json().get('screenshot')
+                        url = sd.get('download_path') if isinstance(sd, dict) else None
+            if not url:
+                return None
+            resp = client.session.get(urljoin(client.base_url, url), timeout=30)
+            if resp.status_code == 200 and resp.content:
+                return resp.content
+        except Exception as e:
+            logging.debug(f"Screenshot fetch failed: {e}")
+        return None
+
+    def _apply_screenshot(self, sid, data):
+        from gi.repository import Gdk
+        tex = None
+        if data:
+            try:
+                # new_from_bytes decodes PNG/JPEG directly (GTK 4.6+)
+                tex = Gdk.Texture.new_from_bytes(GLib.Bytes.new(data))
+            except Exception:
+                # Fallback for older GTK or unusual image formats
+                try:
+                    from gi.repository import GdkPixbuf
+                    loader = GdkPixbuf.PixbufLoader()
+                    loader.write(data)
+                    loader.close()
+                    pixbuf = loader.get_pixbuf()
+                    if pixbuf is not None:
+                        tex = Gdk.Texture.new_for_pixbuf(pixbuf)
+                except Exception as e:
+                    logging.debug(f"Screenshot decode failed: {e}")
+        self._shot_cache[sid] = tex
+        if self._current_entry and self._current_entry.get('id') == sid:
+            self._preview_picture.set_paintable(tex)
+            if tex is None:
+                self._preview_status.set_text("No screenshot for this version")
+                self._preview_status.set_visible(True)
+            else:
+                self._preview_status.set_visible(False)
+        return False
+
+    def _confirm_restore(self, parent_win, game, entry, save_type, as_copy):
+        kind = save_type[:-1]
+        ts = self._fmt_ts(entry.get('updated_at') or entry.get('created_at') or '')
+        if as_copy:
+            title = "Restore as copy?"
+            body = (f"Download this {kind} version ({ts}) into a new free slot. "
+                    f"Your current slots are left untouched.")
+            label, destructive = "Restore as copy", False
+        else:
+            title = "Restore this version?"
+            body = (f"Overwrite the current {kind} with the version from {ts}. "
+                    f"The current file is backed up alongside it (.backup).")
+            label, destructive = "Restore", True
+        dlg = Adw.AlertDialog.new(title, body)
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("ok", label)
+        dlg.set_response_appearance(
+            "ok", Adw.ResponseAppearance.DESTRUCTIVE if destructive else Adw.ResponseAppearance.SUGGESTED)
+
+        def on_resp(d, r):
+            if r == "ok":
+                threading.Thread(target=self._restore_version,
+                                 args=(game, entry, save_type, as_copy), daemon=True).start()
+        dlg.connect('response', on_resp)
+        dlg.present(parent_win)
+
+    def _resolve_restore_dest(self, game, entry, save_type, as_copy=False):
+        """Resolve the local destination (dir, filename) for a restored version."""
+        import re
+        ra = self.parent.retroarch
+        file_name = entry.get('file_name', '')
+        slot = entry.get('slot') or RomMClient.get_slot_info(file_name)[0]
+        tgt_name = ra.convert_to_retroarch_filename(file_name, save_type, '/tmp', slot=slot)
+
+        base = re.sub(r'\s*\[.*?\]', '', Path(file_name).stem)
+        local = (ra.get_save_files() or {}).get(save_type, [])
+        candidates = [f for f in local if f.get('name', '').startswith(base)]
+        exact = [f for f in candidates if f.get('name') == tgt_name]
+        if exact:
+            dest_dir = Path(exact[0]['path']).parent
+        elif candidates:
+            dest_dir = Path(candidates[0]['path']).parent
+        else:
+            base_dir = (getattr(ra, 'save_dirs', {}) or {}).get(save_type)
+            if not base_dir:
+                return None, None
+            romm_emulator = entry.get('emulator')
+            if ra.get_save_subdir_mode(save_type) == 'core' and romm_emulator:
+                dest_dir = Path(base_dir) / ra.get_retroarch_directory_name(romm_emulator)
+            else:
+                dest_dir = Path(base_dir)
+
+        if as_copy and save_type == 'states':
+            stem = tgt_name
+            if stem.lower().endswith('.state.auto'):
+                stem = stem[:-len('.state.auto')]
+            stem = re.sub(r'\.state\d*$', '', stem)
+            existing = {f.get('name') for f in local}
+            tgt_name = next((f"{stem}.state{n}" for n in range(1, 10)
+                             if f"{stem}.state{n}" not in existing), f"{stem}.state1")
+        return dest_dir, tgt_name
+
+    def _restore_version(self, game, entry, save_type, as_copy=False):
+        try:
+            dest_dir, tgt_name = self._resolve_restore_dest(game, entry, save_type, as_copy)
+            if not dest_dir or not tgt_name:
+                GLib.idle_add(self.parent.log_message,
+                              "❌ Could not determine restore location (download the game first).")
+                return
+            dest = Path(dest_dir) / tgt_name
+            save_id = entry.get('id')
+            if dest.exists() and not as_copy:
+                backup = dest.with_suffix(dest.suffix + '.backup')
+                try:
+                    if backup.exists():
+                        backup.unlink()
+                    dest.rename(backup)
+                    GLib.idle_add(self.parent.log_message,
+                                  f"💾 Backed up current {dest.name} → {backup.name}")
+                except Exception as e:
+                    logging.warning(f"Restore backup failed for {dest}: {e}")
+            ok = self.parent.romm_client.download_save_by_id(
+                save_id, save_type, dest, fallback_url=entry.get('download_path'))
+            if ok:
+                # Restore the matching screenshot so RetroArch's thumbnail stays in sync.
+                if save_type == 'states':
+                    try:
+                        data = self._fetch_screenshot_bytes(entry, save_type)
+                        if data:
+                            shot = dest.with_name(dest.name + '.png')
+                            if shot.exists() and not as_copy:
+                                try:
+                                    shot.rename(shot.with_suffix(shot.suffix + '.backup'))
+                                except Exception:
+                                    pass
+                            with open(shot, 'wb') as f:
+                                f.write(data)
+                    except Exception as e:
+                        logging.debug(f"Restore screenshot failed: {e}")
+                GLib.idle_add(self.parent.log_message, f"✅ Restored {save_type[:-1]} → {dest.name}")
+            else:
+                GLib.idle_add(self.parent.log_message,
+                              f"❌ Failed to restore {save_type} id={save_id}")
+        except Exception as e:
+            GLib.idle_add(self.parent.log_message, f"❌ Restore error: {e}")
+
     def auto_expand_platforms_with_results(self, filtered_games):
         """Automatically expand platforms that contain search results"""
         if not self.search_text:  # No search active, don't auto-expand
@@ -4834,6 +5234,13 @@ class EnhancedLibrarySection:
         self.open_in_romm_button.connect('clicked', self.on_open_in_romm_clicked)
         single_actions.append(self.open_in_romm_button)
 
+        # Save history button - browse/restore older save & state versions
+        self.history_button = Gtk.Button.new_from_icon_name("document-open-recent-symbolic")
+        self.history_button.set_tooltip_text("Browse and restore older save/state versions")
+        self.history_button.set_sensitive(False)
+        self.history_button.connect('clicked', self.on_save_history_clicked)
+        single_actions.append(self.history_button)
+
         
         action_box.append(single_actions)
         
@@ -4882,6 +5289,29 @@ class EnhancedLibrarySection:
         
         return action_box
     
+    def _update_history_button(self):
+        """Enable Save history only for a single downloaded game while connected.
+
+        Set unconditionally at the top of update_action_buttons so it stays correct
+        across that method's many early returns.
+        """
+        if not hasattr(self, 'history_button'):
+            return
+        connected = bool(self.parent.romm_client and self.parent.romm_client.authenticated)
+        game = self.selected_game
+        rom_id = None
+        if self.selected_disc:
+            rom_id = self.selected_disc.get('rom_id')
+            downloaded = self.selected_disc.get('is_downloaded', False)
+        elif game:
+            rom_id = game.get('rom_id')
+            downloaded = game.get('is_downloaded', False)
+        else:
+            downloaded = False
+        # Single selection only (no bulk), connected, downloaded, with a rom_id
+        single = len(getattr(self, 'selected_game_keys', set())) <= 1
+        self.history_button.set_sensitive(bool(connected and rom_id and downloaded and single))
+
     def update_action_buttons(self):
         """Update action buttons based on selected game(s) or platform"""
         # Allow button updates during bulk downloads to show Cancel state
@@ -4889,6 +5319,8 @@ class EnhancedLibrarySection:
         is_bulk_download = self.parent._bulk_download_in_progress if hasattr(self, 'parent') else False
         if getattr(self, '_selection_blocked', False) and not is_bulk_download:
             return
+
+        self._update_history_button()
 
         # Priority 0: Check for selected discs first
         selected_discs = self.get_selected_discs()
@@ -8411,6 +8843,26 @@ class SyncWindow(Gtk.ApplicationWindow):
         self.core_count_row.set_title("Available Cores")
         self.core_count_row.set_subtitle("Checking...")
         self.retroarch_expander.add_row(self.core_count_row)
+
+        # Quick access to the monitored save / save-state folders
+        _save_dirs = getattr(self.retroarch, 'save_dirs', {}) or {}
+        for _key, _title in (('saves', 'Saves Folder'), ('states', 'Save States Folder')):
+            _dir = _save_dirs.get(_key)
+            _row = Adw.ActionRow()
+            _row.set_title(_title)
+            _row.set_subtitle(str(_dir) if _dir else "Not detected")
+            _row.set_subtitle_lines(1)
+            _btn_box = Gtk.Box()
+            _btn_box.set_size_request(-1, 18)
+            _btn_box.set_valign(Gtk.Align.CENTER)
+            _btn = Gtk.Button(label="Open")
+            _btn.set_size_request(80, -1)
+            _btn.set_valign(Gtk.Align.CENTER)
+            _btn.set_sensitive(bool(_dir))
+            _btn.connect('clicked', self.on_browse_saves if _key == 'saves' else self.on_browse_states)
+            _btn_box.append(_btn)
+            _row.add_suffix(_btn_box)
+            self.retroarch_expander.add_row(_row)
 
         # Add RetroArch settings status row (auto-enabled, info-only display)
         self.retroarch_connection_row = Adw.ActionRow()
@@ -12284,22 +12736,40 @@ class SyncWindow(Gtk.ApplicationWindow):
         else:
             self.log_message("❌ No cache to clear")
 
-    def on_browse_downloads(self, button):
-        """Open the download directory in file manager"""
-        download_dir = Path(self.rom_dir_row.get_text())
-        
-        if download_dir.exists():
+    def _open_folder_in_file_manager(self, folder, label):
+        """Open a directory in the user's file manager (portal-aware on GTK4)."""
+        folder = Path(folder) if folder else None
+        if not folder or not folder.exists():
+            self.log_message(f"{label} does not exist: {folder}")
+            return
+        try:
+            # Gtk.FileLauncher routes through XDG portals (works native + Flatpak).
+            launcher = Gtk.FileLauncher.new(Gio.File.new_for_path(str(folder)))
+            launcher.launch(self, None, None)
+            self.log_message(f"Opened {label.lower()}: {folder}")
+        except Exception as e:
+            # Fall back to xdg-open if FileLauncher is unavailable.
             import subprocess
             try:
-                # Try to open with default file manager
-                subprocess.run(['xdg-open', str(download_dir)], check=True)
-                self.log_message(f"Opened download directory: {download_dir}")
-            except Exception as e:
-                self.log_message(f"Could not open directory: {e}")
-                self.log_message(f"Download directory: {download_dir}")
-        else:
-            self.log_message(f"Download directory does not exist: {download_dir}")
-            self.log_message("Try downloading some ROMs first!")
+                subprocess.run(['xdg-open', str(folder)], check=True)
+                self.log_message(f"Opened {label.lower()}: {folder}")
+            except Exception as e2:
+                self.log_message(f"Could not open {label.lower()}: {e2}")
+                self.log_message(f"{label}: {folder}")
+
+    def on_browse_downloads(self, button):
+        """Open the download directory in file manager"""
+        self._open_folder_in_file_manager(Path(self.rom_dir_row.get_text()), "Download directory")
+
+    def on_browse_saves(self, button):
+        """Open the RetroArch saves directory in file manager"""
+        self._open_folder_in_file_manager(
+            getattr(self.retroarch, 'save_dirs', {}).get('saves'), "Saves folder")
+
+    def on_browse_states(self, button):
+        """Open the RetroArch save-states directory in file manager"""
+        self._open_folder_in_file_manager(
+            getattr(self.retroarch, 'save_dirs', {}).get('states'), "Save states folder")
     
     def on_inspect_downloads(self, button):
         """Inspect downloaded files to check if they're legitimate"""
