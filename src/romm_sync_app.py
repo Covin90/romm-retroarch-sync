@@ -3460,18 +3460,28 @@ class EnhancedLibrarySection:
         self._history_refresh_btn.set_tooltip_text("Refresh history from server")
         self._history_refresh_btn.connect('clicked', lambda b: self._refresh_history())
         header_bar.pack_start(self._history_refresh_btn)
-        # Busy / done indicator (restore→sync / refresh) shown in the header
+        # Busy / done indicator (restore→sync / refresh), left-anchored so the
+        # status text's left edge stays put. Spinner + check share one fixed-size
+        # cell (overlay) so swapping them never shifts the label.
         self._history_spinner = Gtk.Spinner()
+        self._history_spinner.set_size_request(16, 16)
         self._history_spinner.set_visible(False)
-        self._history_check = Gtk.Image.new_from_icon_name("emblem-ok-symbolic")
-        self._history_check.add_css_class('success')
+        self._history_check = Gtk.Label()  # green ✓ (matches the library view), icon-free
+        self._history_check.set_markup('<span foreground="#4ade80">✓</span>')
         self._history_check.set_visible(False)
+        indicator = Gtk.Overlay()
+        indicator.set_size_request(18, 18)
+        indicator.set_valign(Gtk.Align.CENTER)
+        indicator.set_child(self._history_spinner)
+        indicator.add_overlay(self._history_check)
         self._history_busy_label = Gtk.Label()
         self._history_busy_label.add_css_class('dim-label')
+        self._history_busy_label.set_xalign(0)
         self._history_busy_label.set_visible(False)
-        header_bar.pack_end(self._history_busy_label)
-        header_bar.pack_end(self._history_check)
-        header_bar.pack_end(self._history_spinner)
+        status_box = Gtk.Box(spacing=6)
+        status_box.append(indicator)
+        status_box.append(self._history_busy_label)
+        header_bar.pack_start(status_box)
         toolbar_view.add_top_bar(header_bar)
 
         content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
