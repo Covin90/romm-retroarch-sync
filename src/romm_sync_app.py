@@ -3393,6 +3393,8 @@ class EnhancedLibrarySection:
         if not rom_id or not (self.parent.romm_client and self.parent.romm_client.authenticated):
             return
         name = (game or {}).get('name', 'Game')
+        self._history_rom_id = rom_id
+        self._history_game = game
         self.parent.log_message(f"📜 Loading save history for {name}…")
 
         def worker():
@@ -3453,7 +3455,20 @@ class EnhancedLibrarySection:
         win.set_transient_for(self.parent)
         win.set_default_size(840, 600)
         toolbar_view = Adw.ToolbarView()
-        toolbar_view.add_top_bar(Adw.HeaderBar())
+        header_bar = Adw.HeaderBar()
+        self._history_refresh_btn = Gtk.Button.new_from_icon_name("view-refresh-symbolic")
+        self._history_refresh_btn.set_tooltip_text("Refresh history from server")
+        self._history_refresh_btn.connect('clicked', lambda b: self._refresh_history())
+        header_bar.pack_start(self._history_refresh_btn)
+        # Busy indicator (restore→sync / refresh) shown in the header
+        self._history_spinner = Gtk.Spinner()
+        self._history_spinner.set_visible(False)
+        self._history_busy_label = Gtk.Label()
+        self._history_busy_label.add_css_class('dim-label')
+        self._history_busy_label.set_visible(False)
+        header_bar.pack_end(self._history_busy_label)
+        header_bar.pack_end(self._history_spinner)
+        toolbar_view.add_top_bar(header_bar)
 
         content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
 
@@ -3466,63 +3481,9 @@ class EnhancedLibrarySection:
         listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
         listbox.connect('row-selected', self._on_history_row_selected)
         left_scroll.set_child(listbox)
+        self._history_listbox = listbox
 
-        first_row = [None]
-
-        def add_section(label, entries, save_type):
-            groups = {}
-            for e in entries:
-                if not isinstance(e, dict):
-                    continue
-                slot = e.get('slot') or RomMClient.get_slot_info(e.get('file_name', ''))[0] or 'default'
-                groups.setdefault(slot, []).append(e)
-            for slot in sorted(groups):
-                items = sorted(groups[slot],
-                               key=lambda x: x.get('updated_at') or x.get('created_at') or '',
-                               reverse=True)
-                header = Gtk.ListBoxRow()
-                header.set_selectable(False)
-                header.set_activatable(False)
-                hl = Gtk.Label()
-                hl.set_xalign(0)
-                hl.set_markup(f"<b>{GLib.markup_escape_text(f'{label} — slot: {slot}')}</b>")
-                hl.set_margin_top(8); hl.set_margin_bottom(2)
-                hl.set_margin_start(8); hl.set_margin_end(8)
-                header.set_child(hl)
-                listbox.append(header)
-                for idx, e in enumerate(items):
-                    row = Gtk.ListBoxRow()
-                    row._entry = e
-                    row._save_type = save_type
-                    rb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
-                    rb.set_margin_top(6); rb.set_margin_bottom(6)
-                    rb.set_margin_start(10); rb.set_margin_end(10)
-                    ts = self._fmt_ts(e.get('updated_at') or e.get('created_at') or '')
-                    t = Gtk.Label()
-                    t.set_xalign(0)
-                    t.set_markup(f"{GLib.markup_escape_text(ts)}" +
-                                 ("  <small>• current</small>" if idx == 0 else ""))
-                    rb.append(t)
-                    sub = []
-                    sz = e.get('size_bytes') or e.get('file_size_bytes')
-                    if sz:
-                        sub.append(self._fmt_size(sz))
-                    dev = self._entry_device(e)
-                    if dev:
-                        sub.append(dev)
-                    if sub:
-                        s = Gtk.Label()
-                        s.set_xalign(0)
-                        s.add_css_class('dim-label')
-                        s.set_markup(f"<small>{GLib.markup_escape_text(' · '.join(sub))}</small>")
-                        rb.append(s)
-                    row.set_child(rb)
-                    listbox.append(row)
-                    if first_row[0] is None:
-                        first_row[0] = row
-
-        add_section("State", states, 'states')
-        add_section("Save", saves, 'saves')
+        self._fill_history_list(saves, states)
 
         # RIGHT: preview pane
         right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -3535,14 +3496,22 @@ class EnhancedLibrarySection:
         self._preview_picture.set_size_request(360, 260)
         if hasattr(self._preview_picture, 'set_content_fit') and hasattr(Gtk, 'ContentFit'):
             self._preview_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
-        pic_frame = Gtk.Frame()
-        pic_frame.set_child(self._preview_picture)
-        right.append(pic_frame)
-
+        # Status text (Loading…/No screenshot/…) sits centered inside the preview area
         self._preview_status = Gtk.Label(label="Select a version to preview")
         self._preview_status.add_css_class('dim-label')
         self._preview_status.set_wrap(True)
-        right.append(self._preview_status)
+        self._preview_status.set_justify(Gtk.Justification.CENTER)
+        self._preview_status.set_halign(Gtk.Align.CENTER)
+        self._preview_status.set_valign(Gtk.Align.CENTER)
+        self._preview_status.set_margin_start(12)
+        self._preview_status.set_margin_end(12)
+        preview_overlay = Gtk.Overlay()
+        preview_overlay.set_vexpand(True)
+        preview_overlay.set_child(self._preview_picture)
+        preview_overlay.add_overlay(self._preview_status)
+        pic_frame = Gtk.Frame()
+        pic_frame.set_child(preview_overlay)
+        right.append(pic_frame)
 
         self._preview_info = Gtk.Label()
         self._preview_info.set_xalign(0)
@@ -3575,8 +3544,155 @@ class EnhancedLibrarySection:
         toolbar_view.set_content(content)
         win.set_content(toolbar_view)
         win.present()
-        if first_row[0] is not None:
-            listbox.select_row(first_row[0])
+        self._select_first_history_row()
+
+    def _fill_history_list(self, saves, states):
+        """(Re)populate the version list box, grouped by type → slot, newest first."""
+        listbox = self._history_listbox
+        # Clear any existing rows
+        child = listbox.get_first_child()
+        while child is not None:
+            nxt = child.get_next_sibling()
+            listbox.remove(child)
+            child = nxt
+
+        def add_section(label, entries, save_type):
+            groups = {}
+            for e in entries:
+                if not isinstance(e, dict):
+                    continue
+                slot = e.get('slot') or RomMClient.get_slot_info(e.get('file_name', ''))[0] or 'default'
+                groups.setdefault(slot, []).append(e)
+            for slot in sorted(groups):
+                items = sorted(groups[slot],
+                               key=lambda x: x.get('updated_at') or x.get('created_at') or '',
+                               reverse=True)
+                header = Gtk.ListBoxRow()
+                header.set_selectable(False)
+                header.set_activatable(False)
+                hl = Gtk.Label()
+                hl.set_xalign(0)
+                hl.set_markup(f"<b>{GLib.markup_escape_text(f'{label} — Slot: {slot}')}</b>")
+                hl.set_margin_top(8); hl.set_margin_bottom(2)
+                hl.set_margin_start(8); hl.set_margin_end(8)
+                header.set_child(hl)
+                listbox.append(header)
+                for idx, e in enumerate(items):
+                    row = Gtk.ListBoxRow()
+                    row._entry = e
+                    row._save_type = save_type
+                    rb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+                    rb.set_margin_top(6); rb.set_margin_bottom(6)
+                    rb.set_margin_start(10); rb.set_margin_end(10)
+                    ts = self._fmt_ts(e.get('updated_at') or e.get('created_at') or '')
+                    t = Gtk.Label()
+                    t.set_xalign(0)
+                    t.set_markup(f"{GLib.markup_escape_text(ts)}" +
+                                 ("  <small>• Current</small>" if idx == 0 else ""))
+                    rb.append(t)
+                    sub = []
+                    sz = e.get('size_bytes') or e.get('file_size_bytes')
+                    if sz:
+                        sub.append(self._fmt_size(sz))
+                    dev = self._entry_device(e)
+                    if dev:
+                        sub.append(dev)
+                    if sub:
+                        s = Gtk.Label()
+                        s.set_xalign(0)
+                        s.add_css_class('dim-label')
+                        s.set_markup(f"<small>{GLib.markup_escape_text(' · '.join(sub))}</small>")
+                        rb.append(s)
+                    row.set_child(rb)
+                    listbox.append(row)
+
+        add_section("State", states, 'states')
+        add_section("Save", saves, 'saves')
+        self._known_ids = {e.get('id') for e in (list(saves) + list(states))
+                           if isinstance(e, dict) and e.get('id') is not None}
+
+    def _set_history_busy(self, busy, text=""):
+        sp = getattr(self, '_history_spinner', None)
+        if sp is not None:
+            sp.set_visible(busy)
+            sp.start() if busy else sp.stop()
+        lb = getattr(self, '_history_busy_label', None)
+        if lb is not None:
+            lb.set_text(text)
+            lb.set_visible(busy and bool(text))
+        for attr in ('_restore_btn', '_copy_btn', '_history_refresh_btn'):
+            b = getattr(self, attr, None)
+            if b is not None:
+                b.set_sensitive(not busy)
+        return False
+
+    def _finish_refresh(self, saves, states):
+        win = getattr(self, '_history_win', None)
+        if win is None or not win.get_visible():
+            return False
+        self._shot_cache = {}
+        self._current_entry = None
+        self._fill_history_list(saves, states)
+        self._set_history_busy(False)
+        self._select_first_history_row()
+        return False
+
+    def _select_first_history_row(self):
+        listbox = getattr(self, '_history_listbox', None)
+        if listbox is None:
+            return
+        child = listbox.get_first_child()
+        while child is not None:
+            if hasattr(child, '_entry'):
+                listbox.select_row(child)
+                return
+            child = child.get_next_sibling()
+
+    def _refresh_history(self):
+        """Re-fetch the version list from the server and repopulate the open dialog."""
+        rom_id = getattr(self, '_history_rom_id', None)
+        win = getattr(self, '_history_win', None)
+        if not rom_id or not getattr(self, '_history_listbox', None):
+            return
+        if win is None or not win.get_visible():
+            return  # dialog was closed; nothing to refresh
+        self._set_history_busy(True, "Refreshing…")
+
+        def worker():
+            saves, states = self._fetch_save_history(rom_id)
+            GLib.idle_add(self._finish_refresh, saves, states)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _await_restore_sync(self, baseline_ids):
+        """Poll the server until the restore's re-uploaded version appears, then
+        refresh the open dialog. Timing is derived from the auto-sync upload
+        debounce (no magic numbers): the watcher waits upload_delay seconds of
+        file stability before uploading, so there's no point polling before then.
+        We wait that long, then poll on a 1s cadence (matching the upload worker's
+        own tick) until the new version id shows up, with a bounded timeout."""
+        import time
+        rom_id = getattr(self, '_history_rom_id', None)
+        if not rom_id:
+            GLib.idle_add(self._set_history_busy, False)
+            return
+        baseline = set(baseline_ids or set())
+        auto_sync = getattr(self.parent, 'auto_sync', None)
+        upload_delay = getattr(auto_sync, 'upload_delay', 3)
+        # Initial wait until the upload could have started (debounce + small buffer),
+        # then poll every second up to a generous ceiling for slow networks.
+        time.sleep(upload_delay + 0.5)
+        deadline = time.time() + 20
+        while True:
+            win = getattr(self, '_history_win', None)
+            if win is None or not win.get_visible():
+                return  # dialog closed; stop polling
+            saves, states = self._fetch_save_history(rom_id)
+            ids = {e.get('id') for e in (saves + states)
+                   if isinstance(e, dict) and e.get('id') is not None}
+            if ids - baseline or time.time() >= deadline:
+                GLib.idle_add(self._finish_refresh, saves, states)
+                return
+            time.sleep(1.0)
 
     def _on_history_row_selected(self, listbox, row):
         if row is None or not hasattr(row, '_entry'):
@@ -3672,12 +3788,27 @@ class EnhancedLibrarySection:
                 self._preview_status.set_visible(False)
         return False
 
+    def _slot_label_for(self, tgt_name):
+        import re
+        if not tgt_name:
+            return "a new slot"
+        m = re.search(r'\.state(\d+)$', tgt_name)
+        if m:
+            return f"slot {m.group(1)}"
+        if tgt_name.lower().endswith('.state.auto'):
+            return "the auto slot"
+        if tgt_name.endswith('.state'):
+            return "the quicksave slot"
+        return "a new slot"
+
     def _confirm_restore(self, parent_win, game, entry, save_type, as_copy):
         kind = save_type[:-1]
         ts = self._fmt_ts(entry.get('updated_at') or entry.get('created_at') or '')
         if as_copy:
+            _, tgt_name = self._resolve_restore_dest(game, entry, save_type, True)
+            where = f"{self._slot_label_for(tgt_name)} ({tgt_name})" if tgt_name else "a new free slot"
             title = "Restore as copy?"
-            body = (f"Download this {kind} version ({ts}) into a new free slot. "
+            body = (f"Download this {kind} version ({ts}) into {where}. "
                     f"Your current slots are left untouched.")
             label, destructive = "Restore as copy", False
         else:
@@ -3693,8 +3824,11 @@ class EnhancedLibrarySection:
 
         def on_resp(d, r):
             if r == "ok":
+                self._set_history_busy(True, "Restoring…")
+                baseline = set(getattr(self, '_known_ids', set()))
                 threading.Thread(target=self._restore_version,
-                                 args=(game, entry, save_type, as_copy), daemon=True).start()
+                                 args=(game, entry, save_type, as_copy, baseline),
+                                 daemon=True).start()
         dlg.connect('response', on_resp)
         dlg.present(parent_win)
 
@@ -3734,12 +3868,13 @@ class EnhancedLibrarySection:
                              if f"{stem}.state{n}" not in existing), f"{stem}.state1")
         return dest_dir, tgt_name
 
-    def _restore_version(self, game, entry, save_type, as_copy=False):
+    def _restore_version(self, game, entry, save_type, as_copy=False, baseline_ids=None):
         try:
             dest_dir, tgt_name = self._resolve_restore_dest(game, entry, save_type, as_copy)
             if not dest_dir or not tgt_name:
                 GLib.idle_add(self.parent.log_message,
                               "❌ Could not determine restore location (download the game first).")
+                GLib.idle_add(self._set_history_busy, False)
                 return
             dest = Path(dest_dir) / tgt_name
             save_id = entry.get('id')
@@ -3772,11 +3907,18 @@ class EnhancedLibrarySection:
                     except Exception as e:
                         logging.debug(f"Restore screenshot failed: {e}")
                 GLib.idle_add(self.parent.log_message, f"✅ Restored {save_type[:-1]} → {dest.name}")
+                # Reflect the new version (created by the auto-upload) in an open browser:
+                # show a spinner and poll until the upload actually lands (adaptive),
+                # rather than guessing a fixed delay.
+                GLib.idle_add(self._set_history_busy, True, "Syncing to server…")
+                self._await_restore_sync(baseline_ids)
             else:
                 GLib.idle_add(self.parent.log_message,
                               f"❌ Failed to restore {save_type} id={save_id}")
+                GLib.idle_add(self._set_history_busy, False)
         except Exception as e:
             GLib.idle_add(self.parent.log_message, f"❌ Restore error: {e}")
+            GLib.idle_add(self._set_history_busy, False)
 
     def auto_expand_platforms_with_results(self, filtered_games):
         """Automatically expand platforms that contain search results"""
