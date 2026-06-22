@@ -3061,14 +3061,21 @@ class RomMClient:
                 return False
 
             # Generate RomM-style filename with timestamp
-            original_basename = file_path.stem
-            file_extension = file_path.suffix
-
             import datetime
             now = datetime.datetime.now()
             timestamp = now.strftime("%Y-%m-%d %H-%M-%S-%f")[:-3]
 
-            romm_filename = f"{original_basename} [{timestamp}]{file_extension}"
+            # RetroArch auto-savestate "<content>.state.auto" is a two-part suffix.
+            # The server convention puts the full suffix AFTER the timestamp
+            # ("X [ts].state.auto"); the generic stem/suffix split would instead
+            # emit "X.state [ts].auto", which fails to round-trip on download.
+            if file_path.name.lower().endswith('.state.auto'):
+                base = file_path.name[:-len('.state.auto')]
+                romm_filename = f"{base} [{timestamp}].state.auto"
+            else:
+                original_basename = file_path.stem
+                file_extension = file_path.suffix
+                romm_filename = f"{original_basename} [{timestamp}]{file_extension}"
             logging.debug(f"Upload filename: {romm_filename}")
 
             try:
@@ -3264,8 +3271,17 @@ class RomMClient:
             else:
                 return None, None
 
-            original_basename = file_path.stem
-            file_extension = file_path.suffix
+            # RetroArch auto-savestate "<content>.state.auto" is a two-part suffix; the
+            # server convention puts the full suffix AFTER the timestamp
+            # ("X [ts].state.auto"). The generic stem/suffix split emits the broken
+            # "X.state [ts].auto", which fails to round-trip on download (-> .state.state).
+            is_auto_state = file_path.name.lower().endswith('.state.auto')
+            if is_auto_state:
+                original_basename = file_path.name[:-len('.state.auto')]
+                file_extension = '.state.auto'
+            else:
+                original_basename = file_path.stem
+                file_extension = file_path.suffix
 
             if save_type == 'saves':
                 # Reuse existing server filename for saves
@@ -4865,9 +4881,15 @@ class RetroArchInterface:
         import re
         from pathlib import Path
 
-        # Extract the base filename by removing timestamp brackets
-        # Pattern matches: [YYYY-MM-DD HH-MM-SS-mmm] or similar timestamp formats
-        timestamp_pattern = r'\s*\[[\d\-\s:]+\]'
+        # Extract the base filename by removing timestamp brackets.
+        # Pattern matches both timestamp styles seen across clients:
+        #   space style (this client):  [YYYY-MM-DD HH-MM-SS-mmm]
+        #   underscore style (RomM/grout/muos): [YYYY-MM-DD_HH-MM-SS]
+        # The '_' is required — without it underscore-style timestamps survive into
+        # the local filename (e.g. "Game [2026-06-17_08-18-45].srm"), so RetroArch
+        # never loads the synced save. Kept char-scoped (no letters) so legitimate
+        # ROM bracket tags like [T-Eng] or [!] are preserved.
+        timestamp_pattern = r'\s*\[[\d\-\s:_]+\]'
         base_name = re.sub(timestamp_pattern, '', Path(original_filename).stem)
 
         # Get the original extension
@@ -4883,8 +4905,18 @@ class RetroArchInterface:
                 target_filename = f"{base_name}.srm"
 
         elif save_type == 'states':
+            # RetroArch auto-savestate is literally "<content>.state.auto". Path.stem
+            # only strips ".auto", leaving ".state" inside base_name, which would
+            # otherwise produce a doubled "<content>.state.state". Stripping the
+            # timestamp from the FULL name collapses BOTH the correct server form
+            # ("X [ts].state.auto") AND the legacy broken form some of our earlier
+            # uploads created ("X.state [ts].auto") down to "X.state.auto", so both
+            # round-trip to the verbatim suffix here.
+            stripped_full = re.sub(timestamp_pattern, '', original_filename).strip()
+            if stripped_full.lower().endswith('.state.auto'):
+                target_filename = stripped_full
             # Use slot info to determine correct state extension
-            if slot:
+            elif slot:
                 target_filename = self._state_filename_from_slot(base_name, slot)
             else:
                 target_filename = self.determine_state_filename(base_name, target_directory)
@@ -5035,7 +5067,7 @@ class RetroArchInterface:
                                     'retroarch_emulator': retroarch_emulator,
                                     'relative_path': str(file_path.relative_to(directory))
                                 })
-                            elif save_type == 'states' and file_path.suffix.lower() in state_extensions:
+                            elif save_type == 'states' and (file_path.suffix.lower() in state_extensions or file_path.name.lower().endswith('.state.auto')):
                                 files.append({
                                     'name': file_path.name,
                                     'path': str(file_path),
@@ -6158,7 +6190,8 @@ class AutoSyncManager:
                 self._save_upload_fingerprints()
                 self.trigger_session_save_sync("save changed")
                 return
-            elif 'state' in file_path.suffix.lower():
+            elif 'state' in file_path.suffix.lower() or file_path.name.lower().endswith('.state.auto'):
+                # ".state.auto" has suffix ".auto" (no "state"), so match by name too.
                 save_type = 'states'
                 # Look for thumbnail for save states
                 thumbnail_path = self.retroarch.find_thumbnail_for_save_state(file_path)
@@ -6540,7 +6573,13 @@ class AutoSyncManager:
             if not games:
                 return None
 
-            save_basename = file_path.stem
+            # RetroArch auto-savestate "<content>.state.auto" is a two-part suffix;
+            # file_path.stem only drops ".auto", leaving ".state" which would never
+            # match fs_name_no_ext. Strip the full suffix for that case.
+            if file_path.name.lower().endswith('.state.auto'):
+                save_basename = file_path.name[:-len('.state.auto')]
+            else:
+                save_basename = file_path.stem
 
             # Remove timestamps and clean up filename
             import re
@@ -7473,8 +7512,14 @@ class SaveFileHandler(FileSystemEventHandler):
         """Check if the file is a save file we should monitor"""
         try:
             path = Path(file_path)
-            return path.suffix.lower() in self.extensions
-        except:
+            if path.suffix.lower() in self.extensions:
+                return True
+            # RetroArch auto-savestate is "<content>.state.auto"; Path.suffix is
+            # ".auto" so it won't match the numbered-slot set above — match by name.
+            if self.save_type == 'states' and path.name.lower().endswith('.state.auto'):
+                return True
+            return False
+        except Exception:
             return False
 
 def is_path_validly_downloaded(path):
