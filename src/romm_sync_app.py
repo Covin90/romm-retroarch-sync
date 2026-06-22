@@ -3718,12 +3718,30 @@ class EnhancedLibrarySection:
         win = getattr(self, '_history_win', None)
         if win is None or not win.get_visible():
             return False
-        self._shot_cache = {}
+        # Keep _shot_cache (keyed by stable version id) and re-select the same
+        # version so the preview doesn't blank→reload (flicker) on refresh.
+        prev_id = self._current_entry.get('id') if getattr(self, '_current_entry', None) else None
         self._current_entry = None
         self._fill_history_list(saves, states)
         self._set_history_busy(False)
-        self._select_first_history_row()
+        if not self._select_history_row_by_id(prev_id):
+            self._select_first_history_row()
         self._history_done(done_text)
+        return False
+
+    def _select_history_row_by_id(self, entry_id):
+        if entry_id is None:
+            return False
+        listbox = getattr(self, '_history_listbox', None)
+        if listbox is None:
+            return False
+        child = listbox.get_first_child()
+        while child is not None:
+            e = getattr(child, '_entry', None)
+            if e is not None and e.get('id') == entry_id:
+                listbox.select_row(child)
+                return True
+            child = child.get_next_sibling()
         return False
 
     def _select_first_history_row(self):
