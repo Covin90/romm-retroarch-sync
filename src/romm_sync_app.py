@@ -3456,30 +3456,18 @@ class EnhancedLibrarySection:
         win.set_default_size(840, 600)
         toolbar_view = Adw.ToolbarView()
         header_bar = Adw.HeaderBar()
-        self._history_refresh_btn = Gtk.Button.new_from_icon_name("view-refresh-symbolic")
+        # The refresh button itself morphs: refresh icon → spinner → green ✓ →
+        # back to refresh. A left-anchored status label sits next to it.
+        self._history_refresh_btn = Gtk.Button()
         self._history_refresh_btn.set_tooltip_text("Refresh history from server")
         self._history_refresh_btn.connect('clicked', lambda b: self._refresh_history())
-        header_bar.pack_start(self._history_refresh_btn)
-        # Busy / done indicator (restore→sync / refresh), left-anchored so the
-        # status text's left edge stays put. Spinner + check share one fixed-size
-        # cell (overlay) so swapping them never shifts the label.
-        self._history_spinner = Gtk.Spinner()
-        self._history_spinner.set_size_request(16, 16)
-        self._history_spinner.set_visible(False)
-        self._history_check = Gtk.Label()  # green ✓ (matches the library view), icon-free
-        self._history_check.set_markup('<span foreground="#4ade80">✓</span>')
-        self._history_check.set_visible(False)
-        indicator = Gtk.Overlay()
-        indicator.set_size_request(18, 18)
-        indicator.set_valign(Gtk.Align.CENTER)
-        indicator.set_child(self._history_spinner)
-        indicator.add_overlay(self._history_check)
         self._history_busy_label = Gtk.Label()
         self._history_busy_label.add_css_class('dim-label')
         self._history_busy_label.set_xalign(0)
         self._history_busy_label.set_visible(False)
+        self._set_refresh_btn_state('idle')
         status_box = Gtk.Box(spacing=6)
-        status_box.append(indicator)
+        status_box.append(self._history_refresh_btn)
         status_box.append(self._history_busy_label)
         header_bar.pack_start(status_box)
         toolbar_view.add_top_bar(header_bar)
@@ -3625,44 +3613,59 @@ class EnhancedLibrarySection:
         self._known_ids = {e.get('id') for e in (list(saves) + list(states))
                            if isinstance(e, dict) and e.get('id') is not None}
 
+    def _set_refresh_btn_state(self, state):
+        """Morph the header refresh button: 'idle' (refresh icon) | 'busy'
+        (spinner) | 'done' (green ✓)."""
+        btn = getattr(self, '_history_refresh_btn', None)
+        if btn is None:
+            return
+        btn.set_opacity(1)
+        if state == 'busy':
+            sp = Gtk.Spinner()
+            sp.set_size_request(16, 16)
+            sp.start()
+            btn.set_child(sp)
+            btn.set_sensitive(False)
+        elif state == 'done':
+            chk = Gtk.Label()
+            chk.set_markup('<span foreground="#4ade80">✓</span>')
+            btn.set_child(chk)
+            btn.set_sensitive(False)
+        else:  # idle
+            btn.set_child(Gtk.Image.new_from_icon_name("view-refresh-symbolic"))
+            btn.set_sensitive(True)
+
     def _set_history_busy(self, busy, text=""):
         if busy:
-            # A new operation cancels any in-flight success-fade and hides the check.
-            self._history_fade_token = None
-            chk = getattr(self, '_history_check', None)
-            if chk is not None:
-                chk.set_visible(False)
-                chk.set_opacity(1)
-        sp = getattr(self, '_history_spinner', None)
-        if sp is not None:
-            sp.set_visible(busy)
-            sp.start() if busy else sp.stop()
-        lb = getattr(self, '_history_busy_label', None)
-        if lb is not None:
-            if busy:
+            self._history_fade_token = None  # cancel any in-flight success fade
+            self._set_refresh_btn_state('busy')
+            lb = getattr(self, '_history_busy_label', None)
+            if lb is not None:
                 lb.set_opacity(1)
                 lb.set_text(text)
-            lb.set_visible(busy and bool(text))
-        for attr in ('_restore_btn', '_copy_btn', '_history_refresh_btn'):
+                lb.set_visible(bool(text))
+        else:
+            self._set_refresh_btn_state('idle')
+            lb = getattr(self, '_history_busy_label', None)
+            if lb is not None:
+                lb.set_visible(False)
+        for attr in ('_restore_btn', '_copy_btn'):
             b = getattr(self, attr, None)
             if b is not None:
                 b.set_sensitive(not busy)
         return False
 
     def _history_done(self, text="Up to date"):
-        """Show a checkmark + message in the header, then fade it out."""
+        """Turn the refresh button into a ✓ with a message, then fade back to idle."""
         win = getattr(self, '_history_win', None)
         if win is None or not win.get_visible():
             return
-        chk = getattr(self, '_history_check', None)
+        self._set_refresh_btn_state('done')
         lb = getattr(self, '_history_busy_label', None)
-        if chk is None or lb is None:
-            return
-        chk.set_opacity(1)
-        chk.set_visible(True)
-        lb.set_opacity(1)
-        lb.set_text(text)
-        lb.set_visible(True)
+        if lb is not None:
+            lb.set_opacity(1)
+            lb.set_text(text)
+            lb.set_visible(bool(text))
         token = object()
         self._history_fade_token = token
         GLib.timeout_add(1600, lambda: self._history_fade_step(token, 1.0))
@@ -3671,20 +3674,21 @@ class EnhancedLibrarySection:
         if getattr(self, '_history_fade_token', None) is not token:
             return False  # superseded by a newer operation
         win = getattr(self, '_history_win', None)
-        chk = getattr(self, '_history_check', None)
+        btn = getattr(self, '_history_refresh_btn', None)
         lb = getattr(self, '_history_busy_label', None)
-        if win is None or not win.get_visible() or chk is None or lb is None:
+        if win is None or not win.get_visible() or btn is None:
             return False
         opacity -= 0.08
         if opacity <= 0:
-            chk.set_visible(False)
-            lb.set_visible(False)
-            chk.set_opacity(1)
-            lb.set_opacity(1)
+            if lb is not None:
+                lb.set_visible(False)
+                lb.set_opacity(1)
             self._history_fade_token = None
+            self._set_refresh_btn_state('idle')  # revert ✓ → refresh icon
             return False
-        chk.set_opacity(opacity)
-        lb.set_opacity(opacity)
+        btn.set_opacity(opacity)
+        if lb is not None:
+            lb.set_opacity(opacity)
         GLib.timeout_add(40, lambda: self._history_fade_step(token, opacity))
         return False
 
