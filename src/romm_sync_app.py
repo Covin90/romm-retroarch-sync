@@ -3460,13 +3460,17 @@ class EnhancedLibrarySection:
         self._history_refresh_btn.set_tooltip_text("Refresh history from server")
         self._history_refresh_btn.connect('clicked', lambda b: self._refresh_history())
         header_bar.pack_start(self._history_refresh_btn)
-        # Busy indicator (restore→sync / refresh) shown in the header
+        # Busy / done indicator (restore→sync / refresh) shown in the header
         self._history_spinner = Gtk.Spinner()
         self._history_spinner.set_visible(False)
+        self._history_check = Gtk.Image.new_from_icon_name("emblem-ok-symbolic")
+        self._history_check.add_css_class('success')
+        self._history_check.set_visible(False)
         self._history_busy_label = Gtk.Label()
         self._history_busy_label.add_css_class('dim-label')
         self._history_busy_label.set_visible(False)
         header_bar.pack_end(self._history_busy_label)
+        header_bar.pack_end(self._history_check)
         header_bar.pack_end(self._history_spinner)
         toolbar_view.add_top_bar(header_bar)
 
@@ -3612,13 +3616,22 @@ class EnhancedLibrarySection:
                            if isinstance(e, dict) and e.get('id') is not None}
 
     def _set_history_busy(self, busy, text=""):
+        if busy:
+            # A new operation cancels any in-flight success-fade and hides the check.
+            self._history_fade_token = None
+            chk = getattr(self, '_history_check', None)
+            if chk is not None:
+                chk.set_visible(False)
+                chk.set_opacity(1)
         sp = getattr(self, '_history_spinner', None)
         if sp is not None:
             sp.set_visible(busy)
             sp.start() if busy else sp.stop()
         lb = getattr(self, '_history_busy_label', None)
         if lb is not None:
-            lb.set_text(text)
+            if busy:
+                lb.set_opacity(1)
+                lb.set_text(text)
             lb.set_visible(busy and bool(text))
         for attr in ('_restore_btn', '_copy_btn', '_history_refresh_btn'):
             b = getattr(self, attr, None)
@@ -3626,7 +3639,46 @@ class EnhancedLibrarySection:
                 b.set_sensitive(not busy)
         return False
 
-    def _finish_refresh(self, saves, states):
+    def _history_done(self, text="Up to date"):
+        """Show a checkmark + message in the header, then fade it out."""
+        win = getattr(self, '_history_win', None)
+        if win is None or not win.get_visible():
+            return
+        chk = getattr(self, '_history_check', None)
+        lb = getattr(self, '_history_busy_label', None)
+        if chk is None or lb is None:
+            return
+        chk.set_opacity(1)
+        chk.set_visible(True)
+        lb.set_opacity(1)
+        lb.set_text(text)
+        lb.set_visible(True)
+        token = object()
+        self._history_fade_token = token
+        GLib.timeout_add(1600, lambda: self._history_fade_step(token, 1.0))
+
+    def _history_fade_step(self, token, opacity):
+        if getattr(self, '_history_fade_token', None) is not token:
+            return False  # superseded by a newer operation
+        win = getattr(self, '_history_win', None)
+        chk = getattr(self, '_history_check', None)
+        lb = getattr(self, '_history_busy_label', None)
+        if win is None or not win.get_visible() or chk is None or lb is None:
+            return False
+        opacity -= 0.08
+        if opacity <= 0:
+            chk.set_visible(False)
+            lb.set_visible(False)
+            chk.set_opacity(1)
+            lb.set_opacity(1)
+            self._history_fade_token = None
+            return False
+        chk.set_opacity(opacity)
+        lb.set_opacity(opacity)
+        GLib.timeout_add(40, lambda: self._history_fade_step(token, opacity))
+        return False
+
+    def _finish_refresh(self, saves, states, done_text="Up to date"):
         win = getattr(self, '_history_win', None)
         if win is None or not win.get_visible():
             return False
@@ -3635,6 +3687,7 @@ class EnhancedLibrarySection:
         self._fill_history_list(saves, states)
         self._set_history_busy(False)
         self._select_first_history_row()
+        self._history_done(done_text)
         return False
 
     def _select_first_history_row(self):
@@ -3689,8 +3742,11 @@ class EnhancedLibrarySection:
             saves, states = self._fetch_save_history(rom_id)
             ids = {e.get('id') for e in (saves + states)
                    if isinstance(e, dict) and e.get('id') is not None}
-            if ids - baseline or time.time() >= deadline:
-                GLib.idle_add(self._finish_refresh, saves, states)
+            if ids - baseline:
+                GLib.idle_add(self._finish_refresh, saves, states, "Restore complete")
+                return
+            if time.time() >= deadline:
+                GLib.idle_add(self._finish_refresh, saves, states, "Restored (sync pending)")
                 return
             time.sleep(1.0)
 
