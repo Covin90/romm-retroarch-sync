@@ -2041,6 +2041,125 @@ function ScreenshotGrid({ paths }: { paths: string[]; }) {
   );
 }
 
+type Achievement = {
+  ra_id: number | null; title: string; description: string; points: number;
+  type: string; badge_id: string | null; badge_url: string | null;
+  badge_url_lock: string | null; earned: boolean;
+};
+type TypeFilter = 'all' | 'progression' | 'missable' | 'win_condition';
+type StatusFilter = 'all' | 'earned' | 'locked';
+
+function AchievementsTab({ achievements }: { achievements: Achievement[] }) {
+  const [typeFilter, setTypeFilter] = useState<TypeFilter>('all');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+
+  if (!achievements.length) {
+    return (
+      <div style={{ padding: '30px 0', color: V2.fgMuted, fontSize: '13px', fontStyle: 'italic', textAlign: 'center' }}>
+        No achievement data for this game.
+      </div>
+    );
+  }
+
+  const earnedCount = achievements.filter((a) => a.earned).length;
+  const totalPoints = achievements.reduce((s, a) => s + (a.points || 0), 0);
+  const progressionCount = achievements.filter((a) => a.type === 'progression').length;
+  const missableCount = achievements.filter((a) => a.type === 'missable').length;
+
+  const filtered = achievements.filter((a) => {
+    if (typeFilter !== 'all' && a.type !== typeFilter) return false;
+    if (statusFilter === 'earned' && !a.earned) return false;
+    if (statusFilter === 'locked' && a.earned) return false;
+    return true;
+  });
+
+  const typeLabel = (t: string) => t === 'win_condition' ? 'Win Condition' : t.charAt(0).toUpperCase() + t.slice(1);
+  const toggleStatus = (s: StatusFilter) => setStatusFilter((cur) => cur === s ? 'all' : s);
+
+  const stat = (val: any, lbl: string, missable = false) => (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px', padding: '0 12px' }}>
+      <div style={{ fontSize: '20px', fontWeight: 700, color: missable ? V2.warning : V2.fg, fontVariantNumeric: 'tabular-nums' }}>{val}</div>
+      <div style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: V2.fgMuted }}>{lbl}</div>
+    </div>
+  );
+
+  const typeTagStyle = (t: string): any => {
+    const base: any = { fontSize: '9.5px', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', padding: '2px 7px', borderRadius: '8px' };
+    if (t === 'progression') return { ...base, background: 'rgba(99,102,241,0.18)', color: V2.igdb };
+    if (t === 'missable') return { ...base, background: 'rgba(251,191,36,0.18)', color: V2.warning };
+    if (t === 'win_condition') return { ...base, background: 'rgba(74,222,128,0.18)', color: V2.success };
+    return { ...base, background: V2.surface, color: V2.fg2 };
+  };
+
+  const filterBtn = (key: string, label: string, active: boolean, onClick: () => void, accent?: 'earned' | 'locked') => {
+    let bg = V2.surface, color = V2.fg2, border = V2.border;
+    if (active) {
+      if (accent === 'earned') { bg = 'rgba(74,222,128,0.30)'; border = 'rgba(74,222,128,0.50)'; color = V2.fg; }
+      else if (accent === 'locked') { bg = 'rgba(255,80,80,0.24)'; border = 'rgba(255,80,80,0.45)'; color = V2.fg; }
+      else { bg = V2.fg; border = V2.fg; color = V2.bg; }
+    }
+    return (
+      <Focusable
+        key={key}
+        onActivate={onClick}
+        onClick={onClick}
+        style={{
+          background: bg, border: `1px solid ${border}`, borderRadius: V2.radiusPill,
+          color, padding: '5px 13px', fontSize: '11.5px', fontWeight: 500, cursor: 'pointer',
+        }}
+      >
+        {label}
+      </Focusable>
+    );
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+      <div style={{ display: 'flex', background: V2.surface, border: `1px solid ${V2.border}`, borderRadius: V2.radiusLg, padding: '14px 0' }}>
+        {stat(`${earnedCount} / ${achievements.length}`, 'Achievements')}
+        <div style={{ width: '1px', background: V2.border }} />
+        {stat(totalPoints, 'Total Points')}
+        {progressionCount > 0 && <><div style={{ width: '1px', background: V2.border }} />{stat(progressionCount, 'Progression')}</>}
+        {missableCount > 0 && <><div style={{ width: '1px', background: V2.border }} />{stat(missableCount, 'Missable', true)}</>}
+      </div>
+
+      <Focusable style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '6px' }}>
+        {(['all', 'progression', 'missable', 'win_condition'] as TypeFilter[]).map((f) =>
+          filterBtn(f, typeLabel(f), typeFilter === f, () => setTypeFilter(f)))}
+        <span style={{ width: '1px', height: '16px', background: V2.surfaceHover, margin: '0 4px' }} />
+        {filterBtn('earned', '✓ Earned', statusFilter === 'earned', () => toggleStatus('earned'), 'earned')}
+        {filterBtn('locked', '⊘ Locked', statusFilter === 'locked', () => toggleStatus('locked'), 'locked')}
+      </Focusable>
+
+      <Focusable style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+        {filtered.map((a, i) => {
+          const src = a.earned ? a.badge_url : a.badge_url_lock;
+          return (
+            <div key={a.ra_id ?? i} style={{
+              display: 'grid', gridTemplateColumns: '52px 1fr auto', gap: '14px', alignItems: 'center',
+              padding: '10px 14px', background: V2.surface, border: `1px solid ${V2.border}`,
+              borderRadius: V2.radiusMd, opacity: a.earned ? 1 : 0.55,
+            }}>
+              <div style={{ width: '52px', height: '52px', borderRadius: '8px', overflow: 'hidden', background: V2.coverPlaceholder, flexShrink: 0 }}>
+                {src && <img src={src} alt={a.title} loading="lazy" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                  onError={(e) => { (e.target as HTMLImageElement).style.visibility = 'hidden'; }} />}
+              </div>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: '13px', fontWeight: 600, color: V2.fg }}>{a.title}</div>
+                <div style={{ fontSize: '11.5px', color: V2.fgMuted, marginTop: '2px', lineHeight: 1.4 }}>{a.description}</div>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px', whiteSpace: 'nowrap' }}>
+                <div style={{ fontSize: '12px', fontWeight: 700, color: V2.fg2, fontVariantNumeric: 'tabular-nums' }}>{a.points} pts</div>
+                {a.type && <span style={typeTagStyle(a.type)}>{typeLabel(a.type)}</span>}
+              </div>
+            </div>
+          );
+        })}
+      </Focusable>
+    </div>
+  );
+}
+
 function GameDetailPage() {
   const game = _libGameHolder;
   const [detail, setDetail] = useState<any>(null);
@@ -2139,7 +2258,7 @@ function GameDetailPage() {
   if (detail?.files?.length) tabList.push({ id: 'files', label: 'Files' });
   if (detail?.screenshots?.length) tabList.push({ id: 'screenshots', label: 'Screenshots' });
   tabList.push({ id: 'save-data', label: 'Save Data' });
-  tabList.push({ id: 'achievements', label: 'Achievements' });
+  if (detail?.achievements?.length) tabList.push({ id: 'achievements', label: 'Achievements' });
 
   // L1 / R1 page through the detail tabs (RomM pages detail tabs with bumpers).
   const cycleTab = (dir: -1 | 1) => {
@@ -2264,10 +2383,7 @@ function GameDetailPage() {
                 </V2Button></div>
               </div>
             ) : (
-              // achievements
-              <div style={{ fontSize: '12px', color: V2.fgMuted, fontStyle: 'italic' }}>
-                RetroAchievements coming soon.
-              </div>
+              <AchievementsTab achievements={detail?.achievements || []} />
             )}
           </div>
         </Focusable>

@@ -1702,6 +1702,43 @@ class Plugin:
             for f in (d.get('files') or []):
                 files.append({'name': f.get('file_name') or f.get('fs_name'),
                               'size': f.get('file_size_bytes') or f.get('size_bytes')})
+
+            # RetroAchievements — mirror RomM's GameDetails wiring: the rom's
+            # merged_ra_metadata.achievements list, with each achievement marked
+            # earned when its badge_id is in the user's progression set for this
+            # game (located by rom_ra_id == rom.ra_id). Badge art uses the public
+            # RetroAchievements CDN URLs so the frontend <img> can load directly.
+            achievements = []
+            ra_id = d.get('ra_id')
+            earned_ids = set()
+            if ra_id:
+                try:
+                    mr = self._romm_client.session.get(
+                        urljoin(self._romm_client.base_url, '/api/users/me'), timeout=10)
+                    me = mr.json() if mr.status_code == 200 else {}
+                    for prog in ((me.get('ra_progression') or {}).get('results') or []):
+                        if prog.get('rom_ra_id') == ra_id:
+                            earned_ids = {str(e.get('id')) for e in (prog.get('earned_achievements') or []) if e.get('id') is not None}
+                            break
+                except Exception:
+                    earned_ids = set()
+            ra_meta = d.get('merged_ra_metadata') or {}
+            raw_ach = sorted((ra_meta.get('achievements') or []),
+                             key=lambda a: (a.get('display_order') if a.get('display_order') is not None else 1e9))
+            for a in raw_ach:
+                bid = a.get('badge_id')
+                achievements.append({
+                    'ra_id': a.get('ra_id'),
+                    'title': a.get('title') or '',
+                    'description': a.get('description') or '',
+                    'points': a.get('points') or 0,
+                    'type': a.get('type') or '',
+                    'badge_id': str(bid) if bid is not None else None,
+                    'badge_url': a.get('badge_url'),
+                    'badge_url_lock': a.get('badge_url_lock'),
+                    'earned': bool(bid is not None and str(bid) in earned_ids),
+                })
+
             return {
                 'success': True,
                 'rom_id': rom_id,
@@ -1715,6 +1752,7 @@ class Plugin:
                 'rating': meta.get('total_rating') or d.get('total_rating'),
                 'files': files,
                 'screenshots': [s for s in (d.get('merged_screenshots') or []) if s],
+                'achievements': achievements,
                 'fs_size_bytes': d.get('fs_size_bytes') or 0,
                 'is_downloaded': bool(local.get('is_downloaded')),
                 'has_cover': bool(d.get('path_cover_small') or local.get('cover_path')),
