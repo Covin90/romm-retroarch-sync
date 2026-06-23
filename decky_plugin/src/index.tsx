@@ -2069,12 +2069,12 @@ function AchievementsTab({ achievements }: { achievements: Achievement[] }) {
   const progressionCount = achievements.filter((a) => a.type === 'progression').length;
   const missableCount = achievements.filter((a) => a.type === 'missable').length;
 
-  const filtered = achievements.filter((a) => {
+  const isVisible = (a: Achievement) => {
     if (typeFilter !== 'all' && a.type !== typeFilter) return false;
     if (statusFilter === 'earned' && !a.earned) return false;
     if (statusFilter === 'locked' && a.earned) return false;
     return true;
-  });
+  };
 
   const typeLabel = (t: string) => t === 'win_condition' ? 'Win Condition' : t.charAt(0).toUpperCase() + t.slice(1);
   const toggleStatus = (s: StatusFilter) => setStatusFilter((cur) => cur === s ? 'all' : s);
@@ -2124,6 +2124,8 @@ function AchievementsTab({ achievements }: { achievements: Achievement[] }) {
       <style>{`
         @keyframes achFade { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
         .ach-fade { animation: achFade 320ms ${EASE} both; animation-delay: calc(var(--ach-i, 0) * 28ms); }
+        /* Filtering collapses/expands rows in place so both entry and exit animate. */
+        .ach-slot { overflow: hidden; transition: max-height 280ms ${EASE}, opacity 220ms ease, margin-bottom 280ms ${EASE}; }
         .ach-row { transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ${EASE}, box-shadow 0.15s ease; }
         .ach-row:hover, .ach-row:focus-within {
           background: ${V2.surfaceHover}; border-color: ${V2.borderStrong};
@@ -2138,6 +2140,17 @@ function AchievementsTab({ achievements }: { achievements: Achievement[] }) {
           {stat(totalPoints, 'Total Points')}
           {progressionCount > 0 && <><div style={{ width: '1px', background: V2.border }} />{stat(progressionCount, 'Progression')}</>}
           {missableCount > 0 && <><div style={{ width: '1px', background: V2.border }} />{stat(missableCount, 'Missable', true)}</>}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 14px 8px' }}>
+          <span style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: V2.fgMuted }}>Completion</span>
+          <span style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', fontWeight: 700, color: V2.fg2, fontVariantNumeric: 'tabular-nums' }}>
+            <span style={{
+              width: '8px', height: '8px', borderRadius: '50%',
+              background: pct >= 100 ? V2.success : V2.brand,
+              boxShadow: `0 0 6px ${pct >= 100 ? V2.success : V2.brand}`,
+            }} />
+            {pct}%
+          </span>
         </div>
         <div style={{ height: '4px', background: 'rgba(255,255,255,0.06)' }}>
           <div style={{
@@ -2156,31 +2169,41 @@ function AchievementsTab({ achievements }: { achievements: Achievement[] }) {
         {filterBtn('locked', '⊘ Locked', statusFilter === 'locked', () => toggleStatus('locked'), 'locked')}
       </Focusable>
 
-      <Focusable style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-        {filtered.map((a, i) => {
+      <Focusable style={{ display: 'flex', flexDirection: 'column' }}>
+        {(() => { let vi = 0; return achievements.map((a, i) => {
           const src = a.earned ? a.badge_url : a.badge_url_lock;
+          const vis = isVisible(a);
+          const delay = vis ? (vi++) * 22 : 0; // stagger the expand of currently-visible rows
           return (
-            <div key={a.ra_id ?? i} className="ach-row ach-fade" style={{
-              display: 'grid', gridTemplateColumns: '52px 1fr auto', gap: '14px', alignItems: 'center',
-              padding: '10px 14px', background: V2.surface, border: `1px solid ${V2.border}`,
-              borderRadius: V2.radiusMd, opacity: a.earned ? 1 : 0.55,
-              '--ach-i': Math.min(i, 12) + 2,
-            } as any}>
-              <div style={{ width: '52px', height: '52px', borderRadius: '8px', overflow: 'hidden', background: V2.coverPlaceholder, flexShrink: 0 }}>
-                {src && <img src={src} alt={a.title} loading="lazy" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
-                  onError={(e) => { (e.target as HTMLImageElement).style.visibility = 'hidden'; }} />}
-              </div>
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: '13px', fontWeight: 600, color: V2.fg }}>{a.title}</div>
-                <div style={{ fontSize: '11.5px', color: V2.fgMuted, marginTop: '2px', lineHeight: 1.4 }}>{a.description}</div>
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px', whiteSpace: 'nowrap' }}>
-                <div style={{ fontSize: '12px', fontWeight: 700, color: V2.fg2, fontVariantNumeric: 'tabular-nums' }}>{a.points} pts</div>
-                {a.type && <span style={typeTagStyle(a.type)}>{typeLabel(a.type)}</span>}
+            <div key={a.ra_id ?? i} className="ach-slot" style={{
+              maxHeight: vis ? '160px' : '0px',
+              opacity: vis ? 1 : 0,
+              marginBottom: vis ? '6px' : '0px',
+              pointerEvents: vis ? 'auto' : 'none',
+              transitionDelay: `${delay}ms`,
+            }}>
+              <div className="ach-row ach-fade" style={{
+                display: 'grid', gridTemplateColumns: '52px 1fr auto', gap: '14px', alignItems: 'center',
+                padding: '10px 14px', background: V2.surface, border: `1px solid ${V2.border}`,
+                borderRadius: V2.radiusMd, opacity: a.earned ? 1 : 0.55,
+                '--ach-i': Math.min(i, 12) + 2,
+              } as any}>
+                <div style={{ width: '52px', height: '52px', borderRadius: '8px', overflow: 'hidden', background: V2.coverPlaceholder, flexShrink: 0 }}>
+                  {src && <img src={src} alt={a.title} loading="lazy" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                    onError={(e) => { (e.target as HTMLImageElement).style.visibility = 'hidden'; }} />}
+                </div>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: '13px', fontWeight: 600, color: V2.fg }}>{a.title}</div>
+                  <div style={{ fontSize: '11.5px', color: V2.fgMuted, marginTop: '2px', lineHeight: 1.4 }}>{a.description}</div>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px', whiteSpace: 'nowrap' }}>
+                  <div style={{ fontSize: '12px', fontWeight: 700, color: V2.fg2, fontVariantNumeric: 'tabular-nums' }}>{a.points} pts</div>
+                  {a.type && <span style={typeTagStyle(a.type)}>{typeLabel(a.type)}</span>}
+                </div>
               </div>
             </div>
           );
-        })}
+        }); })()}
       </Focusable>
     </div>
   );
