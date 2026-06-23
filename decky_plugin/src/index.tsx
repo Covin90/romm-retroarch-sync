@@ -2079,10 +2079,9 @@ function AchievementsTab({ achievements }: { achievements: Achievement[] }) {
   const typeLabel = (t: string) => t === 'win_condition' ? 'Win Condition' : t.charAt(0).toUpperCase() + t.slice(1);
   const toggleStatus = (s: StatusFilter) => setStatusFilter((cur) => cur === s ? 'all' : s);
 
-  const stat = (val: any, lbl: string, missable = false, sub?: any) => (
+  const stat = (val: any, lbl: string, missable = false) => (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px', padding: '0 12px' }}>
       <div style={{ fontSize: '20px', fontWeight: 700, color: missable ? V2.warning : V2.fg, fontVariantNumeric: 'tabular-nums' }}>{val}</div>
-      {sub ?? <span style={{ height: '15px' }} />}
       <div style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: V2.fgMuted }}>{lbl}</div>
     </div>
   );
@@ -2136,15 +2135,16 @@ function AchievementsTab({ achievements }: { achievements: Achievement[] }) {
 
       <div className="ach-fade" style={{ display: 'flex', flexDirection: 'column', background: V2.surface, border: `1px solid ${V2.border}`, borderRadius: V2.radiusLg, overflow: 'hidden' }}>
         <div style={{ display: 'flex', padding: '14px 0' }}>
-          {stat(`${earnedCount} / ${achievements.length}`, 'Achievements', false,
-            <span style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '12px', fontWeight: 700, color: V2.fg2, fontVariantNumeric: 'tabular-nums' }}>
+          {stat(
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+              {earnedCount} / {achievements.length}
               <span style={{
-                width: '7px', height: '7px', borderRadius: '50%',
+                width: '6px', height: '6px', borderRadius: '50%',
                 background: pct >= 100 ? V2.success : V2.brand,
                 boxShadow: `0 0 6px ${pct >= 100 ? V2.success : V2.brand}`,
               }} />
               {pct}%
-            </span>)}
+            </span>, 'Achievements')}
           <div style={{ width: '1px', background: V2.border }} />
           {stat(totalPoints, 'Total Points')}
           {progressionCount > 0 && <><div style={{ width: '1px', background: V2.border }} />{stat(progressionCount, 'Progression')}</>}
