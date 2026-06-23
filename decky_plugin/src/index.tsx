@@ -1964,9 +1964,11 @@ function SaveDataTab({ romId }: { romId: number }) {
   }, [sub, states]);
 
   const isSel = (e: HistoryEntry) => selected?.id === e.id && selected?.save_type === e.save_type;
+  // Set (don't toggle): on Steam Deck a single A press can fire both onActivate
+  // and onClick, and a toggle would cancel out and never open the action panel.
   const selectEntry = (e: HistoryEntry) => {
     setConfirm(null);
-    setSelected((cur) => (cur?.id === e.id && cur?.save_type === e.save_type) ? null : e);
+    setSelected(e);
   };
 
   const doRestore = async (asCopy: boolean) => {
@@ -2182,9 +2184,9 @@ function SaveDataTab({ romId }: { romId: number }) {
                     );
                   })}
                 </Focusable>
+                {selected?.save_type === 'states' && g.items.some((it) => it.id === selected.id) && actionPanel(selected)}
               </div>
             ))}
-            {selected?.save_type === 'states' && actionPanel(selected)}
           </div>
         )
       )}
