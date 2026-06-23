@@ -1979,7 +1979,8 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
   const meta = [slotLabel(entry), entry.device || '', fmtHistSize(entry.size_bytes)].filter(Boolean).join(' · ');
 
   return (
-    <ModalRoot bHideCloseIcon onCancel={closeModal} onEscKeypress={closeModal}>
+    <ModalRoot bHideCloseIcon onCancel={closeModal} onEscKeypress={closeModal}
+      className="romm-modal-collapse" modalClassName="romm-modal-collapse">
     <Focusable noFocusRing
       className="romm-ui"
       onCancelButton={() => closeModal?.()}
@@ -1995,6 +1996,10 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
         @keyframes sdShimmer { 0% { background-position: -150% 0; } 100% { background-position: 150% 0; } }
         .sd-shimmer { background-image: linear-gradient(100deg, transparent 20%, rgba(255,255,255,0.22) 50%, transparent 80%) !important; background-size: 200% 100% !important; background-repeat: no-repeat; animation: sdShimmer 1.1s linear infinite; }
         ${V2_FOCUS_STYLE}
+        /* Collapse ModalRoot's own panel chrome so only our overlay shows. */
+        .romm-modal-collapse, .romm-modal-collapse > div {
+          background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important;
+        }
       `}</style>
       <Focusable noFocusRing autoFocus ref={cardRef} flow-children="vertical" style={{
         fontFamily: V2.font, color: V2.fg, width: '520px', maxWidth: '90vw', boxSizing: 'border-box',
