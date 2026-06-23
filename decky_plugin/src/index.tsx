@@ -2138,11 +2138,7 @@ function AchievementsTab({ achievements }: { achievements: Achievement[] }) {
           {stat(
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
               {earnedCount} / {achievements.length}
-              <span style={{
-                width: '6px', height: '6px', borderRadius: '50%',
-                background: pct >= 100 ? V2.success : V2.brand,
-                boxShadow: `0 0 6px ${pct >= 100 ? V2.success : V2.brand}`,
-              }} />
+              <span style={{ width: '4px', height: '4px', borderRadius: '50%', background: V2.fgMuted }} />
               {pct}%
             </span>, 'Achievements')}
           <div style={{ width: '1px', background: V2.border }} />
