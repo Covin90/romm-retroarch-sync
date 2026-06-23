@@ -1319,6 +1319,140 @@ class Plugin:
             logging.error(f"enable_retroarch_setting error: {e}", exc_info=True)
             return {'success': False, 'message': f'Error: {str(e)}'}
 
+    # -----------------------------------------------------------------------
+    # Save History (browse / restore server save & state versions)
+    # -----------------------------------------------------------------------
+
+    async def get_downloaded_games(self):
+        """Return the list of locally-downloaded games (for the history picker)."""
+        try:
+            slug_map = self._platform_slug_to_name or {}
+
+            def _platform(g):
+                p = g.get('platform')
+                if p and p != 'Unknown':
+                    return p
+                slug = g.get('platform_slug') or (g.get('romm_data') or {}).get('platform_slug')
+                if slug:
+                    return slug_map.get(slug) or slug
+                return 'Unknown'
+
+            games = [
+                {
+                    'rom_id':   g.get('rom_id'),
+                    'name':     g.get('name'),
+                    'platform': _platform(g),
+                }
+                for g in (self._available_games or [])
+                if g.get('is_downloaded') and g.get('rom_id')
+            ]
+            games.sort(key=lambda g: (g.get('platform') or '', (g.get('name') or '').lower()))
+            return {'success': True, 'games': games}
+        except Exception as e:
+            logging.error(f"get_downloaded_games error: {e}", exc_info=True)
+            return {'success': False, 'games': [], 'message': str(e)}
+
+    @staticmethod
+    def _serialize_history_entry(entry, save_type):
+        """Flatten a RomM save/state version into a frontend-friendly dict."""
+        ds = entry.get('device_syncs') or entry.get('deviceSyncs')
+        device = None
+        if isinstance(ds, list) and ds and isinstance(ds[0], dict):
+            device = ds[0].get('device_name') or ds[0].get('name')
+        return {
+            'id':            entry.get('id'),
+            'slot':          entry.get('slot'),
+            'save_type':     save_type,
+            'file_name':     entry.get('file_name', ''),
+            'updated_at':    entry.get('updated_at') or entry.get('created_at'),
+            'size_bytes':    entry.get('size_bytes') or entry.get('file_size_bytes'),
+            'device':        device,
+            'has_screenshot': bool(entry.get('screenshot')),
+        }
+
+    async def get_save_history(self, rom_id: int):
+        """Return all server save/state versions for a ROM (newest first)."""
+        try:
+            if not (self._romm_client and self._romm_client.authenticated):
+                return {'success': False, 'message': 'Not connected to RomM',
+                        'saves': [], 'states': []}
+            saves, states = self._romm_client.get_save_history(rom_id)
+
+            def _key(e):
+                return e.get('updated_at') or e.get('created_at') or ''
+            saves = sorted(saves, key=_key, reverse=True)
+            states = sorted(states, key=_key, reverse=True)
+            return {
+                'success': True,
+                'saves':  [self._serialize_history_entry(e, 'saves') for e in saves],
+                'states': [self._serialize_history_entry(e, 'states') for e in states],
+            }
+        except Exception as e:
+            logging.error(f"get_save_history error: {e}", exc_info=True)
+            return {'success': False, 'message': str(e), 'saves': [], 'states': []}
+
+    async def get_save_screenshot(self, rom_id: int, save_id: int, save_type: str):
+        """Return a base64 data URI for a state's screenshot, or None.
+
+        The frontend <img> cannot authenticate to RomM, so the backend (which
+        holds the session) fetches the bytes and inlines them. Re-fetches the
+        ROM history to obtain the entry's full screenshot metadata (the list
+        endpoint may not embed download_path), falling back to the per-entry
+        detail endpoint inside fetch_screenshot_bytes.
+        """
+        try:
+            if not (self._romm_client and self._romm_client.authenticated):
+                return {'success': False, 'data_uri': None}
+            saves, states = self._romm_client.get_save_history(rom_id)
+            pool = states if save_type == 'states' else saves
+            entry = next((e for e in pool if e.get('id') == save_id), {'id': save_id})
+            sd = entry.get('screenshot')
+            logging.info(f"get_save_screenshot rom={rom_id} {save_type} id={save_id} "
+                         f"screenshot_meta={'yes' if sd else 'no'}")
+            data = self._romm_client.fetch_screenshot_bytes(entry, save_type)
+            if not data:
+                logging.info(f"get_save_screenshot id={save_id}: no image bytes returned")
+                return {'success': True, 'data_uri': None}
+            import base64
+            b64 = base64.b64encode(data).decode('ascii')
+            return {'success': True, 'data_uri': f'data:image/png;base64,{b64}'}
+        except Exception as e:
+            logging.error(f"get_save_screenshot error: {e}", exc_info=True)
+            return {'success': False, 'data_uri': None, 'message': str(e)}
+
+    async def restore_save_version(self, rom_id: int, save_id: int,
+                                   save_type: str, as_copy: bool = False):
+        """Restore a server save/state version to local disk.
+
+        Re-fetches the ROM's history and looks up the entry by id (so we use the
+        authoritative server metadata, not stale frontend data), then delegates
+        to the shared RetroArchInterface.restore_save_version. The running file
+        watcher auto-uploads the restored file as a new server version.
+        """
+        try:
+            if not (self._romm_client and self._romm_client.authenticated):
+                return {'success': False, 'message': 'Not connected to RomM'}
+            if not self._retroarch:
+                return {'success': False, 'message': 'RetroArch interface not initialized'}
+
+            saves, states = self._romm_client.get_save_history(rom_id)
+            pool = states if save_type == 'states' else saves
+            entry = next((e for e in pool if e.get('id') == save_id), None)
+            if entry is None:
+                return {'success': False, 'message': f'Version {save_id} not found'}
+
+            result = self._retroarch.restore_save_version(
+                self._romm_client, None, entry, save_type, as_copy,
+                log=lambda m: logging.info(m))
+            return {
+                'success':  result.get('success', False),
+                'message':  result.get('error') or 'Restored',
+                'tgt_name': result.get('tgt_name'),
+            }
+        except Exception as e:
+            logging.error(f"restore_save_version error: {e}", exc_info=True)
+            return {'success': False, 'message': str(e)}
+
     async def get_bios_status(self):
         """Get detailed BIOS download status for all platforms.
 

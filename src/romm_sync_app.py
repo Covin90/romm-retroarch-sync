@@ -3404,16 +3404,8 @@ class EnhancedLibrarySection:
         threading.Thread(target=worker, daemon=True).start()
 
     def _fetch_save_history(self, rom_id):
-        """Fetch all server saves/states for a ROM via its detail endpoint."""
-        try:
-            from urllib.parse import urljoin
-            r = self.parent.romm_client.session.get(
-                urljoin(self.parent.romm_client.base_url, f'/api/roms/{rom_id}'), timeout=15)
-            d = r.json() if r.status_code == 200 else {}
-            return (d.get('user_saves') or [], d.get('user_states') or [])
-        except Exception as e:
-            GLib.idle_add(self.parent.log_message, f"❌ Could not load save history: {e}")
-            return [], []
+        """Fetch all server saves/states for a ROM (delegates to sync_core)."""
+        return self.parent.romm_client.get_save_history(rom_id)
 
     def _fmt_ts(self, iso):
         if not iso:
@@ -3846,28 +3838,8 @@ class EnhancedLibrarySection:
         threading.Thread(target=worker, daemon=True).start()
 
     def _fetch_screenshot_bytes(self, entry, save_type):
-        """Return screenshot image bytes for a save/state entry, or None."""
-        from urllib.parse import urljoin
-        try:
-            client = self.parent.romm_client
-            sd = entry.get('screenshot')
-            url = sd.get('download_path') if isinstance(sd, dict) else None
-            if not url:
-                sid = entry.get('id')
-                if sid:
-                    r = client.session.get(
-                        urljoin(client.base_url, f'/api/{save_type}/{sid}'), timeout=10)
-                    if r.status_code == 200:
-                        sd = r.json().get('screenshot')
-                        url = sd.get('download_path') if isinstance(sd, dict) else None
-            if not url:
-                return None
-            resp = client.session.get(urljoin(client.base_url, url), timeout=30)
-            if resp.status_code == 200 and resp.content:
-                return resp.content
-        except Exception as e:
-            logging.debug(f"Screenshot fetch failed: {e}")
-        return None
+        """Return screenshot image bytes for a save/state entry (delegates)."""
+        return self.parent.romm_client.fetch_screenshot_bytes(entry, save_type)
 
     def _apply_screenshot(self, sid, data):
         from gi.repository import Gdk
@@ -3944,90 +3916,20 @@ class EnhancedLibrarySection:
 
     def _resolve_restore_dest(self, game, entry, save_type, as_copy=False):
         """Resolve the local destination (dir, filename) for a restored version."""
-        import re
-        ra = self.parent.retroarch
-        file_name = entry.get('file_name', '')
-        slot = entry.get('slot') or RomMClient.get_slot_info(file_name)[0]
-        tgt_name = ra.convert_to_retroarch_filename(file_name, save_type, '/tmp', slot=slot)
-
-        base = re.sub(r'\s*\[.*?\]', '', Path(file_name).stem)
-        local = (ra.get_save_files() or {}).get(save_type, [])
-        candidates = [f for f in local if f.get('name', '').startswith(base)]
-        exact = [f for f in candidates if f.get('name') == tgt_name]
-        if exact:
-            dest_dir = Path(exact[0]['path']).parent
-        elif candidates:
-            dest_dir = Path(candidates[0]['path']).parent
-        else:
-            base_dir = (getattr(ra, 'save_dirs', {}) or {}).get(save_type)
-            if not base_dir:
-                return None, None
-            romm_emulator = entry.get('emulator')
-            if ra.get_save_subdir_mode(save_type) == 'core' and romm_emulator:
-                dest_dir = Path(base_dir) / ra.get_retroarch_directory_name(romm_emulator)
-            else:
-                dest_dir = Path(base_dir)
-
-        if as_copy and save_type == 'states':
-            stem = tgt_name
-            if stem.lower().endswith('.state.auto'):
-                stem = stem[:-len('.state.auto')]
-            stem = re.sub(r'\.state\d*$', '', stem)
-            existing = {f.get('name') for f in local}
-            tgt_name = next((f"{stem}.state{n}" for n in range(1, 10)
-                             if f"{stem}.state{n}" not in existing), f"{stem}.state1")
-        return dest_dir, tgt_name
+        return self.parent.retroarch.resolve_restore_dest(game, entry, save_type, as_copy)
 
     def _restore_version(self, game, entry, save_type, as_copy=False, baseline_ids=None):
-        try:
-            dest_dir, tgt_name = self._resolve_restore_dest(game, entry, save_type, as_copy)
-            if not dest_dir or not tgt_name:
-                GLib.idle_add(self.parent.log_message,
-                              "❌ Could not determine restore location (download the game first).")
-                GLib.idle_add(self._set_history_busy, False)
-                return
-            dest = Path(dest_dir) / tgt_name
-            save_id = entry.get('id')
-            if dest.exists() and not as_copy:
-                backup = dest.with_suffix(dest.suffix + '.backup')
-                try:
-                    if backup.exists():
-                        backup.unlink()
-                    dest.rename(backup)
-                    GLib.idle_add(self.parent.log_message,
-                                  f"💾 Backed up current {dest.name} → {backup.name}")
-                except Exception as e:
-                    logging.warning(f"Restore backup failed for {dest}: {e}")
-            ok = self.parent.romm_client.download_save_by_id(
-                save_id, save_type, dest, fallback_url=entry.get('download_path'))
-            if ok:
-                # Restore the matching screenshot so RetroArch's thumbnail stays in sync.
-                if save_type == 'states':
-                    try:
-                        data = self._fetch_screenshot_bytes(entry, save_type)
-                        if data:
-                            shot = dest.with_name(dest.name + '.png')
-                            if shot.exists() and not as_copy:
-                                try:
-                                    shot.rename(shot.with_suffix(shot.suffix + '.backup'))
-                                except Exception:
-                                    pass
-                            with open(shot, 'wb') as f:
-                                f.write(data)
-                    except Exception as e:
-                        logging.debug(f"Restore screenshot failed: {e}")
-                GLib.idle_add(self.parent.log_message, f"✅ Restored {save_type[:-1]} → {dest.name}")
-                # Reflect the new version (created by the auto-upload) in an open browser:
-                # show a spinner and poll until the upload actually lands (adaptive),
-                # rather than guessing a fixed delay.
-                GLib.idle_add(self._set_history_busy, True, "Syncing to server…")
-                self._await_restore_sync(baseline_ids)
-            else:
-                GLib.idle_add(self.parent.log_message,
-                              f"❌ Failed to restore {save_type} id={save_id}")
-                GLib.idle_add(self._set_history_busy, False)
-        except Exception as e:
-            GLib.idle_add(self.parent.log_message, f"❌ Restore error: {e}")
+        result = self.parent.retroarch.restore_save_version(
+            self.parent.romm_client, game, entry, save_type, as_copy,
+            log=lambda m: GLib.idle_add(self.parent.log_message, m))
+        if result.get('success'):
+            # Reflect the new version (created by the auto-upload) in an open browser:
+            # show a spinner and poll until the upload actually lands (adaptive),
+            # rather than guessing a fixed delay.
+            GLib.idle_add(self._set_history_busy, True, "Syncing to server…")
+            self._await_restore_sync(baseline_ids)
+        else:
+            GLib.idle_add(self.parent.log_message, f"❌ {result.get('error')}")
             GLib.idle_add(self._set_history_busy, False)
 
     def auto_expand_platforms_with_results(self, filtered_games):
@@ -8379,7 +8281,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             transient_for=self,
             application_name="RomM - RetroArch Sync",
             application_icon="com.romm.retroarch.sync",
-            version="1.5",
+            version="1.6",
             developer_name='Hector Eduardo "Covin" Silveri',
             copyright="© 2025-2026 Hector Eduardo Silveri",
             license_type=Gtk.License.GPL_3_0
@@ -9278,7 +9180,7 @@ class SyncWindow(Gtk.ApplicationWindow):
             device_name = self.settings.get('Device', 'device_name', socket.gethostname())
             platform = self.settings.get('Device', 'device_platform', 'Linux')
             client = self.settings.get('Device', 'client', 'RomM-RetroArch-Sync')
-            client_version = self.settings.get('Device', 'client_version', '1.5')
+            client_version = self.settings.get('Device', 'client_version', '1.6')
 
             device_id = self.romm_client.register_device(
                 device_name=device_name,

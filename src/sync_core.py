@@ -793,7 +793,7 @@ class SettingsManager:
                 'device_name': socket.gethostname(),
                 'device_platform': 'Linux',
                 'client': 'RomM-RetroArch-Sync',
-                'client_version': '1.5',
+                'client_version': '1.6',
                 'sync_enabled': 'true'
             }
             self.config['Steam'] = {
@@ -820,7 +820,7 @@ class SettingsManager:
             'device_name': socket.gethostname(),
             'device_platform': 'Linux',
             'client': 'RomM-RetroArch-Sync',
-            'client_version': '1.5',
+            'client_version': '1.6',
             'sync_enabled': 'true'
         }
 
@@ -1623,7 +1623,7 @@ class RomMClient:
                 'name': device_name or socket.gethostname(),
                 'platform': platform or sys_platform.system(),
                 'client': client or 'RomM-RetroArch-Sync',
-                'client_version': client_version or '1.5',
+                'client_version': client_version or '1.6',
                 'hostname': socket.gethostname(),
                 'allow_existing': True,
                 'allow_duplicate': False
@@ -2710,6 +2710,48 @@ class RomMClient:
         except Exception as e:
             logging.warning(f"Error downloading {save_type} {save_id}: {e}")
             return False
+
+    def get_save_history(self, rom_id):
+        """Fetch all server saves/states for a ROM via its detail endpoint.
+
+        Returns a tuple (user_saves, user_states); each is a list of version
+        dicts (id, slot, file_name, updated_at, size_bytes, device_syncs,
+        screenshot, ...). Returns ([], []) on failure. GTK-free / GLib-free.
+        """
+        try:
+            r = self.session.get(
+                urljoin(self.base_url, f'/api/roms/{rom_id}'), timeout=15)
+            d = r.json() if r.status_code == 200 else {}
+            return (d.get('user_saves') or [], d.get('user_states') or [])
+        except Exception as e:
+            logging.warning(f"Could not load save history for rom {rom_id}: {e}")
+            return [], []
+
+    def fetch_screenshot_bytes(self, entry, save_type):
+        """Return screenshot image bytes for a save/state entry, or None.
+
+        The entry's `screenshot` dict carries a `download_path`; if absent, the
+        per-entry detail endpoint is queried. GTK-free / GLib-free.
+        """
+        try:
+            sd = entry.get('screenshot')
+            url = sd.get('download_path') if isinstance(sd, dict) else None
+            if not url:
+                sid = entry.get('id')
+                if sid:
+                    r = self.session.get(
+                        urljoin(self.base_url, f'/api/{save_type}/{sid}'), timeout=10)
+                    if r.status_code == 200:
+                        sd = r.json().get('screenshot')
+                        url = sd.get('download_path') if isinstance(sd, dict) else None
+            if not url:
+                return None
+            resp = self.session.get(urljoin(self.base_url, url), timeout=30)
+            if resp.status_code == 200 and resp.content:
+                return resp.content
+        except Exception as e:
+            logging.debug(f"Screenshot fetch failed: {e}")
+        return None
 
     def track_save(self, save_id, save_type, device_id):
         """Re-enable sync tracking for a save/state on this device
@@ -5080,7 +5122,107 @@ class RetroArchInterface:
                 save_files[save_type] = files
         
         return save_files
-    
+
+    def resolve_restore_dest(self, game, entry, save_type, as_copy=False):
+        """Resolve the local destination (dir, filename) for a restored version.
+
+        Mirrors the on-disk naming RetroArch expects. For an as-copy state it
+        picks a free numbered `.stateN` slot. Returns (dest_dir, tgt_name) or
+        (None, None) when no destination can be determined. GTK-free.
+        """
+        import re
+        file_name = entry.get('file_name', '')
+        slot = entry.get('slot') or RomMClient.get_slot_info(file_name)[0]
+        tgt_name = self.convert_to_retroarch_filename(file_name, save_type, '/tmp', slot=slot)
+
+        base = re.sub(r'\s*\[.*?\]', '', Path(file_name).stem)
+        local = (self.get_save_files() or {}).get(save_type, [])
+        candidates = [f for f in local if f.get('name', '').startswith(base)]
+        exact = [f for f in candidates if f.get('name') == tgt_name]
+        if exact:
+            dest_dir = Path(exact[0]['path']).parent
+        elif candidates:
+            dest_dir = Path(candidates[0]['path']).parent
+        else:
+            base_dir = (getattr(self, 'save_dirs', {}) or {}).get(save_type)
+            if not base_dir:
+                return None, None
+            romm_emulator = entry.get('emulator')
+            if self.get_save_subdir_mode(save_type) == 'core' and romm_emulator:
+                dest_dir = Path(base_dir) / self.get_retroarch_directory_name(romm_emulator)
+            else:
+                dest_dir = Path(base_dir)
+
+        if as_copy and save_type == 'states':
+            stem = tgt_name
+            if stem.lower().endswith('.state.auto'):
+                stem = stem[:-len('.state.auto')]
+            stem = re.sub(r'\.state\d*$', '', stem)
+            existing = {f.get('name') for f in local}
+            tgt_name = next((f"{stem}.state{n}" for n in range(1, 10)
+                             if f"{stem}.state{n}" not in existing), f"{stem}.state1")
+        return dest_dir, tgt_name
+
+    def restore_save_version(self, romm_client, game, entry, save_type,
+                             as_copy=False, log=None):
+        """Restore a server save/state version to local disk.
+
+        Backs up the current file (in-place restore only), downloads the chosen
+        version via ``download_save_by_id`` (with the 404 fallback URL), and for
+        states restores the matching screenshot next to the file.
+
+        ``log`` is an optional callable(str) for progress messages. GTK-free;
+        does NOT perform any post-restore server poll (that is UI chrome).
+
+        Returns a dict: {success, dest, tgt_name, error}.
+        """
+        def _log(msg):
+            if log:
+                log(msg)
+            else:
+                logging.info(msg)
+        try:
+            dest_dir, tgt_name = self.resolve_restore_dest(game, entry, save_type, as_copy)
+            if not dest_dir or not tgt_name:
+                return {'success': False, 'dest': None, 'tgt_name': None,
+                        'error': 'Could not determine restore location (download the game first).'}
+            dest = Path(dest_dir) / tgt_name
+            save_id = entry.get('id')
+            if dest.exists() and not as_copy:
+                backup = dest.with_suffix(dest.suffix + '.backup')
+                try:
+                    if backup.exists():
+                        backup.unlink()
+                    dest.rename(backup)
+                    _log(f"💾 Backed up current {dest.name} → {backup.name}")
+                except Exception as e:
+                    logging.warning(f"Restore backup failed for {dest}: {e}")
+            ok = romm_client.download_save_by_id(
+                save_id, save_type, dest, fallback_url=entry.get('download_path'))
+            if not ok:
+                return {'success': False, 'dest': str(dest), 'tgt_name': tgt_name,
+                        'error': f'Failed to restore {save_type} id={save_id}'}
+            # Restore the matching screenshot so RetroArch's thumbnail stays in sync.
+            if save_type == 'states':
+                try:
+                    data = romm_client.fetch_screenshot_bytes(entry, save_type)
+                    if data:
+                        shot = dest.with_name(dest.name + '.png')
+                        if shot.exists() and not as_copy:
+                            try:
+                                shot.rename(shot.with_suffix(shot.suffix + '.backup'))
+                            except Exception:
+                                pass
+                        with open(shot, 'wb') as f:
+                            f.write(data)
+                except Exception as e:
+                    logging.debug(f"Restore screenshot failed: {e}")
+            _log(f"✅ Restored {save_type[:-1]} → {dest.name}")
+            return {'success': True, 'dest': str(dest), 'tgt_name': tgt_name, 'error': None}
+        except Exception as e:
+            return {'success': False, 'dest': None, 'tgt_name': None,
+                    'error': f'Restore error: {e}'}
+
     def find_thumbnails_directory(self):
         """Find RetroArch thumbnails directory"""
         possible_dirs = [
