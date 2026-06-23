@@ -2063,12 +2063,37 @@ function SaveDataTab({ romId }: { romId: number }) {
   };
   useEffect(() => { load(); }, []);
 
-  // After a restore-as-copy the new version is written locally and the file
-  // watcher uploads it to the server a moment later. Re-poll silently a few
-  // times so it shows up without leaving the page.
+  // After a restore the new version is written locally and the file watcher
+  // uploads it to the server a moment later. Mirror the GTK app's
+  // _await_restore_sync: snapshot the current ids, wait for the upload debounce,
+  // then poll once a second until a new id appears (bounded deadline).
+  const pollCancelRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => pollCancelRef.current?.(), []);
   const reloadAfterRestore = () => {
-    load();
-    [2500, 6000, 10000].forEach((ms) => setTimeout(() => load(true), ms));
+    pollCancelRef.current?.();
+    const baseline = new Set<number>([...saves, ...states].map((e) => e.id));
+    let cancelled = false;
+    pollCancelRef.current = () => { cancelled = true; };
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    (async () => {
+      await sleep(3500); // upload debounce + buffer
+      const deadline = Date.now() + 20000;
+      while (!cancelled) {
+        try {
+          const res = await getSaveHistory(romId);
+          if (res?.success) {
+            const ids = [...(res.saves || []), ...(res.states || [])].map((e: any) => e.id);
+            const hasNew = ids.some((id) => !baseline.has(id));
+            if (hasNew || Date.now() >= deadline) {
+              setSaves(res.saves || []); setStates(res.states || []);
+              return;
+            }
+          }
+        } catch { /* keep polling */ }
+        if (Date.now() >= deadline) return;
+        await sleep(1000);
+      }
+    })();
   };
 
   // Lazily fetch state screenshots once the States subtab is opened. The
