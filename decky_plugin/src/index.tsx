@@ -1967,12 +1967,13 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
         .romm-modal-backdrop {
           background: rgba(7,7,15,0.35) !important;
           -webkit-backdrop-filter: blur(16px) !important; backdrop-filter: blur(16px) !important;
+          display: flex !important; align-items: center !important; justify-content: center !important;
         }
         /* The single glass panel. Strip the default Steam dialog chrome.
            Frost (backdrop blur) over a near-neutral dark tint so it reads as
            glass, not a flat purple slab. */
         .romm-glass-modal {
-          width: 540px !important; max-width: 92vw !important;
+          width: 540px !important; max-width: 92vw !important; margin: auto !important;
           background: linear-gradient(180deg, rgba(18,18,26,0.80) 0%, rgba(10,10,16,0.86) 100%) !important;
           -webkit-backdrop-filter: blur(30px) saturate(1.1) !important; backdrop-filter: blur(30px) saturate(1.1) !important;
           border: 1px solid rgba(255,255,255,0.12) !important; border-radius: 14px !important;
