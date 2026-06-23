@@ -1969,23 +1969,23 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
           -webkit-backdrop-filter: blur(6px) !important; backdrop-filter: blur(6px) !important;
           display: flex !important; align-items: center !important; justify-content: center !important;
         }
-        /* The single glass panel. Strip the default Steam dialog chrome.
-           Frost (backdrop blur) over a near-neutral dark tint so it reads as
-           glass, not a flat purple slab. */
+        /* Collapse the Steam dialog panel to nothing; our content div below is
+           the only visible (glass) card, so its min-width can't add padding. */
         .romm-glass-modal {
-          width: fit-content !important; height: fit-content !important; max-width: 92vw !important; margin: auto !important;
-          background: linear-gradient(180deg, rgba(18,18,26,0.80) 0%, rgba(10,10,16,0.86) 100%) !important;
-          -webkit-backdrop-filter: blur(30px) saturate(1.1) !important; backdrop-filter: blur(30px) saturate(1.1) !important;
-          border: 1px solid rgba(255,255,255,0.12) !important; border-radius: 14px !important;
-          box-shadow: 0 14px 44px rgba(0,0,0,0.55) !important;
-          padding: 0 !important;
+          background: transparent !important; border: none !important; box-shadow: none !important;
+          padding: 0 !important; margin: auto !important;
+          display: flex !important; align-items: center !important; justify-content: center !important;
         }
       `}</style>
       <div style={{
         fontFamily: V2.font, color: V2.fg, width: '460px', maxWidth: '86vw', boxSizing: 'border-box',
         alignSelf: 'center', margin: 'auto',
         padding: '18px', display: 'flex', flexDirection: 'column', gap: '12px',
-        maxHeight: '80vh', overflowY: 'auto',
+        maxHeight: '82vh', overflowY: 'auto',
+        background: 'linear-gradient(180deg, rgba(20,20,30,0.62) 0%, rgba(10,10,18,0.7) 100%)',
+        WebkitBackdropFilter: 'blur(28px) saturate(1.1)', backdropFilter: 'blur(28px) saturate(1.1)',
+        border: `1px solid rgba(255,255,255,0.12)`, borderRadius: V2.radiusCard,
+        boxShadow: '0 16px 48px rgba(0,0,0,0.55)',
       }}>
         <div>
           <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: V2.brand }}>
