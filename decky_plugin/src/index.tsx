@@ -1957,7 +1957,7 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
   const meta = [slotLabel(entry), entry.device || '', fmtHistSize(entry.size_bytes)].filter(Boolean).join(' · ');
 
   return (
-    <ModalRoot onCancel={closeModal} onEscKeypress={closeModal} bHideCloseIcon bAllowFullSize
+    <ModalRoot onCancel={closeModal} onEscKeypress={closeModal} bHideCloseIcon
       className="romm-modal-backdrop" modalClassName="romm-glass-modal">
       <style>{`
         @keyframes sdShimmer { 0% { background-position: -150% 0; } 100% { background-position: 150% 0; } }
@@ -1972,6 +1972,7 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
            Frost (backdrop blur) over a near-neutral dark tint so it reads as
            glass, not a flat purple slab. */
         .romm-glass-modal {
+          width: 540px !important; max-width: 92vw !important;
           background: linear-gradient(180deg, rgba(18,18,26,0.80) 0%, rgba(10,10,16,0.86) 100%) !important;
           -webkit-backdrop-filter: blur(30px) saturate(1.1) !important; backdrop-filter: blur(30px) saturate(1.1) !important;
           border: 1px solid rgba(255,255,255,0.12) !important; border-radius: 14px !important;
@@ -1980,7 +1981,7 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
         }
       `}</style>
       <div style={{
-        fontFamily: V2.font, color: V2.fg, width: '520px', maxWidth: '92vw',
+        fontFamily: V2.font, color: V2.fg,
         padding: '22px', display: 'flex', flexDirection: 'column', gap: '16px',
         maxHeight: '82vh', overflowY: 'auto',
       }}>
