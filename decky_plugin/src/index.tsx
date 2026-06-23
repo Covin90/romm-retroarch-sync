@@ -646,6 +646,7 @@ function V2Button({ children, onClick, variant = 'tonal', color, disabled }:
     : {};
   return (
     <Focusable
+      className="romm-btn"
       onActivate={() => !disabled && onClick()}
       onClick={() => !disabled && onClick()}
       onFocus={() => setActive(true)} onBlur={() => setActive(false)}
@@ -1085,17 +1086,18 @@ function slotLabel(e: HistoryEntry): string {
 // Routes: /romm-sync-library  ->  /romm-sync-library/:key  ->  /romm-sync-game/:romId
 // ---------------------------------------------------------------------------
 
-// Scoped override of Steam's gamepad focus highlight (the square "overdraw"
-// box drawn on every Focusable). Inside the plugin UI we suppress it and use a
-// soft on-brand ring instead so focus still reads but matches the v2 language.
+// Suppress Steam's gamepad focus highlight (the square "overdraw" box drawn on
+// every Focusable) inside the plugin UI. We rely on our own per-component focus
+// styling (card scale/glow, row lift, button glow) instead, so the Steam box is
+// fully removed rather than restyled.
 const V2_FOCUS_STYLE = `
-  .romm-ui [class*="gpfocus"] { outline: none !important; }
+  .romm-ui [class*="gpfocus"] { outline: none !important; box-shadow: none !important; }
   .romm-ui [class*="gpfocus"]::before, .romm-ui [class*="gpfocus"]::after {
     box-shadow: none !important; background: none !important; border: none !important; content: none !important;
   }
-  .romm-ui .Focusable.gpfocuswithin, .romm-ui .Focusable.gpfocus {
-    box-shadow: 0 0 0 2px rgba(139,116,232,0.85) !important;
-    transition: box-shadow 0.12s ease;
+  /* Keep a tasteful on-brand ring on buttons so they still show focus. */
+  .romm-ui .romm-btn.gpfocuswithin, .romm-ui .romm-btn.gpfocus {
+    box-shadow: 0 0 0 2px ${'rgba(139,116,232,0.9)'} !important;
   }
 `;
 
