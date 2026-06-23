@@ -2044,24 +2044,32 @@ function SaveDataTab({ romId }: { romId: number }) {
   const [shots, setShots] = useState<Record<number, string>>({});
   const EASE = 'cubic-bezier(0.22,1,0.36,1)';
 
-  const load = async () => {
-    setLoading(true);
+  const load = async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const res = await getSaveHistory(romId);
       if (res?.success) {
         setSaves(res.saves || []);
         setStates(res.states || []);
-      } else {
+      } else if (!silent) {
         setSaves([]); setStates([]);
       }
     } catch (e) {
       console.error('get_save_history failed', e);
-      setSaves([]); setStates([]);
+      if (!silent) { setSaves([]); setStates([]); }
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
   useEffect(() => { load(); }, []);
+
+  // After a restore-as-copy the new version is written locally and the file
+  // watcher uploads it to the server a moment later. Re-poll silently a few
+  // times so it shows up without leaving the page.
+  const reloadAfterRestore = () => {
+    load();
+    [2500, 6000, 10000].forEach((ms) => setTimeout(() => load(true), ms));
+  };
 
   // Lazily fetch state screenshots once the States subtab is opened. The
   // backend serves them one request at a time, so fetch sequentially, newest
@@ -2098,7 +2106,7 @@ function SaveDataTab({ romId }: { romId: number }) {
   const openRestore = (e: HistoryEntry) => {
     const cached = shots[e.id];
     const shotUri = (cached && cached !== 'loading') ? cached : undefined;
-    showModal(<RestoreModal romId={romId} entry={e} shotUri={shotUri} onDone={load} />);
+    showModal(<RestoreModal romId={romId} entry={e} shotUri={shotUri} onDone={reloadAfterRestore} />);
   };
 
   const pill = (id: 'saves' | 'states', label: string, count: number) => {
