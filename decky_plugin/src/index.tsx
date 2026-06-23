@@ -14,7 +14,7 @@ import {
 } from "@decky/ui";
 import { callable, definePlugin, toaster, routerHook, openFilePicker, FileSelectionType } from "@decky/api";
 import { useState, useEffect, useRef, ChangeEvent } from "react";
-import { FaSync, FaTrash, FaCog, FaSteam, FaGithub, FaBug, FaHistory, FaArrowLeft, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight } from "react-icons/fa";
+import { FaSync, FaTrash, FaCog, FaSteam, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight } from "react-icons/fa";
 import { BsGearFill } from "react-icons/bs";
 
 // Call backend methods
@@ -30,7 +30,6 @@ const saveConfig = callable<[string, string, string, string, string, string, str
 const testRommConnection = callable<[string, string, string], any>("test_connection");
 const pairDevice = callable<[string, string], any>("pair_device");
 const toggleCollectionSteamSync = callable<[string, boolean], any>("toggle_collection_steam_sync");
-const getDownloadedGames = callable<[], any>("get_downloaded_games");
 const getSaveHistory = callable<[number], any>("get_save_history");
 const getSaveScreenshot = callable<[number, number, string], any>("get_save_screenshot");
 const restoreSaveVersion = callable<[number, number, string, boolean], any>("restore_save_version");
@@ -1041,12 +1040,10 @@ function ConfigPage() {
 
 // Settings page component
 // ---------------------------------------------------------------------------
-// Save History browser (per-game server save/state versions; restore in-place
-// or as a copy). Gamepad-friendly: a downloaded-game picker, then a flat
-// newest-first version list with a screenshot preview and inline confirm.
+// Shared save/state version types + formatters, used by the game detail
+// Save Data tab (server save/state versions; restore in-place or as a copy).
 // ---------------------------------------------------------------------------
 
-interface HistoryGame { rom_id: number; name: string; platform: string; }
 interface HistoryEntry {
   id: number; slot: any; save_type: string; file_name: string;
   updated_at: string | null; size_bytes: number | null;
@@ -1080,293 +1077,6 @@ function slotLabel(e: HistoryEntry): string {
   if (fn.endsWith('.state')) return 'Quicksave';
   if (e.slot != null && e.slot !== '') return String(e.slot);
   return e.save_type === 'states' ? 'State' : 'Save';
-}
-
-// The picker hands the chosen game to the versions route via this module-level
-// holder (keyed by rom_id) so we don't need to re-fetch the game metadata.
-let _historyGameHolder: HistoryGame | null = null;
-
-function SaveHistoryGamesPage() {
-  const [games, setGames] = useState<HistoryGame[]>([]);
-  const [loadingGames, setLoadingGames] = useState(true);
-
-  useEffect(() => {
-    (async () => {
-      setLoadingGames(true);
-      try {
-        const res = await getDownloadedGames();
-        setGames(res?.success ? (res.games || []) : []);
-      } catch (e) {
-        console.error('get_downloaded_games failed', e);
-        setGames([]);
-      } finally {
-        setLoadingGames(false);
-      }
-    })();
-  }, []);
-
-  const openGame = (g: HistoryGame) => {
-    _historyGameHolder = g;
-    Navigation.Navigate(`/romm-sync-save-history/${g.rom_id}`);
-  };
-
-  return (
-    <div style={{ overflowY: 'auto', height: 'calc(100vh - 40px)', marginTop: "40px", paddingBottom: '40px', color: "white" }}>
-      <div className={staticClasses.Title} style={{ marginBottom: "16px" }}>Save History</div>
-      <PanelSection title={loadingGames ? "Loading games…" : `Downloaded games (${games.length})`}>
-        {!loadingGames && games.length === 0 && (
-          <PanelSectionRow>
-            <div style={{ fontSize: '12px', color: '#9ca3af' }}>
-              No downloaded games found. Download a game first, then come back here to browse its save history.
-            </div>
-          </PanelSectionRow>
-        )}
-        {games.map((g) => (
-          <PanelSectionRow key={g.rom_id}>
-            <ButtonItem layout="below" onClick={() => openGame(g)}>
-              <div style={{ display: 'flex', flexDirection: 'column', textAlign: 'left' }}>
-                <span style={{ fontWeight: 'bold' }}>{g.name}</span>
-                <span style={{ fontSize: '11px', color: '#9ca3af' }}>{g.platform}</span>
-              </div>
-            </ButtonItem>
-          </PanelSectionRow>
-        ))}
-      </PanelSection>
-    </div>
-  );
-}
-
-function SaveHistoryVersionsPage() {
-  const game = _historyGameHolder;
-
-  const [loadingHistory, setLoadingHistory] = useState(true);
-  const [saves, setSaves] = useState<HistoryEntry[]>([]);
-  const [states, setStates] = useState<HistoryEntry[]>([]);
-
-  const [selected, setSelected] = useState<HistoryEntry | null>(null);
-  const [shotUri, setShotUri] = useState<string | null>(null);
-  const [shotLoading, setShotLoading] = useState(false);
-
-  const [confirm, setConfirm] = useState<null | 'restore' | 'copy'>(null);
-  const [restoring, setRestoring] = useState(false);
-
-  const loadHistory = async () => {
-    if (!game) return;
-    setSelected(null);
-    setShotUri(null);
-    setLoadingHistory(true);
-    try {
-      const res = await getSaveHistory(game.rom_id);
-      if (res?.success) {
-        setSaves(res.saves || []);
-        setStates(res.states || []);
-      } else {
-        setSaves([]); setStates([]);
-        toaster.toast({ title: 'Save History', body: res?.message || 'Could not load history' });
-      }
-    } catch (e) {
-      toaster.toast({ title: 'Save History', body: String(e) });
-    } finally {
-      setLoadingHistory(false);
-    }
-  };
-
-  useEffect(() => { loadHistory(); }, []);
-
-  const selectEntry = async (e: HistoryEntry) => {
-    setSelected(e);
-    setConfirm(null);
-    setShotUri(null);
-    // Always attempt for states — the list endpoint may omit the screenshot
-    // dict even when one exists; the backend re-fetches the entry's metadata.
-    if (e.save_type === 'states' && game) {
-      setShotLoading(true);
-      try {
-        const res = await getSaveScreenshot(game.rom_id, e.id, e.save_type);
-        setShotUri(res?.data_uri || null);
-      } catch { setShotUri(null); }
-      finally { setShotLoading(false); }
-    }
-  };
-
-  const doRestore = async (asCopy: boolean) => {
-    if (!game || !selected) return;
-    setRestoring(true);
-    try {
-      const res = await restoreSaveVersion(game.rom_id, selected.id, selected.save_type, asCopy);
-      if (res?.success) {
-        toaster.toast({ title: 'Restored', body: res.tgt_name ? `→ ${res.tgt_name}` : 'Version restored' });
-        await loadHistory(); // reflect the new auto-uploaded version
-      } else {
-        toaster.toast({ title: 'Restore failed', body: res?.message || 'Unknown error' });
-      }
-    } catch (e) {
-      toaster.toast({ title: 'Restore failed', body: String(e) });
-    } finally {
-      setRestoring(false);
-      setConfirm(null);
-    }
-  };
-
-  const renderEntry = (e: HistoryEntry, isCurrent: boolean) => {
-    const isSel = selected?.id === e.id && selected?.save_type === e.save_type;
-    const sub = [fmtHistSize(e.size_bytes), e.device || ''].filter(Boolean).join(' · ');
-    return (
-      <PanelSectionRow key={`${e.save_type}-${e.id}`}>
-        <ButtonItem layout="below" onClick={() => selectEntry(e)}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', textAlign: 'left',
-                        borderLeft: isSel ? '3px solid #4ade80' : '3px solid transparent', paddingLeft: '6px' }}>
-            <span style={{ fontWeight: 'bold' }}>
-              {fmtHistTs(e.updated_at)}
-              {isCurrent && <span style={{ color: '#9ca3af', fontWeight: 'normal', fontSize: '11px' }}>  • Current</span>}
-            </span>
-            {sub && <span style={{ fontSize: '11px', color: '#9ca3af' }}>{sub}</span>}
-          </div>
-        </ButtonItem>
-      </PanelSectionRow>
-    );
-  };
-
-  const pageWrap = (children: any) => (
-    <div style={{ overflowY: 'auto', height: 'calc(100vh - 40px)', marginTop: "40px", paddingBottom: '40px', color: "white" }}>
-      <div className={staticClasses.Title} style={{ marginBottom: "16px" }}>Save History</div>
-      {children}
-    </div>
-  );
-
-  if (!game) {
-    return pageWrap(
-      <PanelSection>
-        <PanelSectionRow>
-          <div style={{ fontSize: '12px', color: '#9ca3af' }}>No game selected.</div>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ButtonItem layout="below" onClick={() => Navigation.NavigateBack()}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <FaArrowLeft size={12} /><span>Back to games</span>
-            </div>
-          </ButtonItem>
-        </PanelSectionRow>
-      </PanelSection>
-    );
-  }
-
-  const total = saves.length + states.length;
-
-  // Detail pane (right): screenshot + restore actions for the selected version.
-  const detailPane = !selected ? (
-    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 'calc(100vh - 160px)',
-                  color: '#9ca3af', fontSize: '13px', textAlign: 'center', padding: '0 8px' }}>
-      Select a version on the left to preview and restore it.
-    </div>
-  ) : (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', padding: '4px 2px' }}>
-      <div>
-        <div style={{ fontWeight: 'bold' }}>{slotLabel(selected)}</div>
-        <div style={{ fontSize: '11px', color: '#cbd5e1' }}>{fmtHistTs(selected.updated_at)}</div>
-        {selected.device && <div style={{ fontSize: '10px', color: '#9ca3af' }}>{selected.device}</div>}
-      </div>
-
-      {selected.save_type === 'states' && (
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '150px', background: 'rgba(0,0,0,0.25)', borderRadius: '4px', overflow: 'hidden' }}>
-          {shotLoading ? (
-            <span style={{ fontSize: '12px', color: '#9ca3af' }}>Loading…</span>
-          ) : shotUri ? (
-            <img src={shotUri} style={{ maxWidth: '100%', maxHeight: '220px', borderRadius: '4px' }} />
-          ) : (
-            <span style={{ fontSize: '12px', color: '#9ca3af', textAlign: 'center', padding: '8px' }}>No screenshot</span>
-          )}
-        </div>
-      )}
-
-      {confirm === null ? (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          <DialogButton disabled={restoring} onClick={() => setConfirm('restore')} style={{ minWidth: 0 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', justifyContent: 'center' }}>
-              <FaUndo size={12} /><span>Restore this version</span>
-            </div>
-          </DialogButton>
-          {selected.save_type === 'states' && (
-            <DialogButton disabled={restoring} onClick={() => setConfirm('copy')} style={{ minWidth: 0 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', justifyContent: 'center' }}>
-                <FaCopy size={12} /><span>Restore as copy (new slot)</span>
-              </div>
-            </DialogButton>
-          )}
-        </div>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          <div style={{ fontSize: '12px', color: '#fbbf24' }}>
-            {confirm === 'restore'
-              ? 'Overwrite the current file with this version? The current file is backed up (.backup).'
-              : 'Download this version into a new free slot? Your current slots stay untouched.'}
-          </div>
-          <DialogButton disabled={restoring} onClick={() => doRestore(confirm === 'copy')} style={{ minWidth: 0 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', justifyContent: 'center', color: confirm === 'restore' ? '#f87171' : undefined }}>
-              {restoring ? <FaSync size={12} style={{ animation: 'spin 1s linear infinite' }} /> : (confirm === 'copy' ? <FaCopy size={12} /> : <FaUndo size={12} />)}
-              <span>{restoring ? 'Restoring…' : (confirm === 'copy' ? 'Yes, restore as copy' : 'Yes, restore')}</span>
-            </div>
-          </DialogButton>
-          <DialogButton disabled={restoring} onClick={() => setConfirm(null)} style={{ minWidth: 0 }}>Cancel</DialogButton>
-        </div>
-      )}
-    </div>
-  );
-
-  // Group a type's entries by slot (newest first within each slot), mirroring
-  // the GTK browser: a "<Type> — Slot: <slot>" header per slot, with the newest
-  // version in each slot marked "• Current".
-  const renderGroups = (entries: HistoryEntry[], label: string, saveType: string) => {
-    const groups: Record<string, HistoryEntry[]> = {};
-    entries.forEach((e) => {
-      const slot = (e.slot !== null && e.slot !== undefined && e.slot !== '')
-        ? String(e.slot) : slotLabel(e);
-      (groups[slot] = groups[slot] || []).push(e);
-    });
-    return Object.keys(groups).sort().flatMap((slot) => {
-      const items = groups[slot].slice().sort(
-        (a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
-      return [
-        <div key={`h-${saveType}-${slot}`}
-          style={{ fontWeight: 'bold', fontSize: '12px', color: '#cbd5e1', padding: '0 16px', margin: '8px 0 8px' }}>
-          {`${label} — Slot: ${slot}`}
-        </div>,
-        ...items.map((e, idx) => renderEntry(e, idx === 0)),
-      ];
-    });
-  };
-
-  // Master pane (left): the version list grouped States / Saves.
-  const listPane = loadingHistory ? (
-    <div style={{ padding: '12px', color: '#9ca3af', fontSize: '13px' }}>Loading history…</div>
-  ) : total === 0 ? (
-    <div style={{ padding: '12px', color: '#9ca3af', fontSize: '13px' }}>No server saves or states for this game yet.</div>
-  ) : (
-    <PanelSection>
-      {renderGroups(states, 'State', 'states')}
-      {renderGroups(saves, 'Save', 'saves')}
-    </PanelSection>
-  );
-
-  return pageWrap(
-    <>
-      <PanelSection>
-        <PanelSectionRow>
-          <div style={{ fontWeight: 'bold' }}>{game.name}</div>
-          <div style={{ fontSize: '11px', color: '#9ca3af' }}>{game.platform}</div>
-        </PanelSectionRow>
-      </PanelSection>
-
-      {/* Master–detail: list on the left, preview + restore on the right. */}
-      <Focusable flow-children="horizontal"
-        style={{ display: 'flex', gap: '12px', alignItems: 'flex-start', paddingRight: '16px' }}>
-        <Focusable flow-children="vertical" style={{ flex: '1 1 55%', minWidth: 0 }}>{listPane}</Focusable>
-        <Focusable flow-children="vertical" style={{ flex: '1 1 45%', minWidth: 0, position: 'sticky', top: '8px' }}>
-          {detailPane}
-        </Focusable>
-      </Focusable>
-    </>
-  );
 }
 
 // ---------------------------------------------------------------------------
@@ -2331,6 +2041,32 @@ function SaveDataTab({ romId }: { romId: number }) {
     );
   };
 
+  // Group a type's entries by slot, newest-first within each slot (the newest
+  // is the live/current file). Mirrors the standalone history browser.
+  const groupBySlot = (entries: HistoryEntry[]) => {
+    const groups: Record<string, HistoryEntry[]> = {};
+    entries.forEach((e) => {
+      const slot = (e.slot != null && e.slot !== '') ? String(e.slot) : slotLabel(e);
+      (groups[slot] = groups[slot] || []).push(e);
+    });
+    return Object.keys(groups).sort().map((slot) => ({
+      slot,
+      items: groups[slot].slice().sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || ''))),
+    }));
+  };
+
+  const slotHeader = (slot: string, count: number) => (
+    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', margin: '2px 0' }}>
+      <span style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: V2.fgMuted, whiteSpace: 'nowrap' }}>Slot: {slot}</span>
+      <span style={{ flex: 1, height: '1px', background: V2.border }} />
+      <span style={{ fontSize: '10px', color: V2.fgMuted, whiteSpace: 'nowrap' }}>{count} version{count === 1 ? '' : 's'}</span>
+    </div>
+  );
+
+  const currentChip = (
+    <span style={{ fontSize: '9.5px', fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', padding: '1px 7px', borderRadius: V2.radiusPill, background: 'rgba(74,222,128,0.18)', color: V2.success }}>Current</span>
+  );
+
   if (loading) {
     return <div style={{ color: V2.fgMuted, fontSize: '12px', padding: '12px 0' }}>Loading save data…</div>;
   }
@@ -2362,70 +2098,82 @@ function SaveDataTab({ romId }: { romId: number }) {
         saves.length === 0 ? (
           <div style={{ color: V2.fgMuted, fontSize: '12px', padding: '12px 0' }}>No saves for this game.</div>
         ) : (
-          <Focusable style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            {saves.map((e, i) => {
-              const sub2 = [slotLabel(e), e.device || '', fmtHistSize(e.size_bytes)].filter(Boolean).join(' · ');
-              return (
-                <div key={`save-${e.id}`} className="sd-fade" style={{ '--sd-i': Math.min(i, 14) } as any}>
-                  <Focusable
-                    className="sd-row"
-                    onActivate={() => selectEntry(e)}
-                    onClick={() => selectEntry(e)}
-                    style={{
-                      display: 'flex', flexDirection: 'column', gap: '2px', textAlign: 'left',
-                      padding: '10px 13px', background: V2.surface, cursor: 'pointer',
-                      border: `1px solid ${isSel(e) ? V2.borderStrong : V2.border}`,
-                      borderRadius: V2.radiusMd, borderLeft: `3px solid ${isSel(e) ? V2.success : 'transparent'}`,
-                    }}
-                  >
-                    <div style={{ fontSize: '13px', fontWeight: 600, color: V2.fg, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.file_name}</div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', color: V2.fgMuted }}>
-                      <span>{fmtHistTs(e.updated_at)}</span>
-                      {sub2 && <><span style={{ width: '3px', height: '3px', borderRadius: '50%', background: V2.fgMuted }} /><span>{sub2}</span></>}
+          <Focusable style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            {groupBySlot(saves).map((g) => (
+              <div key={`sg-${g.slot}`} style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {slotHeader(g.slot, g.items.length)}
+                {g.items.map((e, idx) => {
+                  const isCur = idx === 0;
+                  const sub2 = [e.device || '', fmtHistSize(e.size_bytes)].filter(Boolean).join(' · ');
+                  return (
+                    <div key={`save-${e.id}`} className="sd-fade" style={{ '--sd-i': Math.min(idx, 14) } as any}>
+                      <Focusable
+                        className="sd-row"
+                        onActivate={() => selectEntry(e)}
+                        onClick={() => selectEntry(e)}
+                        style={{
+                          display: 'flex', flexDirection: 'column', gap: '3px', textAlign: 'left',
+                          padding: '10px 13px', background: V2.surface, cursor: 'pointer',
+                          border: `1px solid ${isSel(e) ? V2.borderStrong : V2.border}`,
+                          borderRadius: V2.radiusMd, borderLeft: `3px solid ${isSel(e) ? V2.success : 'transparent'}`,
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <span style={{ fontSize: '13px', fontWeight: 600, color: V2.fg }}>{fmtHistTs(e.updated_at)}</span>
+                          {isCur && currentChip}
+                        </div>
+                        {sub2 && <div style={{ fontSize: '11px', color: V2.fgMuted }}>{sub2}</div>}
+                      </Focusable>
+                      {isSel(e) && actionPanel(e)}
                     </div>
-                  </Focusable>
-                  {isSel(e) && actionPanel(e)}
-                </div>
-              );
-            })}
+                  );
+                })}
+              </div>
+            ))}
           </Focusable>
         )
       ) : (
         states.length === 0 ? (
           <div style={{ color: V2.fgMuted, fontSize: '12px', padding: '12px 0' }}>No states for this game.</div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-            <Focusable style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: '12px' }}>
-              {states.map((e, i) => {
-                const shot = shots[e.id];
-                return (
-                  <Focusable
-                    key={`state-${e.id}`}
-                    className="sd-tile sd-fade"
-                    onActivate={() => selectEntry(e)}
-                    onClick={() => selectEntry(e)}
-                    style={{
-                      display: 'flex', flexDirection: 'column', cursor: 'pointer', overflow: 'hidden',
-                      background: V2.surface, borderRadius: V2.radiusLg,
-                      border: `1px solid ${isSel(e) ? V2.brand : V2.border}`,
-                      '--sd-i': Math.min(i, 14),
-                    } as any}
-                  >
-                    <div style={{ aspectRatio: '16 / 9', background: V2.coverPlaceholder, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
-                      {shot ? (
-                        <img src={shot} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
-                      ) : (
-                        <span style={{ fontSize: '10px', color: V2.fgMuted }}>{shot === null && e.id in shots ? 'No screenshot' : 'Loading…'}</span>
-                      )}
-                    </div>
-                    <div style={{ padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: '2px' }}>
-                      <div style={{ fontSize: '12px', fontWeight: 600, color: V2.fg }}>{slotLabel(e)}</div>
-                      <div style={{ fontSize: '10.5px', color: V2.fgMuted }}>{fmtHistTs(e.updated_at)}</div>
-                    </div>
-                  </Focusable>
-                );
-              })}
-            </Focusable>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            {groupBySlot(states).map((g) => (
+              <div key={`stg-${g.slot}`} style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {slotHeader(g.slot, g.items.length)}
+                <Focusable style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: '12px' }}>
+                  {g.items.map((e, idx) => {
+                    const isCur = idx === 0;
+                    const shot = shots[e.id];
+                    return (
+                      <Focusable
+                        key={`state-${e.id}`}
+                        className="sd-tile sd-fade"
+                        onActivate={() => selectEntry(e)}
+                        onClick={() => selectEntry(e)}
+                        style={{
+                          display: 'flex', flexDirection: 'column', cursor: 'pointer', overflow: 'hidden',
+                          background: V2.surface, borderRadius: V2.radiusLg,
+                          border: `1px solid ${isSel(e) ? V2.brand : V2.border}`,
+                          '--sd-i': Math.min(idx, 14),
+                        } as any}
+                      >
+                        <div style={{ position: 'relative', aspectRatio: '16 / 9', background: V2.coverPlaceholder, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+                          {shot ? (
+                            <img src={shot} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+                          ) : (
+                            <span style={{ fontSize: '10px', color: V2.fgMuted }}>{shot === null && e.id in shots ? 'No screenshot' : 'Loading…'}</span>
+                          )}
+                          {isCur && <div style={{ position: 'absolute', top: '6px', left: '6px' }}>{currentChip}</div>}
+                        </div>
+                        <div style={{ padding: '8px 10px' }}>
+                          <div style={{ fontSize: '11px', color: V2.fg2 }}>{fmtHistTs(e.updated_at)}</div>
+                        </div>
+                      </Focusable>
+                    );
+                  })}
+                </Focusable>
+              </div>
+            ))}
             {selected?.save_type === 'states' && actionPanel(selected)}
           </div>
         )
@@ -2723,25 +2471,6 @@ function SettingsPage() {
               <span>Configure RomM Connection</span>
             </div>
           </ButtonItem>
-        </PanelSectionRow>
-      </PanelSection>
-      <PanelSection title="Save History">
-        <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            onClick={() => {
-              Navigation.Navigate("/romm-sync-save-history");
-              Navigation.CloseSideMenus();
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <FaHistory size={14} />
-              <span>Browse Save History</span>
-            </div>
-          </ButtonItem>
-          <div style={{ fontSize: '11px', color: '#9ca3af', marginTop: '4px' }}>
-            Browse and restore server save/state versions for downloaded games.
-          </div>
         </PanelSectionRow>
       </PanelSection>
       <PanelSection title="Debug Settings">
@@ -3377,8 +3106,6 @@ function TitleView() {
 export default definePlugin(() => {
   routerHook.addRoute("/romm-sync-settings", () => <SettingsPage />, { exact: true });
   routerHook.addRoute("/romm-sync-config", () => <ConfigPage />, { exact: true });
-  routerHook.addRoute("/romm-sync-save-history", () => <SaveHistoryGamesPage />, { exact: true });
-  routerHook.addRoute("/romm-sync-save-history/:romId", () => <SaveHistoryVersionsPage />, { exact: true });
   routerHook.addRoute("/romm-sync-library", () => <LibraryGroupsPage />, { exact: true });
   routerHook.addRoute("/romm-sync-library/:key", () => <LibraryGamesPage />, { exact: true });
   routerHook.addRoute("/romm-sync-game/:romId", () => <GameDetailPage />, { exact: true });
@@ -3394,8 +3121,6 @@ export default definePlugin(() => {
 
       routerHook.removeRoute("/romm-sync-settings");
       routerHook.removeRoute("/romm-sync-config");
-      routerHook.removeRoute("/romm-sync-save-history");
-      routerHook.removeRoute("/romm-sync-save-history/:romId");
       routerHook.removeRoute("/romm-sync-library");
       routerHook.removeRoute("/romm-sync-library/:key");
       routerHook.removeRoute("/romm-sync-game/:romId");
