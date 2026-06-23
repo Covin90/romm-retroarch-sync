@@ -247,6 +247,7 @@ function GameTile({ game, onOpen, onActiveCover }:
       onOptionsActionDescription={dl ? 'Delete' : undefined}
       onOKActionDescription={dl ? 'Launch' : 'Download'}
       onFocus={() => { setFocused(true); activate(); }}
+      onBlur={() => setFocused(false)}
       onMouseEnter={() => { setFocused(true); activate(); }}
       onMouseLeave={() => setFocused(false)}
       style={{ cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: '7px' }}
@@ -1944,6 +1945,7 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
   // we were handed a cached one. Loading runs until the fetch resolves.
   const [loadingShot, setLoadingShot] = useState(!shotUri);
   const [busy, setBusy] = useState<null | 'restore' | 'copy'>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (shotUri) return;
@@ -1951,6 +1953,12 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
       .then((r: any) => setShot(r?.data_uri || null))
       .catch(() => setShot(null))
       .finally(() => setLoadingShot(false));
+  }, []);
+
+  // Move controller focus into the overlay (no ModalRoot to do it for us).
+  useEffect(() => {
+    const t = setTimeout(() => cardRef.current?.focus(), 60);
+    return () => clearTimeout(t);
   }, []);
 
   const run = async (asCopy: boolean) => {
@@ -1975,23 +1983,23 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
   const meta = [slotLabel(entry), entry.device || '', fmtHistSize(entry.size_bytes)].filter(Boolean).join(' · ');
 
   return (
-    <ModalRoot bHideCloseIcon onCancel={closeModal} onEscKeypress={closeModal}
-      className="romm-ui romm-modal-backdrop" modalClassName="romm-modal-collapse">
+    <Focusable noFocusRing
+      className="romm-ui"
+      onCancelButton={() => closeModal?.()}
+      onButtonDown={(e: any) => { if (e?.detail?.button === GamepadButton.CANCEL) closeModal?.(); }}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 9999,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        background: 'rgba(7,7,15,0.45)',
+        WebkitBackdropFilter: 'blur(8px)', backdropFilter: 'blur(8px)',
+      }}
+    >
       <style>{`
         @keyframes sdShimmer { 0% { background-position: -150% 0; } 100% { background-position: 150% 0; } }
         .sd-shimmer { background-image: linear-gradient(100deg, transparent 20%, rgba(255,255,255,0.22) 50%, transparent 80%) !important; background-size: 200% 100% !important; background-repeat: no-repeat; animation: sdShimmer 1.1s linear infinite; }
         ${V2_FOCUS_STYLE}
-        .romm-modal-backdrop {
-          background: rgba(7,7,15,0.45) !important;
-          -webkit-backdrop-filter: blur(8px) !important; backdrop-filter: blur(8px) !important;
-          display: flex !important; align-items: center !important; justify-content: center !important;
-        }
-        .romm-modal-collapse, .romm-modal-backdrop > div {
-          background: transparent !important; border: none !important; box-shadow: none !important;
-          padding: 0 !important; margin: auto !important;
-        }
       `}</style>
-      <Focusable noFocusRing flow-children="vertical" style={{
+      <Focusable noFocusRing autoFocus ref={cardRef} flow-children="vertical" style={{
         fontFamily: V2.font, color: V2.fg, width: '520px', maxWidth: '90vw', boxSizing: 'border-box',
         padding: '18px', display: 'flex', flexDirection: 'column', gap: '12px',
         maxHeight: '82vh', overflowY: 'auto',
@@ -2046,7 +2054,7 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
           </V2Button>
         </Focusable>
       </Focusable>
-    </ModalRoot>
+    </Focusable>
   );
 }
 
