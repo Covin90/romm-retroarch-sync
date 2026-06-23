@@ -2050,16 +2050,36 @@ function SaveDataTab({ romId }: { romId: number }) {
   };
   useEffect(() => { load(); }, []);
 
-  // Lazily fetch state screenshots once the States subtab is opened.
+  // Lazily fetch state screenshots once the States subtab is opened. The
+  // backend serves them one request at a time, so fetch sequentially, newest
+  // first, and commit each result as it lands — tiles fill in progressively
+  // instead of all appearing only once the last one finishes.
+  const requestedRef = useRef<Set<number>>(new Set());
   useEffect(() => {
     if (sub !== 'states') return;
-    states.forEach((s) => {
-      if (s.id in shots) return;
-      setShots((p) => ({ ...p, [s.id]: 'loading' }));
-      getSaveScreenshot(romId, s.id, 'states')
-        .then((r: any) => setShots((p) => ({ ...p, [s.id]: r?.data_uri || '' })))
-        .catch(() => setShots((p) => ({ ...p, [s.id]: '' })));
+    const queue = states
+      .filter((s) => !requestedRef.current.has(s.id))
+      .sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+    if (!queue.length) return;
+    queue.forEach((s) => requestedRef.current.add(s.id));
+    setShots((p) => {
+      const next = { ...p };
+      queue.forEach((s) => { if (!(s.id in next)) next[s.id] = 'loading'; });
+      return next;
     });
+    let cancelled = false;
+    (async () => {
+      for (const s of queue) {
+        if (cancelled) return;
+        try {
+          const r: any = await getSaveScreenshot(romId, s.id, 'states');
+          setShots((p) => ({ ...p, [s.id]: r?.data_uri || '' }));
+        } catch {
+          setShots((p) => ({ ...p, [s.id]: '' }));
+        }
+      }
+    })();
+    return () => { cancelled = true; };
   }, [sub, states]);
 
   const openRestore = (e: HistoryEntry) => {
