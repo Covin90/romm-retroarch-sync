@@ -1085,13 +1085,28 @@ function slotLabel(e: HistoryEntry): string {
 // Routes: /romm-sync-library  ->  /romm-sync-library/:key  ->  /romm-sync-game/:romId
 // ---------------------------------------------------------------------------
 
+// Scoped override of Steam's gamepad focus highlight (the square "overdraw"
+// box drawn on every Focusable). Inside the plugin UI we suppress it and use a
+// soft on-brand ring instead so focus still reads but matches the v2 language.
+const V2_FOCUS_STYLE = `
+  .romm-ui [class*="gpfocus"] { outline: none !important; }
+  .romm-ui [class*="gpfocus"]::before, .romm-ui [class*="gpfocus"]::after {
+    box-shadow: none !important; background: none !important; border: none !important; content: none !important;
+  }
+  .romm-ui .Focusable.gpfocuswithin, .romm-ui .Focusable.gpfocus {
+    box-shadow: 0 0 0 2px rgba(139,116,232,0.85) !important;
+    transition: box-shadow 0.12s ease;
+  }
+`;
+
 function v2Page(children: any, bgUri: string | null = null) {
   return (
-    <div style={{
+    <div className="romm-ui" style={{
       fontFamily: V2.font, color: V2.fg, background: V2.bg,
       position: 'relative', overflowY: 'auto', height: 'calc(100vh - 40px)',
       marginTop: '40px',
     }}>
+      <style>{V2_FOCUS_STYLE}</style>
       <V2Bg uri={bgUri} />
       <div style={{ position: 'relative', zIndex: 2, padding: '0 0 40px' }}>
         {children}
@@ -1958,6 +1973,7 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
 
   return (
     <Focusable
+      className="romm-ui"
       onCancelButton={() => closeModal?.()}
       onButtonDown={(e: any) => { if (e?.detail?.button === GamepadButton.CANCEL) closeModal?.(); }}
       style={{
@@ -1970,6 +1986,7 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
       <style>{`
         @keyframes sdShimmer { 0% { background-position: -150% 0; } 100% { background-position: 150% 0; } }
         .sd-shimmer { background-image: linear-gradient(100deg, transparent 20%, rgba(255,255,255,0.22) 50%, transparent 80%) !important; background-size: 200% 100% !important; background-repeat: no-repeat; animation: sdShimmer 1.1s linear infinite; }
+        ${V2_FOCUS_STYLE}
       `}</style>
       <Focusable flow-children="vertical" style={{
         fontFamily: V2.font, color: V2.fg, width: '520px', maxWidth: '90vw', boxSizing: 'border-box',
