@@ -1965,8 +1965,8 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
         /* Full-screen backdrop: keep it transparent and just blur+dim so the
            app stays visible behind the modal (no solid color wash). */
         .romm-modal-backdrop {
-          background: rgba(7,7,15,0.35) !important;
-          -webkit-backdrop-filter: blur(16px) !important; backdrop-filter: blur(16px) !important;
+          background: rgba(7,7,15,0.12) !important;
+          -webkit-backdrop-filter: blur(6px) !important; backdrop-filter: blur(6px) !important;
           display: flex !important; align-items: center !important; justify-content: center !important;
         }
         /* The single glass panel. Strip the default Steam dialog chrome.
@@ -1983,8 +1983,8 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
       `}</style>
       <div style={{
         fontFamily: V2.font, color: V2.fg,
-        padding: '22px', display: 'flex', flexDirection: 'column', gap: '16px',
-        maxHeight: '82vh', overflowY: 'auto',
+        padding: '18px', display: 'flex', flexDirection: 'column', gap: '12px',
+        maxHeight: '80vh', overflowY: 'auto',
       }}>
         <div>
           <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: V2.brand }}>
@@ -1994,14 +1994,20 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
           {meta && <div style={{ fontSize: '13px', color: V2.fg2, marginTop: '4px' }}>{meta}</div>}
         </div>
 
-        <div className={loadingShot ? 'sd-shimmer' : ''} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: loadingShot || !shot ? '140px' : undefined, backgroundColor: V2.coverPlaceholder, borderRadius: V2.radiusLg, overflow: 'hidden', border: `1px solid ${V2.border}` }}>
+        <div className={loadingShot ? 'sd-shimmer' : ''} style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          minHeight: loadingShot || !shot ? '120px' : undefined,
+          backgroundColor: (loadingShot || !shot) ? V2.coverPlaceholder : 'transparent',
+          borderRadius: V2.radiusLg, overflow: 'hidden',
+          border: (loadingShot || !shot) ? `1px solid ${V2.border}` : 'none',
+        }}>
           {loadingShot ? (
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', color: V2.fgMuted }}>
               <FaSync size={16} style={{ animation: 'spin 1s linear infinite' }} />
               <span style={{ fontSize: '12px' }}>Loading preview…</span>
             </div>
           ) : shot ? (
-            <img src={shot} style={{ width: '100%', height: 'auto', display: 'block' }} />
+            <img src={shot} style={{ maxWidth: '100%', maxHeight: '210px', width: 'auto', display: 'block', borderRadius: V2.radiusLg }} />
           ) : (
             <span style={{ fontSize: '12px', color: V2.fgMuted }}>No preview available</span>
           )}
