@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import sys
@@ -315,6 +316,7 @@ class Plugin:
                         'local_size':      local_size,
                         'cover_path': rom.get('path_cover_small'),
                         'cover_path_large': rom.get('path_cover_large'),
+                        'created_at':      rom.get('created_at'),
                         '_sibling_files':  rom.get('_sibling_files', []),
                         'romm_data': {
                             'fs_name':         rom.get('fs_name'),
@@ -1712,6 +1714,7 @@ class Plugin:
                 'release_date': d.get('first_release_date') or meta.get('first_release_date'),
                 'rating': meta.get('total_rating') or d.get('total_rating'),
                 'files': files,
+                'screenshots': [s for s in (d.get('merged_screenshots') or []) if s],
                 'fs_size_bytes': d.get('fs_size_bytes') or 0,
                 'is_downloaded': bool(local.get('is_downloaded')),
                 'has_cover': bool(d.get('path_cover_small') or local.get('cover_path')),
@@ -1783,6 +1786,93 @@ class Plugin:
             logging.error(f"delete_game error: {e}", exc_info=True)
             return {'success': False, 'message': str(e)}
 
+    def _fetch_continue_playing(self, limit=15):
+        """Continue-playing list straight from RomM (per-user, cross-device).
+
+        RomM tracks play state server-side as rom_user.last_played, so we ask
+        /api/roms ordered by it rather than guessing from local save mtimes.
+        Returns serialized LibGames, enriched with local download state when the
+        rom is in our index.
+        """
+        client = self._romm_client
+        if not client or not client.ensure_authenticated():
+            return []
+        try:
+            resp = client.session.get(
+                urljoin(client.base_url, '/api/roms'),
+                params={
+                    'order_by': 'last_played', 'order_dir': 'desc',
+                    'last_played': 'true',  # server-side filter to played roms only
+                    'limit': limit, 'offset': 0,
+                    'fields': 'id,name,fs_name,platform_name,path_cover_small,rom_user',
+                },
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                logging.warning(f"continue-playing fetch HTTP {resp.status_code}")
+                return []
+            items = resp.json().get('items', [])
+        except Exception as e:
+            logging.warning(f"continue-playing fetch failed: {e}")
+            return []
+
+        idx = self._games_index()
+        out = []
+        for rom in items:
+            # Only games actually played carry a last_played timestamp; the
+            # ordering pushes null-played roms to the tail, so stop at the first.
+            if not (rom.get('rom_user') or {}).get('last_played'):
+                continue
+            rid = rom.get('id')
+            local = idx.get(rid)
+            if local:
+                out.append(self._serialize_game(local))
+            else:
+                out.append({
+                    'rom_id': rid,
+                    'name': rom.get('name') or rom.get('fs_name') or 'Unknown',
+                    'platform': rom.get('platform_name'),
+                    'is_downloaded': False,
+                    'has_cover': bool(rom.get('path_cover_small')),
+                })
+        return out
+
+    async def get_home_data(self):
+        """Home dashboard payload: library snapshot stats + a recently-added row.
+
+        Modeled on RomM's v2 Home (WidgetBar + 'Continue playing' + 'Recently
+        added' CardRows). Stats/recent come from the local library cache;
+        continue-playing is pulled live from RomM (per-user, cross-device).
+        """
+        try:
+            games = self._available_games or []
+            total = len(games)
+            downloaded = sum(1 for g in games if g.get('is_downloaded'))
+            platforms = len({g.get('platform_slug') for g in games if g.get('platform_slug')})
+            collections = len(self._romm_collections or [])
+            # Recently added: newest created_at first; fall back to library order
+            # (RomM returns roms newest-first) when timestamps are missing.
+            def _key(g):
+                return g.get('created_at') or ''
+            has_dates = any(g.get('created_at') for g in games)
+            ordered = sorted(games, key=_key, reverse=True) if has_dates else list(games)
+            recent = [self._serialize_game(g) for g in ordered[:15]]
+            continue_playing = await asyncio.to_thread(self._fetch_continue_playing, 15)
+            return {
+                'success': True,
+                'stats': {
+                    'games': total,
+                    'downloaded': downloaded,
+                    'platforms': platforms,
+                    'collections': collections,
+                },
+                'recent': recent,
+                'continue_playing': continue_playing,
+            }
+        except Exception as e:
+            logging.error(f"get_home_data error: {e}", exc_info=True)
+            return {'success': False, 'stats': {}, 'recent': [], 'continue_playing': [], 'message': str(e)}
+
     async def launch_game(self, rom_id: int):
         """Launch a downloaded game in RetroArch (A button on a downloaded card)."""
         try:
@@ -1792,6 +1882,13 @@ class Plugin:
                 return {'success': False, 'message': 'Game not downloaded'}
             if not self._retroarch:
                 return {'success': False, 'message': 'RetroArch not available'}
+            # Pull down the latest saves/states from RomM before launching so the
+            # session starts from the most recent progress (no-op if download is off).
+            if self._auto_sync is not None:
+                try:
+                    await asyncio.to_thread(self._auto_sync.sync_before_launch, g)
+                except Exception as e:
+                    logging.warning(f"pre-launch sync failed (continuing): {e}")
             platform_name = self._platform_name_for(g)
             ok, msg = self._retroarch.launch_game(g['local_path'], platform_name)
             return {'success': bool(ok), 'message': msg or ('Launched' if ok else 'Launch failed')}

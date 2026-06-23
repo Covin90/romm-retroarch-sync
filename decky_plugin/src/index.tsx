@@ -9,10 +9,12 @@ import {
   DialogButton,
   Focusable,
   GamepadButton,
+  showModal,
+  ModalRoot,
 } from "@decky/ui";
 import { callable, definePlugin, toaster, routerHook, openFilePicker, FileSelectionType } from "@decky/api";
 import { useState, useEffect, useRef, ChangeEvent } from "react";
-import { FaSync, FaTrash, FaCog, FaSteam, FaGithub, FaBug, FaHistory, FaArrowLeft, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaDownload, FaPlay, FaInfoCircle } from "react-icons/fa";
+import { FaSync, FaTrash, FaCog, FaSteam, FaGithub, FaBug, FaHistory, FaArrowLeft, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight } from "react-icons/fa";
 import { BsGearFill } from "react-icons/bs";
 
 // Call backend methods
@@ -42,6 +44,7 @@ const getGameDetail = callable<[number], any>("get_game_detail");
 const downloadGame = callable<[number], any>("download_game");
 const deleteGame = callable<[number], any>("delete_game");
 const launchGame = callable<[number], any>("launch_game");
+const getHomeData = callable<[], any>("get_home_data");
 
 // ---------------------------------------------------------------------------
 // RomM v2 visual language (from rommapp/romm frontend/src/v2/styles/tokens.css).
@@ -1440,9 +1443,11 @@ function SearchPanel({ onOpen, onBg }: { onOpen: (g: LibGame) => void; onBg: (ur
   const [results, setResults] = useState<LibGame[]>([]);
   const [loading, setLoading] = useState(false);
   useEffect(() => {
+    if (!q.trim()) { setResults([]); setLoading(false); return; }
+    // Enter the loading state synchronously so the debounce window shows
+    // "Searching…" rather than briefly flashing the "no match" empty state.
+    setLoading(true);
     const t = setTimeout(async () => {
-      if (!q.trim()) { setResults([]); return; }
-      setLoading(true);
       try { const r = await searchGames(q); setResults(r?.success ? (r.games || []) : []); }
       catch { setResults([]); }
       finally { setLoading(false); }
@@ -1476,8 +1481,180 @@ function SearchPanel({ onOpen, onBg }: { onOpen: (g: LibGame) => void; onBg: (ur
   );
 }
 
+// Small count tag — RomM RTag x-small used in CardRow headers.
+function Tag({ children }: { children: any }) {
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+      minWidth: '18px', height: '18px', padding: '0 6px', borderRadius: V2.radiusChip,
+      background: V2.surface, border: `1px solid ${V2.border}`,
+      fontSize: '11px', fontWeight: 700, color: V2.fg2, fontVariantNumeric: 'tabular-nums',
+    }}>{children}</span>
+  );
+}
+
+// CardRow — RomM v2 Home section: header (icon + title + count) over a
+// horizontal-scroll track. Gamepad focus scrolls the track natively; the
+// gradient chevron arrows (RomM style) appear only when the track overflows
+// in that direction, signaling "more to the right".
+function CardRow({ icon, title, count, children }:
+  { icon: any; title: string; count?: number; children: any }) {
+  const trackRef = useRef<HTMLDivElement | null>(null);
+  const [canLeft, setCanLeft] = useState(false);
+  const [canRight, setCanRight] = useState(false);
+
+  const update = () => {
+    const el = trackRef.current;
+    if (!el) return;
+    setCanLeft(el.scrollLeft > 8);
+    setCanRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 8);
+  };
+  useEffect(() => {
+    const el = trackRef.current;
+    if (!el) return;
+    requestAnimationFrame(update);
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    for (const c of Array.from(el.children)) ro.observe(c as Element);
+    return () => ro.disconnect();
+  }, [children]);
+  const scroll = (dir: -1 | 1) => {
+    const el = trackRef.current;
+    if (!el) return;
+    el.scrollBy({ left: dir * el.clientWidth * 0.8, behavior: 'smooth' });
+  };
+
+  // Arrows are always mounted and fade in/out (opacity + slide) with the
+  // overflow state so they don't pop; hidden ones drop pointer events.
+  const arrow = (dir: -1 | 1, show: boolean): any => ({
+    position: 'absolute', top: '50%', zIndex: 10,
+    [dir < 0 ? 'left' : 'right']: '8px',
+    width: '36px', height: '36px', borderRadius: '50%',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    cursor: show ? 'pointer' : 'default', pointerEvents: show ? 'auto' : 'none',
+    background: 'rgba(0,0,0,0.4)', color: V2.fg2, border: `1px solid ${V2.border}`,
+    backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)',
+    boxShadow: '0 2px 10px rgba(0,0,0,0.4)',
+    opacity: show ? 1 : 0,
+    transform: `translateY(-50%) translateX(${show ? '0' : `${dir < 0 ? -6 : 6}px`})`,
+    transition: 'opacity 0.2s ease, transform 0.2s ease',
+  });
+
+  return (
+    <section style={{ marginBottom: '22px' }}>
+      <header style={{
+        display: 'flex', alignItems: 'center', gap: '10px',
+        padding: '0 16px', marginBottom: '12px', color: V2.fg2,
+      }}>
+        <span style={{ opacity: 0.6, display: 'inline-flex', alignItems: 'center' }}>{icon}</span>
+        <h2 style={{ fontSize: '14.5px', fontWeight: 600, letterSpacing: '0.01em', lineHeight: 1.2, margin: 0 }}>{title}</h2>
+        {count != null && <Tag>{count}</Tag>}
+      </header>
+      <div style={{ position: 'relative' }}>
+        <div style={arrow(-1, canLeft)} onClick={() => canLeft && scroll(-1)}><FaChevronLeft size={15} /></div>
+        <div style={arrow(1, canRight)} onClick={() => canRight && scroll(1)}><FaChevronRight size={15} /></div>
+        {/* Top/bottom padding gives the focus scale + glow room so the
+            scroll container (overflow-x:auto clips y too) doesn't crop the
+            top of hovered covers. Matches RomM's 16/20 track padding. */}
+        <div
+          ref={trackRef}
+          onScroll={update}
+          style={{ overflowX: 'auto', overflowY: 'visible' }}
+        >
+          <Focusable style={{ display: 'flex', gap: '12px', padding: '24px 16px 28px' }}>
+            {children}
+          </Focusable>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// Home dashboard — faithful to RomM v2 Home.vue: horizontal CardRows
+// (Continue playing / Recently added / Platforms / Collections).
+function HomePanel({ onOpen, onOpenGroup, onBg }:
+  { onOpen: (g: LibGame) => void; onOpenGroup: (mode: string, g: LibGroup, gs: LibGroup[]) => void; onBg: (uri: string | null) => void }) {
+  const [recent, setRecent] = useState<LibGame[]>([]);
+  const [continuePlaying, setContinuePlaying] = useState<LibGame[]>([]);
+  const [platforms, setPlatforms] = useState<LibGroup[]>([]);
+  const [collections, setCollections] = useState<LibGroup[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const [h, p, c] = await Promise.all([
+          getHomeData(), getLibraryGroups('platform'), getLibraryGroups('collection'),
+        ]);
+        if (!alive) return;
+        if (h?.success) { setRecent(h.recent || []); setContinuePlaying(h.continue_playing || []); }
+        if (p?.success) setPlatforms(p.groups || []);
+        if (c?.success) setCollections(c.groups || []);
+      } catch (e) { console.error('home load failed', e); }
+      finally { if (alive) setLoading(false); }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  if (loading) {
+    return <div style={{ padding: '16px', color: V2.fgMuted, fontSize: '13px' }}>Loading…</div>;
+  }
+  return (
+    <div>
+      {/* Continue playing — per-user last_played from RomM (cross-device). */}
+      {continuePlaying.length > 0 && (
+        <CardRow icon={<FaPlay size={14} />} title="Continue playing" count={continuePlaying.length}>
+          {continuePlaying.map((g) => (
+            <div key={g.rom_id} style={{ width: '132px', flexShrink: 0 }}>
+              <GameTile game={g} onOpen={onOpen} onActiveCover={onBg} />
+            </div>
+          ))}
+        </CardRow>
+      )}
+
+      {/* Recently added */}
+      {recent.length > 0 && (
+        <CardRow icon={<FaRegClock size={16} />} title="Recently added" count={recent.length}>
+          {recent.map((g) => (
+            <div key={g.rom_id} style={{ width: '132px', flexShrink: 0 }}>
+              <GameTile game={g} onOpen={onOpen} onActiveCover={onBg} />
+            </div>
+          ))}
+        </CardRow>
+      )}
+
+      {/* Platforms */}
+      {platforms.length > 0 && (
+        <CardRow icon={<FaGamepad size={16} />} title="Platforms" count={platforms.length}>
+          {platforms.map((g) => (
+            <div key={g.key} style={{ width: '150px', flexShrink: 0 }}>
+              <PlatformTile group={g} onOpen={(grp) => onOpenGroup('platform', grp, platforms)} />
+            </div>
+          ))}
+        </CardRow>
+      )}
+
+      {/* Collections */}
+      {collections.length > 0 && (
+        <CardRow icon={<FaLayerGroup size={15} />} title="Collections" count={collections.length}>
+          {collections.map((g) => (
+            <div key={g.key} style={{ width: '132px', flexShrink: 0 }}>
+              <CollectionTile group={g} onOpen={(grp) => onOpenGroup('collection', grp, collections)} />
+            </div>
+          ))}
+        </CardRow>
+      )}
+
+      {continuePlaying.length === 0 && recent.length === 0 && platforms.length === 0 && collections.length === 0 && (
+        <div style={{ padding: '16px', color: V2.fgMuted, fontSize: '13px' }}>No games in your library yet.</div>
+      )}
+    </div>
+  );
+}
+
 function LibraryGroupsPage() {
-  const [active, setActive] = useState<NavId>('platforms');
+  const [active, setActive] = useState<NavId>('home');
   const [groups, setGroups] = useState<LibGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [bgUri, setBgUri] = useState<string | null>(null);
@@ -1507,6 +1684,13 @@ function LibraryGroupsPage() {
     Navigation.Navigate(`/romm-sync-library/${encodeURIComponent(g.key)}`);
   };
 
+  // Home rows carry their own mode + sibling list (independent of the active tab).
+  const openGroupFrom = (m: string, g: LibGroup, gs: LibGroup[]) => {
+    _libGroupHolder = { mode: m, group: g };
+    _libGroupsHolder = { mode: m, groups: gs };
+    Navigation.Navigate(`/romm-sync-library/${encodeURIComponent(g.key)}`);
+  };
+
   const openGame = (g: LibGame) => {
     _libGameHolder = g;
     Navigation.Navigate(`/romm-sync-game/${g.rom_id}`);
@@ -1525,16 +1709,6 @@ function LibraryGroupsPage() {
     else if (b === GamepadButton.BUMPER_RIGHT) cycle(1);
   };
 
-  const placeholder = (title: string) => (
-    <div style={{
-      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-      height: 'calc(100vh - 220px)', gap: '8px', color: V2.fgMuted,
-    }}>
-      <div style={{ fontSize: '20px', fontWeight: 700, color: V2.fg2 }}>{title}</div>
-      <div style={{ fontSize: '13px' }}>Coming soon</div>
-    </div>
-  );
-
   return v2Page(
     <Focusable onButtonDown={onButtonDown}>
       <V2NavBar active={active} onTab={onTab} />
@@ -1542,7 +1716,7 @@ function LibraryGroupsPage() {
       <div style={{ height: '8px' }} />
 
       {active === 'home' ? (
-        placeholder('Home')
+        <HomePanel onOpen={openGame} onOpenGroup={openGroupFrom} onBg={setBgUri} />
       ) : active === 'search' ? (
         <SearchPanel onOpen={openGame} onBg={setBgUri} />
       ) : loading ? (
@@ -1712,6 +1886,161 @@ function LibraryGamesPage() {
   );
 }
 
+// Fetch an auth-gated RomM resource path as a base64 data URI (backend proxy).
+function useRommImage(path: string | null): string | null {
+  const [uri, setUri] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    if (!path) { setUri(null); return; }
+    (async () => {
+      try { const r = await getImage(path); if (alive) setUri(r?.data_uri || null); }
+      catch { if (alive) setUri(null); }
+    })();
+    return () => { alive = false; };
+  }, [path]);
+  return uri;
+}
+
+// Fullscreen screenshot lightbox — RCarousel equivalent. L1/R1 or the
+// on-screen arrows page through; A/B close.
+function ScreenshotLightbox({ paths, index, closeModal }:
+  { paths: string[]; index: number; closeModal?: () => void; }) {
+  const [i, setI] = useState(index);
+  const uri = useRommImage(paths[i]);
+  const go = (d: -1 | 1) => setI((p) => (p + d + paths.length) % paths.length);
+  const onButtonDown = (evt: any) => {
+    const b = evt?.detail?.button;
+    if (b === GamepadButton.BUMPER_LEFT) go(-1);
+    else if (b === GamepadButton.BUMPER_RIGHT) go(1);
+  };
+  const multi = paths.length > 1;
+
+  // Sample the left/right edge luminance of the current shot so each arrow can
+  // flip to a light or dark scrim and stay legible over the image behind it.
+  // true = that edge is dark → use a light scrim with a dark icon.
+  const [edgeDark, setEdgeDark] = useState<{ left: boolean; right: boolean }>({ left: true, right: true });
+  useEffect(() => {
+    if (!uri) { setEdgeDark({ left: true, right: true }); return; }
+    let alive = true;
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const w = 64, h = Math.max(1, Math.round(64 * img.height / Math.max(1, img.width)));
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        const ctx = c.getContext('2d');
+        if (!ctx) return;
+        ctx.drawImage(img, 0, 0, w, h);
+        const lum = (x0: number) => {
+          const d = ctx.getImageData(x0, 0, Math.max(1, Math.round(w * 0.18)), h).data;
+          let s = 0, n = 0;
+          for (let k = 0; k < d.length; k += 4) { s += 0.2126 * d[k] + 0.7152 * d[k + 1] + 0.0722 * d[k + 2]; n++; }
+          return n ? s / n : 0;
+        };
+        if (alive) setEdgeDark({ left: lum(0) < 140, right: lum(Math.round(w * 0.82)) < 140 });
+      } catch { /* canvas may be tainted; keep default */ }
+    };
+    img.src = uri;
+    return () => { alive = false; };
+  }, [uri]);
+
+  // Circular scrim arrow matching the Home CardRow chevrons, but with the
+  // scrim/icon inverted on bright screenshot edges for contrast.
+  const arrowStyle = (side: 'left' | 'right'): any => {
+    const dark = side === 'left' ? edgeDark.left : edgeDark.right;
+    return {
+      position: 'absolute', [side]: '8px', zIndex: 2,
+      minWidth: '36px', width: '36px', height: '36px', padding: 0, borderRadius: '50%',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      background: dark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)',
+      color: dark ? '#07070f' : V2.fg2,
+      border: dark ? '1px solid rgba(0,0,0,0.2)' : `1px solid ${V2.border}`,
+      backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)',
+      boxShadow: '0 2px 10px rgba(0,0,0,0.4)',
+      transition: 'background 0.2s ease, color 0.2s ease',
+    };
+  };
+  return (
+    <ModalRoot onCancel={closeModal} onEscKeypress={closeModal}>
+      <Focusable onButtonDown={onButtonDown}
+        style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '14px' }}>
+        <div style={{
+          position: 'relative', width: '100%', display: 'flex',
+          alignItems: 'center', justifyContent: 'center',
+        }}>
+          {multi && (
+            <DialogButton onClick={() => go(-1)} style={arrowStyle('left')}>
+              <FaChevronLeft size={15} />
+            </DialogButton>
+          )}
+          {uri ? (
+            <img src={uri} style={{
+              maxWidth: '100%', maxHeight: '70vh', objectFit: 'contain',
+              borderRadius: V2.radiusMd, boxShadow: V2.elev2,
+            }} />
+          ) : (
+            <div style={{
+              width: '100%', aspectRatio: '16 / 9', borderRadius: V2.radiusMd,
+              background: V2.surface, display: 'flex', alignItems: 'center',
+              justifyContent: 'center', color: V2.fgMuted, fontSize: '12px',
+            }}>Loading…</div>
+          )}
+          {multi && (
+            <DialogButton onClick={() => go(1)} style={arrowStyle('right')}>
+              <FaChevronRight size={15} />
+            </DialogButton>
+          )}
+        </div>
+        {multi && (
+          <div style={{ fontSize: '12px', color: V2.fgMuted }}>{i + 1} / {paths.length}</div>
+        )}
+      </Focusable>
+    </ModalRoot>
+  );
+}
+
+// One 16:9 screenshot thumbnail — opens the lightbox on activate.
+function ScreenshotThumb({ paths, index }: { paths: string[]; index: number; }) {
+  const uri = useRommImage(paths[index]);
+  const [focused, setFocused] = useState(false);
+  const open = () => showModal(<ScreenshotLightbox paths={paths} index={index} />);
+  return (
+    <Focusable
+      onActivate={open}
+      onClick={open}
+      onFocus={() => setFocused(true)}
+      onMouseEnter={() => setFocused(true)}
+      onMouseLeave={() => setFocused(false)}
+      style={{
+        cursor: 'pointer', position: 'relative', aspectRatio: '16 / 9',
+        borderRadius: V2.radiusChip, overflow: 'hidden', background: V2.surface,
+        transform: focused ? 'scale(1.02)' : 'scale(1)',
+        transition: 'transform 0.18s ease, box-shadow 0.18s ease',
+        boxShadow: focused
+          ? `0 8px 24px rgba(0,0,0,0.4), 0 0 0 2px ${V2.brand}`
+          : 'none',
+      }}>
+      {uri ? (
+        <img src={uri} loading="lazy" style={{
+          width: '100%', height: '100%', objectFit: 'cover', display: 'block',
+        }} />
+      ) : null}
+    </Focusable>
+  );
+}
+
+// Responsive grid of screenshot thumbnails (RomM ScreenshotsTab).
+function ScreenshotGrid({ paths }: { paths: string[]; }) {
+  return (
+    <Focusable style={{
+      display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
+      gap: '10px', padding: '6px 6px 4px',
+    }}>
+      {paths.map((p, i) => <ScreenshotThumb key={p || i} paths={paths} index={i} />)}
+    </Focusable>
+  );
+}
+
 function GameDetailPage() {
   const game = _libGameHolder;
   const [detail, setDetail] = useState<any>(null);
@@ -1808,6 +2137,7 @@ function GameDetailPage() {
   // Tab strip — Files only when the server reported files (RomM hides empty tabs).
   const tabList: { id: string; label: string }[] = [{ id: 'overview', label: 'Overview' }];
   if (detail?.files?.length) tabList.push({ id: 'files', label: 'Files' });
+  if (detail?.screenshots?.length) tabList.push({ id: 'screenshots', label: 'Screenshots' });
   tabList.push({ id: 'save-data', label: 'Save Data' });
   tabList.push({ id: 'achievements', label: 'Achievements' });
 
@@ -1922,6 +2252,8 @@ function GameDetailPage() {
                   </div>
                 ))}
               </div>
+            ) : tab === 'screenshots' ? (
+              <ScreenshotGrid paths={detail?.screenshots || []} />
             ) : tab === 'save-data' ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                 <div style={{ fontSize: '12px', color: V2.fg2, lineHeight: '1.55' }}>
