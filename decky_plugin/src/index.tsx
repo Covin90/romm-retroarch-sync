@@ -1958,15 +1958,19 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
 
   return (
     <ModalRoot onCancel={closeModal} onEscKeypress={closeModal} bHideCloseIcon bAllowFullSize
-      className="romm-glass-modal" modalClassName="romm-glass-modal">
+      className="romm-modal-backdrop" modalClassName="romm-glass-modal">
       <style>{`
         @keyframes sdShimmer { 0% { background-position: -150% 0; } 100% { background-position: 150% 0; } }
         .sd-shimmer { background-image: linear-gradient(100deg, transparent 20%, rgba(255,255,255,0.22) 50%, transparent 80%) !important; background-size: 200% 100% !important; background-repeat: no-repeat; animation: sdShimmer 1.1s linear infinite; }
-        /* Frosted glass panel: the app stays visible (blurred) behind it.
-           Strip the default Steam dialog chrome so there is a single panel. */
+        /* Full-screen backdrop: keep it transparent and just blur+dim so the
+           app stays visible behind the modal (no solid color wash). */
+        .romm-modal-backdrop {
+          background: rgba(7,7,15,0.35) !important;
+          -webkit-backdrop-filter: blur(16px) !important; backdrop-filter: blur(16px) !important;
+        }
+        /* The single glass panel. Strip the default Steam dialog chrome. */
         .romm-glass-modal {
-          background: linear-gradient(180deg, rgba(28,28,44,0.82) 0%, rgba(12,12,22,0.86) 100%) !important;
-          -webkit-backdrop-filter: blur(24px) saturate(1.2) !important; backdrop-filter: blur(24px) saturate(1.2) !important;
+          background: linear-gradient(180deg, rgba(28,28,44,0.78) 0%, rgba(12,12,22,0.82) 100%) !important;
           border: 1px solid rgba(255,255,255,0.12) !important; border-radius: 14px !important;
           box-shadow: 0 14px 44px rgba(0,0,0,0.55) !important;
           padding: 0 !important;
