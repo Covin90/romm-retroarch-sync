@@ -7,6 +7,7 @@ import os
 import ctypes
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urljoin
 
 # Add py_modules to path so sync_core is importable
 sys.path.insert(0, str(Path(__file__).parent / "py_modules"))
@@ -137,6 +138,11 @@ class Plugin:
 
     # Collections currently running a Steam shortcut sync (add/remove in progress)
     _syncing_steam_collections: set = None
+
+    # Game Browser: base64 cover-art cache {(rom_id, large): data_uri} and a
+    # rom_id -> cover_path map for games not in _available_games (collection view).
+    _cover_cache: dict = {}
+    _cover_paths: dict = {}
 
     # -----------------------------------------------------------------------
     # Lifecycle
@@ -307,6 +313,8 @@ class Plugin:
                         'is_downloaded':   is_downloaded,
                         'local_path':      str(local_path) if is_downloaded else None,
                         'local_size':      local_size,
+                        'cover_path': rom.get('path_cover_small'),
+                        'cover_path_large': rom.get('path_cover_large'),
                         '_sibling_files':  rom.get('_sibling_files', []),
                         'romm_data': {
                             'fs_name':         rom.get('fs_name'),
@@ -679,6 +687,8 @@ class Plugin:
                                 'is_downloaded': is_downloaded,
                                 'local_path': str(local_path) if is_downloaded else None,
                                 'local_size': local_size,
+                                'cover_path': rom.get('path_cover_small'),
+                                'cover_path_large': rom.get('path_cover_large'),
                                 'romm_data': {
                                     'fs_name': rom.get('fs_name'),
                                     'fs_name_no_ext': rom.get('fs_name_no_ext'),
@@ -728,6 +738,8 @@ class Plugin:
                             'is_downloaded':   is_downloaded,
                             'local_path':      str(local_path) if is_downloaded else None,
                             'local_size':      local_size,
+                            'cover_path': rom.get('path_cover_small'),
+                            'cover_path_large': rom.get('path_cover_large'),
                             '_sibling_files':  rom.get('_sibling_files', []),
                             'romm_data': {
                                 'fs_name': rom.get('fs_name'),
@@ -1451,6 +1463,340 @@ class Plugin:
             }
         except Exception as e:
             logging.error(f"restore_save_version error: {e}", exc_info=True)
+            return {'success': False, 'message': str(e)}
+
+    # -----------------------------------------------------------------------
+    # Game Browser (controller-first library: browse platforms/collections,
+    # per-game cover/detail/download/delete). Styled in RomM v2 on the frontend.
+    # -----------------------------------------------------------------------
+
+    def _games_index(self):
+        """rom_id -> game dict, from the in-memory library."""
+        return {g.get('rom_id'): g for g in (self._available_games or []) if g.get('rom_id')}
+
+    def _platform_name_for(self, g):
+        p = g.get('platform')
+        if p and p != 'Unknown':
+            return p
+        slug = g.get('platform_slug') or (g.get('romm_data') or {}).get('platform_slug')
+        if slug:
+            return (self._platform_slug_to_name or {}).get(slug) or slug
+        return 'Unknown'
+
+    async def get_library_groups(self, mode: str = 'platform'):
+        """Return library entry groups for the chosen mode ('platform'|'collection').
+
+        Each group: {key, label, count, downloaded}. 'key' is what to pass back to
+        get_library_games.
+        """
+        try:
+            if mode == 'collection':
+                groups = []
+                for col in (self._romm_collections or []):
+                    name = col.get('name')
+                    if not name:
+                        continue
+                    count = col.get('rom_count')
+                    if count is None:
+                        count = len(col.get('roms') or col.get('rom_ids') or [])
+                    # Kind drives the badge (favorite/smart/virtual) and section,
+                    # mirroring RomM's collection index.
+                    if col.get('is_favorite'):
+                        kind = 'favorite'
+                    elif col.get('is_smart'):
+                        kind = 'smart'
+                    elif col.get('is_virtual'):
+                        kind = 'virtual'
+                    else:
+                        kind = 'collection'
+                    # Up to 4 sample cover paths for the 2×2 mosaic tile.
+                    covers = (col.get('path_covers_small')
+                              or col.get('path_covers_large') or [])[:4]
+                    groups.append({'key': name, 'label': name,
+                                   'count': count, 'downloaded': None,
+                                   'kind': kind, 'covers': covers})
+                groups.sort(key=lambda x: (x['label'] or '').lower())
+                return {'success': True, 'mode': mode, 'groups': groups}
+
+            # default: platform
+            agg = {}
+            for g in (self._available_games or []):
+                label = self._platform_name_for(g)
+                slug = g.get('platform_slug') or (g.get('romm_data') or {}).get('platform_slug')
+                a = agg.setdefault(label, {'key': label, 'label': label, 'count': 0,
+                                           'downloaded': 0, 'slug': slug, 'fs_slug': slug})
+                a['count'] += 1
+                if not a.get('slug') and slug:
+                    a['slug'] = slug; a['fs_slug'] = slug
+                if g.get('is_downloaded'):
+                    a['downloaded'] += 1
+            groups = sorted(agg.values(), key=lambda x: (x['label'] or '').lower())
+            return {'success': True, 'mode': 'platform', 'groups': groups}
+        except Exception as e:
+            logging.error(f"get_library_groups error: {e}", exc_info=True)
+            return {'success': False, 'groups': [], 'message': str(e)}
+
+    @staticmethod
+    def _serialize_game(g, is_downloaded=None):
+        return {
+            'rom_id':        g.get('rom_id') or g.get('id'),
+            'name':          g.get('name') or g.get('fs_name_no_ext') or g.get('fs_name') or 'Unknown',
+            'platform':      g.get('platform'),
+            'is_downloaded': g.get('is_downloaded') if is_downloaded is None else is_downloaded,
+            'has_cover':     bool(g.get('cover_path') or g.get('path_cover_small')),
+        }
+
+    async def get_library_games(self, mode: str, key: str):
+        """Return the games for a group (platform name or collection name)."""
+        try:
+            if mode == 'collection':
+                col_id = None
+                for col in (self._romm_collections or []):
+                    if col.get('name') == key:
+                        col_id = col.get('id'); break
+                if col_id is None:
+                    return {'success': False, 'games': [], 'message': 'Collection not found'}
+                roms = self._romm_client.get_collection_roms(col_id) or []
+                idx = self._games_index()
+                games = []
+                for r in roms:
+                    rid = r.get('id')
+                    local = idx.get(rid)
+                    games.append({
+                        'rom_id': rid,
+                        'name': (local or {}).get('name') or r.get('fs_name_no_ext') or r.get('name') or 'Unknown',
+                        'platform': (local or {}).get('platform') or r.get('platform_name'),
+                        'is_downloaded': bool(local and local.get('is_downloaded')),
+                        'has_cover': bool(r.get('path_cover_small') or (local or {}).get('cover_path')),
+                    })
+                    # stash cover path so get_game_cover can use it without a detail call
+                    if rid and rid not in idx and r.get('path_cover_small'):
+                        self._cover_paths[rid] = r.get('path_cover_small')
+                games.sort(key=lambda x: (x.get('name') or '').lower())
+                return {'success': True, 'games': games}
+
+            # platform
+            games = []
+            for g in (self._available_games or []):
+                if self._platform_name_for(g) != key:
+                    continue
+                sg = self._serialize_game(g)
+                sg['platform'] = key  # resolved label, not the raw (maybe-Unknown) field
+                games.append(sg)
+            games.sort(key=lambda x: (x.get('name') or '').lower())
+            return {'success': True, 'games': games}
+        except Exception as e:
+            logging.error(f"get_library_games error: {e}", exc_info=True)
+            return {'success': False, 'games': [], 'message': str(e)}
+
+    async def search_games(self, query: str):
+        """Filter the library by name (instant, over the in-memory game list)."""
+        try:
+            q = (query or '').strip().lower()
+            if not q:
+                return {'success': True, 'games': []}
+            out = []
+            for g in (self._available_games or []):
+                name = g.get('name') or ''
+                if q in name.lower():
+                    sg = self._serialize_game(g)
+                    sg['platform'] = self._platform_name_for(g)
+                    out.append(sg)
+            out.sort(key=lambda x: (x.get('name') or '').lower())
+            return {'success': True, 'games': out[:200]}
+        except Exception as e:
+            logging.error(f"search_games error: {e}", exc_info=True)
+            return {'success': False, 'games': [], 'message': str(e)}
+
+    async def get_game_cover(self, rom_id: int, large: bool = False):
+        """Return a base64 data URI for a game's cover art (cached)."""
+        try:
+            ck = (rom_id, large)
+            if ck in self._cover_cache:
+                return {'success': True, 'data_uri': self._cover_cache[ck]}
+            if not (self._romm_client and self._romm_client.authenticated):
+                return {'success': False, 'data_uri': None}
+            idx = self._games_index()
+            g = idx.get(rom_id) or {}
+            path = (g.get('cover_path_large') if large else g.get('cover_path')) \
+                or g.get('cover_path') or self._cover_paths.get(rom_id)
+            if not path:
+                # fall back to the ROM detail endpoint
+                r = self._romm_client.session.get(
+                    urljoin(self._romm_client.base_url, f'/api/roms/{rom_id}'), timeout=10)
+                if r.status_code == 200:
+                    d = r.json()
+                    path = (d.get('path_cover_large') if large else d.get('path_cover_small')) \
+                        or d.get('path_cover_small') or d.get('path_cover_large')
+            if not path:
+                return {'success': True, 'data_uri': None}
+            resp = self._romm_client.session.get(
+                urljoin(self._romm_client.base_url, path), timeout=20)
+            if resp.status_code != 200 or not resp.content:
+                return {'success': True, 'data_uri': None}
+            import base64, mimetypes
+            mime = resp.headers.get('content-type') or mimetypes.guess_type(path)[0] or 'image/jpeg'
+            uri = f"data:{mime};base64,{base64.b64encode(resp.content).decode('ascii')}"
+            if len(self._cover_cache) > 400:
+                self._cover_cache.clear()
+            self._cover_cache[ck] = uri
+            return {'success': True, 'data_uri': uri}
+        except Exception as e:
+            logging.error(f"get_game_cover error: {e}", exc_info=True)
+            return {'success': False, 'data_uri': None}
+
+    async def get_image(self, path: str):
+        """Return a base64 data URI for an arbitrary RomM resource path (cached).
+
+        Used by collection mosaic tiles, whose cover paths come from the
+        collection object (path_covers_small) rather than a single rom_id.
+        """
+        try:
+            if not path:
+                return {'success': True, 'data_uri': None}
+            ck = ('img', path)
+            if ck in self._cover_cache:
+                return {'success': True, 'data_uri': self._cover_cache[ck]}
+            if not (self._romm_client and self._romm_client.authenticated):
+                return {'success': False, 'data_uri': None}
+            resp = self._romm_client.session.get(
+                urljoin(self._romm_client.base_url, path), timeout=20)
+            if resp.status_code != 200 or not resp.content:
+                return {'success': True, 'data_uri': None}
+            import base64, mimetypes
+            mime = resp.headers.get('content-type') or mimetypes.guess_type(path)[0] or 'image/png'
+            uri = f"data:{mime};base64,{base64.b64encode(resp.content).decode('ascii')}"
+            if len(self._cover_cache) > 400:
+                self._cover_cache.clear()
+            self._cover_cache[ck] = uri
+            return {'success': True, 'data_uri': uri}
+        except Exception as e:
+            logging.error(f"get_image error: {e}", exc_info=True)
+            return {'success': False, 'data_uri': None}
+
+    async def get_game_detail(self, rom_id: int):
+        """Return IGDB-style metadata + files + local state for a game."""
+        try:
+            if not (self._romm_client and self._romm_client.authenticated):
+                return {'success': False, 'message': 'Not connected to RomM'}
+            r = self._romm_client.session.get(
+                urljoin(self._romm_client.base_url, f'/api/roms/{rom_id}'), timeout=15)
+            if r.status_code != 200:
+                return {'success': False, 'message': f'HTTP {r.status_code}'}
+            d = r.json()
+            meta = d.get('metadatum') or d.get('igdb_metadata') or {}
+
+            def _names(val):
+                out = []
+                for x in (val or []):
+                    if isinstance(x, dict):
+                        out.append(x.get('name') or x.get('slug'))
+                    elif x:
+                        out.append(str(x))
+                return [x for x in out if x]
+
+            local = self._games_index().get(rom_id) or {}
+            files = []
+            for f in (d.get('files') or []):
+                files.append({'name': f.get('file_name') or f.get('fs_name'),
+                              'size': f.get('file_size_bytes') or f.get('size_bytes')})
+            return {
+                'success': True,
+                'rom_id': rom_id,
+                'name': d.get('name') or local.get('name') or 'Unknown',
+                'platform': d.get('platform_name') or local.get('platform'),
+                'summary': d.get('summary') or meta.get('summary') or '',
+                'genres': _names(d.get('genres') or meta.get('genres')),
+                'franchises': _names(d.get('franchises') or meta.get('franchises')),
+                'companies': _names(d.get('companies') or meta.get('companies')),
+                'release_date': d.get('first_release_date') or meta.get('first_release_date'),
+                'rating': meta.get('total_rating') or d.get('total_rating'),
+                'files': files,
+                'fs_size_bytes': d.get('fs_size_bytes') or 0,
+                'is_downloaded': bool(local.get('is_downloaded')),
+                'has_cover': bool(d.get('path_cover_small') or local.get('cover_path')),
+            }
+        except Exception as e:
+            logging.error(f"get_game_detail error: {e}", exc_info=True)
+            return {'success': False, 'message': str(e)}
+
+    async def download_game(self, rom_id: int):
+        """Download a single ROM into the library (handles archive extraction)."""
+        try:
+            if not (self._romm_client and self._romm_client.authenticated):
+                return {'success': False, 'message': 'Not connected to RomM'}
+            idx = self._games_index()
+            g = idx.get(rom_id)
+            download_dir = Path(self._settings.get('Download', 'rom_directory',
+                                                   '~/RomMSync/roms')).expanduser()
+            if g:
+                platform_slug = g.get('platform_slug') or (g.get('romm_data') or {}).get('platform_slug')
+                file_name = g.get('file_name') or (g.get('romm_data') or {}).get('fs_name')
+                name = g.get('name')
+            else:
+                r = self._romm_client.session.get(
+                    urljoin(self._romm_client.base_url, f'/api/roms/{rom_id}'), timeout=15)
+                d = r.json() if r.status_code == 200 else {}
+                platform_slug = d.get('platform_slug', 'Unknown')
+                file_name = d.get('fs_name') or f"{d.get('name', 'rom')}.rom"
+                name = d.get('name')
+            if not (platform_slug and file_name):
+                return {'success': False, 'message': 'Could not resolve ROM path'}
+            dest = download_dir / platform_slug / file_name
+            ok, msg = self._romm_client.download_rom(rom_id, name, dest)
+            if ok and g:
+                g['is_downloaded'] = True
+                g['local_path'] = str(dest)
+            return {'success': bool(ok), 'message': msg or ('Downloaded' if ok else 'Download failed')}
+        except Exception as e:
+            logging.error(f"download_game error: {e}", exc_info=True)
+            return {'success': False, 'message': str(e)}
+
+    async def delete_game(self, rom_id: int):
+        """Delete a single game's local files."""
+        try:
+            import shutil
+            idx = self._games_index()
+            g = idx.get(rom_id)
+            download_dir = Path(self._settings.get('Download', 'rom_directory',
+                                                   '~/RomMSync/roms')).expanduser()
+            target = None
+            if g and g.get('local_path'):
+                target = Path(g['local_path'])
+            elif g:
+                platform_slug = g.get('platform_slug') or (g.get('romm_data') or {}).get('platform_slug')
+                file_name = g.get('file_name') or (g.get('romm_data') or {}).get('fs_name')
+                if platform_slug and file_name:
+                    target = download_dir / platform_slug / file_name
+            if not target or not target.exists():
+                if g:
+                    g['is_downloaded'] = False; g['local_path'] = None
+                return {'success': True, 'message': 'Nothing to delete'}
+            if target.is_file():
+                target.unlink()
+            else:
+                shutil.rmtree(target)
+            if g:
+                g['is_downloaded'] = False; g['local_path'] = None
+            return {'success': True, 'message': 'Deleted'}
+        except Exception as e:
+            logging.error(f"delete_game error: {e}", exc_info=True)
+            return {'success': False, 'message': str(e)}
+
+    async def launch_game(self, rom_id: int):
+        """Launch a downloaded game in RetroArch (A button on a downloaded card)."""
+        try:
+            idx = self._games_index()
+            g = idx.get(rom_id)
+            if not g or not g.get('is_downloaded') or not g.get('local_path'):
+                return {'success': False, 'message': 'Game not downloaded'}
+            if not self._retroarch:
+                return {'success': False, 'message': 'RetroArch not available'}
+            platform_name = self._platform_name_for(g)
+            ok, msg = self._retroarch.launch_game(g['local_path'], platform_name)
+            return {'success': bool(ok), 'message': msg or ('Launched' if ok else 'Launch failed')}
+        except Exception as e:
+            logging.error(f"launch_game error: {e}", exc_info=True)
             return {'success': False, 'message': str(e)}
 
     async def get_bios_status(self):

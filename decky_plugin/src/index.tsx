@@ -8,10 +8,11 @@ import {
   staticClasses,
   DialogButton,
   Focusable,
+  GamepadButton,
 } from "@decky/ui";
 import { callable, definePlugin, toaster, routerHook, openFilePicker, FileSelectionType } from "@decky/api";
 import { useState, useEffect, useRef, ChangeEvent } from "react";
-import { FaSync, FaTrash, FaCog, FaSteam, FaGithub, FaBug, FaHistory, FaArrowLeft, FaUndo, FaCopy } from "react-icons/fa";
+import { FaSync, FaTrash, FaCog, FaSteam, FaGithub, FaBug, FaHistory, FaArrowLeft, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaDownload, FaPlay, FaInfoCircle } from "react-icons/fa";
 import { BsGearFill } from "react-icons/bs";
 
 // Call backend methods
@@ -31,6 +32,635 @@ const getDownloadedGames = callable<[], any>("get_downloaded_games");
 const getSaveHistory = callable<[number], any>("get_save_history");
 const getSaveScreenshot = callable<[number, number, string], any>("get_save_screenshot");
 const restoreSaveVersion = callable<[number, number, string, boolean], any>("restore_save_version");
+// Game Browser
+const getLibraryGroups = callable<[string], any>("get_library_groups");
+const getLibraryGames = callable<[string, string], any>("get_library_games");
+const getGameCover = callable<[number, boolean], any>("get_game_cover");
+const getImage = callable<[string], any>("get_image");
+const searchGames = callable<[string], any>("search_games");
+const getGameDetail = callable<[number], any>("get_game_detail");
+const downloadGame = callable<[number], any>("download_game");
+const deleteGame = callable<[number], any>("delete_game");
+const launchGame = callable<[number], any>("launch_game");
+
+// ---------------------------------------------------------------------------
+// RomM v2 visual language (from rommapp/romm frontend/src/v2/styles/tokens.css).
+// The Game Browser renders custom divs styled with these tokens instead of the
+// Steam/Decky chrome; Focusable is used only for gamepad navigation.
+// ---------------------------------------------------------------------------
+const V2 = {
+  bg: '#07070f',
+  surface: 'rgba(255,255,255,0.07)',
+  surfaceHover: 'rgba(255,255,255,0.12)',
+  border: 'rgba(255,255,255,0.07)',
+  borderStrong: 'rgba(255,255,255,0.15)',
+  fg: '#ffffff',
+  fg2: 'rgba(255,255,255,0.75)',
+  fgMuted: 'rgba(255,255,255,0.45)',
+  brand: '#8b74e8',
+  brandHover: '#a18fff',
+  brandPressed: '#6043c8',
+  success: '#4ade80',
+  warning: '#fbbf24',
+  danger: '#ff5050',
+  igdb: '#6366f1',
+  ra: '#ef4444',
+  coverPlaceholder: '#1a1a2e',
+  radiusArt: '8px',
+  radiusMd: '8px',
+  radiusChip: '6px',
+  radiusLg: '10px',
+  radiusCard: '14px',
+  radiusPill: '100px',
+  elev2: '0 8px 24px rgba(0,0,0,.45)',
+  font: '"Motiva Sans","Segoe UI",system-ui,-apple-system,sans-serif',
+};
+
+// RomM GameActionBtn round buttons: glassy scrim with blur (default), or the
+// "emphasized" white look used by Play. Circular; size in px.
+function roundBtn(size: number, variant: 'glass' | 'emphasized' | 'danger'): any {
+  const base: any = {
+    width: `${size}px`, height: `${size}px`, borderRadius: '50%',
+    display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer',
+    backdropFilter: 'blur(6px)', WebkitBackdropFilter: 'blur(6px)',
+    transition: 'background 0.15s, color 0.15s, border-color 0.15s',
+  };
+  if (variant === 'emphasized') return { ...base, background: '#ffffff', border: '1px solid #ffffff', color: '#111117' };
+  if (variant === 'danger') return { ...base, background: 'rgba(0,0,0,0.55)', border: '1px solid rgba(255,80,80,0.55)', color: V2.danger };
+  return { ...base, background: 'rgba(0,0,0,0.55)', border: '1px solid rgba(255,255,255,0.12)', color: 'rgba(255,255,255,0.95)' };
+}
+
+interface LibGroup {
+  key: string; label: string; count: number; downloaded: number | null;
+  kind?: 'favorite' | 'smart' | 'virtual' | 'collection'; covers?: string[];
+  slug?: string | null; fs_slug?: string | null;
+}
+interface LibGame { rom_id: number; name: string; platform: string | null; is_downloaded: boolean; has_cover: boolean; }
+
+function fmtBytes(n: number | null | undefined): string {
+  if (!n || isNaN(n as any)) return '';
+  let v = Number(n);
+  for (const u of ['B', 'KB', 'MB', 'GB']) {
+    if (v < 1024) return u === 'B' ? `${v.toFixed(0)} ${u}` : `${v.toFixed(1)} ${u}`;
+    v /= 1024;
+  }
+  return `${v.toFixed(1)} TB`;
+}
+
+function fmtReleaseYear(ts: number | null | undefined): string {
+  if (!ts) return '';
+  try {
+    // RomM stores first_release_date as a unix timestamp (seconds).
+    const d = new Date(Number(ts) * 1000);
+    if (isNaN(d.getTime())) return '';
+    return String(d.getUTCFullYear());
+  } catch { return ''; }
+}
+
+// Blurred full-bleed background art — the defining RomM v2 surface. The
+// focused/first cover is painted behind everything, heavily blurred and dimmed,
+// with a bg-coloured gradient scrim on top (recipe lifted verbatim from RomM's
+// frontend/src/v2/styles/global.css: blur(28px) brightness(0.45), scale 1.08).
+function V2Bg({ uri }: { uri: string | null }) {
+  // RomM's BackgroundArt falls back to /assets/auth_background.svg when no cover
+  // is set (platform/collection index pages). Fetch it once as the default.
+  const [fallback, setFallback] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try { const r = await getImage('/assets/auth_background.svg'); if (alive) setFallback(r?.data_uri || null); }
+      catch { /* ignore */ }
+    })();
+    return () => { alive = false; };
+  }, []);
+  const shown = uri || fallback;
+  return (
+    <>
+      <div style={{
+        position: 'fixed', inset: 0, zIndex: 0, pointerEvents: 'none',
+        backgroundImage: shown ? `url('${shown}')` : 'none',
+        backgroundColor: V2.bg,
+        backgroundSize: 'cover', backgroundPosition: 'center 20%', backgroundRepeat: 'no-repeat',
+        filter: 'blur(28px) brightness(0.45)', transform: 'scale(1.08)',
+        transition: 'background-image 0.5s ease',
+      }} />
+      <div style={{
+        position: 'fixed', inset: 0, zIndex: 1, pointerEvents: 'none',
+        background:
+          `linear-gradient(to right, rgba(7,7,15,0.72) 0%, rgba(7,7,15,0.30) 55%, rgba(7,7,15,0.55) 100%),` +
+          `linear-gradient(to bottom, rgba(7,7,15,0.10) 0%, rgba(7,7,15,0) 35%, rgba(7,7,15,0.70) 72%, rgba(7,7,15,0.92) 100%)`,
+      }} />
+    </>
+  );
+}
+
+// Lazy, cached cover art. Renders a placeholder until the base64 data URI
+// arrives from the backend (the frontend <img> can't auth to RomM directly).
+// `onLoaded` bubbles the URI up so a tile can feed the blurred background art.
+function GameCover({ romId, hasCover, large = false, radius = V2.radiusArt, onLoaded }:
+  { romId: number; hasCover: boolean; large?: boolean; radius?: string; onLoaded?: (uri: string | null) => void }) {
+  const [uri, setUri] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    if (!hasCover) { setDone(true); onLoaded?.(null); return; }
+    (async () => {
+      try {
+        const r = await getGameCover(romId, large);
+        if (alive) { setUri(r?.data_uri || null); onLoaded?.(r?.data_uri || null); }
+      }
+      catch { /* ignore */ }
+      finally { if (alive) setDone(true); }
+    })();
+    return () => { alive = false; };
+  }, [romId, large]);
+  return (
+    <div style={{
+      position: 'relative', width: '100%', aspectRatio: '3 / 4',
+      background: V2.coverPlaceholder, borderRadius: radius, overflow: 'hidden',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }}>
+      {uri ? (
+        <img src={uri} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+      ) : (
+        <span style={{ color: V2.fgMuted, fontSize: '11px' }}>{done ? 'No cover' : '…'}</span>
+      )}
+    </div>
+  );
+}
+
+// A single library grid card: art-only with a centered, single-line label
+// underneath (RomM's GameCard language). Focus/hover scales the art and paints
+// the brand glow; activating it opens the game; gaining focus feeds the cover
+// to the page's background art.
+function GameTile({ game, onOpen, onActiveCover }:
+  { game: LibGame; onOpen: (g: LibGame) => void; onActiveCover: (uri: string | null) => void }) {
+  const uriRef = useRef<string | null>(null);
+  const [focused, setFocused] = useState(false);
+  const [dl, setDl] = useState(!!game.is_downloaded);
+  const [busy, setBusy] = useState<null | 'download' | 'delete' | 'launch'>(null);
+  const activate = () => { onActiveCover(uriRef.current); };
+
+  // Button scheme (RomM GameActions): A = download (if absent) / launch (if
+  // present); X = details; Y = delete. Mouse: overlay buttons mirror these.
+  const doDownload = async () => {
+    if (busy) return;
+    setBusy('download');
+    try {
+      const r = await downloadGame(game.rom_id);
+      if (r?.success) { setDl(true); toaster.toast({ title: 'Downloaded', body: game.name }); }
+      else toaster.toast({ title: 'Download failed', body: r?.message || 'Error' });
+    } catch (e) { toaster.toast({ title: 'Download failed', body: String(e) }); }
+    finally { setBusy(null); }
+  };
+  const doLaunch = async () => {
+    if (busy) return;
+    setBusy('launch');
+    try {
+      const r = await launchGame(game.rom_id);
+      if (r?.success) toaster.toast({ title: 'Launching', body: game.name });
+      else toaster.toast({ title: 'Launch failed', body: r?.message || 'Error' });
+    } catch (e) { toaster.toast({ title: 'Launch failed', body: String(e) }); }
+    finally { setBusy(null); }
+  };
+  const doDelete = async () => {
+    if (busy) return;
+    setBusy('delete');
+    try {
+      const r = await deleteGame(game.rom_id);
+      if (r?.success) { setDl(false); toaster.toast({ title: 'Deleted', body: game.name }); }
+      else toaster.toast({ title: 'Delete failed', body: r?.message || 'Error' });
+    } catch (e) { toaster.toast({ title: 'Delete failed', body: String(e) }); }
+    finally { setBusy(null); }
+  };
+  const primary = () => { if (dl) doLaunch(); else doDownload(); };
+
+  return (
+    <Focusable
+      onActivate={primary}
+      onClick={primary}
+      onSecondaryButton={() => onOpen(game)}
+      onSecondaryActionDescription="Details"
+      onOptionsButton={() => { if (dl) doDelete(); }}
+      onOptionsActionDescription={dl ? 'Delete' : undefined}
+      onOKActionDescription={dl ? 'Launch' : 'Download'}
+      onFocus={() => { setFocused(true); activate(); }}
+      onMouseEnter={() => { setFocused(true); activate(); }}
+      onMouseLeave={() => setFocused(false)}
+      style={{ cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: '7px' }}
+    >
+      <div style={{
+        position: 'relative', overflow: 'hidden',
+        transform: focused ? 'scale(1.04)' : 'scale(1)',
+        transition: 'transform 0.18s ease',
+        borderRadius: V2.radiusArt,
+        boxShadow: focused
+          ? `0 8px 28px rgba(0,0,0,0.4), 0 0 0 2px ${V2.brand}, 0 0 18px rgba(139,116,232,0.6)`
+          : 'none',
+      }}>
+        <GameCover romId={game.rom_id} hasCover={game.has_cover}
+          onLoaded={(u) => { uriRef.current = u; }} />
+        {dl && (
+          <div style={{
+            position: 'absolute', top: '6px', right: '6px',
+            width: '10px', height: '10px', borderRadius: '50%',
+            background: V2.success, boxShadow: '0 0 0 2px rgba(0,0,0,0.45)',
+          }} />
+        )}
+
+        {/* GameActions overlay — gradient scrim, center primary (download/play),
+            bottom Details + Delete; revealed on hover/focus. */}
+        <div style={{
+          position: 'absolute', inset: 0, borderRadius: V2.radiusArt, pointerEvents: 'none',
+          background: 'linear-gradient(to top, rgba(0,0,0,0.78) 0%, rgba(0,0,0,0) 55%)',
+          opacity: focused ? 1 : 0, transition: 'opacity 0.18s ease',
+        }} />
+        {/* Center primary (A) — emphasized white round button (RomM Play). */}
+        <div
+          onClick={(e: any) => { e.stopPropagation(); primary(); }}
+          style={{
+            position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
+            ...roundBtn(44, 'emphasized'), boxShadow: '0 2px 10px rgba(0,0,0,0.55)',
+            opacity: focused ? 1 : 0, transition: 'opacity 0.18s ease',
+          }}>
+          {busy === 'download' || busy === 'launch'
+            ? <FaSync size={16} style={{ animation: 'spin 1s linear infinite' }} />
+            : dl ? <FaPlay size={15} style={{ marginLeft: '2px' }} /> : <FaDownload size={15} />}
+        </div>
+        {/* Bottom row: Details (X) + Delete (Y, when downloaded) — glass buttons. */}
+        <div style={{
+          position: 'absolute', left: '8px', right: '8px', bottom: '8px',
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          opacity: focused ? 1 : 0, transform: focused ? 'translateY(0)' : 'translateY(6px)',
+          transition: 'opacity 0.18s ease, transform 0.18s ease',
+        }}>
+          <div onClick={(e: any) => { e.stopPropagation(); onOpen(game); }} style={roundBtn(30, 'glass')}>
+            <FaInfoCircle size={13} />
+          </div>
+          {dl && (
+            <div onClick={(e: any) => { e.stopPropagation(); doDelete(); }} style={roundBtn(30, 'danger')}>
+              {busy === 'delete' ? <FaSync size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <FaTrash size={12} />}
+            </div>
+          )}
+        </div>
+      </div>
+      <div style={{
+        fontSize: '11.5px', color: focused ? V2.fg : V2.fg2, textAlign: 'center',
+        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+        transition: 'color 0.18s', padding: '0 1px',
+      }}>
+        {game.name}
+      </div>
+    </Focusable>
+  );
+}
+
+// One image fetched by RomM resource path (collection mosaic cells), base64
+// via the backend, cached. Renders nothing visible until loaded.
+function PathImage({ path }: { path: string }) {
+  const [uri, setUri] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try { const r = await getImage(path); if (alive) setUri(r?.data_uri || null); }
+      catch { /* ignore */ }
+    })();
+    return () => { alive = false; };
+  }, [path]);
+  return (
+    <div style={{ width: '100%', height: '100%', background: V2.coverPlaceholder, overflow: 'hidden' }}>
+      {uri && <img src={uri} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />}
+    </div>
+  );
+}
+
+// Collection cover mosaic — 1 cover fills the box, 2+ paint a 2×2 grid
+// (RomM CollectionMosaic). Portrait 3:4 to match the game cards.
+function CollectionMosaic({ covers }: { covers: string[] }) {
+  const cs = (covers || []).slice(0, 4);
+  return (
+    <div style={{
+      position: 'relative', width: '100%', aspectRatio: '3 / 4',
+      borderRadius: V2.radiusLg, overflow: 'hidden', background: V2.coverPlaceholder,
+      display: 'grid',
+      gridTemplateColumns: cs.length <= 1 ? '1fr' : '1fr 1fr',
+      gridTemplateRows: cs.length <= 1 ? '1fr' : '1fr 1fr',
+    }}>
+      {cs.length === 0 ? (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: V2.fgMuted }}>
+          <FaBookmark size={20} />
+        </div>
+      ) : cs.map((p, i) => <PathImage key={i} path={p} />)}
+    </div>
+  );
+}
+
+// Collection tile — mosaic cover + kind badge + name/count below, with the
+// focus scale + brand glow (RomM CollectionTile).
+function CollectionTile({ group, onOpen }: { group: LibGroup; onOpen: (g: LibGroup) => void }) {
+  const [focused, setFocused] = useState(false);
+  const badge = group.kind === 'smart' ? { label: 'SMART', bg: V2.brandHover }
+    : group.kind === 'virtual' ? { label: 'VIRTUAL', bg: V2.brandHover }
+    : group.kind === 'favorite' ? { label: '★', bg: '#ff4f6b' }
+    : null;
+  return (
+    <Focusable
+      onActivate={() => onOpen(group)} onClick={() => onOpen(group)}
+      onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+      onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
+      style={{ cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: '8px' }}
+    >
+      <div style={{
+        position: 'relative', borderRadius: V2.radiusLg,
+        transform: focused ? 'scale(1.05)' : 'scale(1)', transition: 'transform 0.18s ease',
+        boxShadow: focused
+          ? `0 8px 28px rgba(0,0,0,0.4), 0 0 0 2px ${V2.brand}, 0 0 18px rgba(139,116,232,0.55)`
+          : '0 2px 8px rgba(0,0,0,0.35)',
+      }}>
+        <CollectionMosaic covers={group.covers || []} />
+        {badge && (
+          <span style={{
+            position: 'absolute', top: '6px', left: '6px',
+            fontSize: '9px', fontWeight: 800, letterSpacing: '0.04em',
+            padding: '2px 7px', borderRadius: V2.radiusChip, color: '#fff',
+            background: badge.bg, boxShadow: '0 1px 3px rgba(0,0,0,0.5)',
+          }}>{badge.label}</span>
+        )}
+      </div>
+      <div>
+        <div style={{
+          fontSize: '12.5px', fontWeight: 600, color: focused ? V2.fg : V2.fg2,
+          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+          transition: 'color 0.18s',
+        }}>{group.label}</div>
+        <div style={{ fontSize: '11px', color: V2.fgMuted }}>
+          {group.count} {group.count === 1 ? 'game' : 'games'}
+        </div>
+      </div>
+    </Focusable>
+  );
+}
+
+// True RomM platform icon, served by the RomM server at
+// /assets/platforms/{slug}.svg (the RPlatformIcon fallback chain:
+// fsSlug.svg → fsSlug.ico → slug.svg → slug.ico). Each candidate is fetched
+// via the backend get_image RPC; falls back to a gamepad glyph if none load.
+function PlatformIcon({ slug, fsSlug, size }: { slug?: string | null; fsSlug?: string | null; size: number }) {
+  const [uri, setUri] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    const fs = (fsSlug || slug || '').toLowerCase().trim();
+    const s = (slug || '').toLowerCase().trim();
+    const cands: string[] = [];
+    if (fs) cands.push(`/assets/platforms/${fs}.svg`, `/assets/platforms/${fs}.ico`);
+    if (s && s !== fs) cands.push(`/assets/platforms/${s}.svg`, `/assets/platforms/${s}.ico`);
+    cands.push('/assets/platforms/default.ico');
+    (async () => {
+      for (const c of cands) {
+        try {
+          const r = await getImage(c);
+          if (!alive) return;
+          if (r?.data_uri) { setUri(r.data_uri); return; }
+        } catch { /* try next */ }
+      }
+      if (alive) setFailed(true);
+    })();
+    return () => { alive = false; };
+  }, [slug, fsSlug]);
+  if (uri) return <img src={uri} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />;
+  if (failed || (!slug && !fsSlug)) return <FaGamepad size={Math.round(size * 0.75)} />;
+  return null; // loading
+}
+
+// Platform tile — centered icon-led card (RomM PlatformTile): bg-elevated
+// card, large icon on top, name + count, focus brand glow.
+function PlatformTile({ group, onOpen }: { group: LibGroup; onOpen: (g: LibGroup) => void }) {
+  const [focused, setFocused] = useState(false);
+  return (
+    <Focusable
+      onActivate={() => onOpen(group)} onClick={() => onOpen(group)}
+      onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+      onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
+      style={{
+        cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center',
+        gap: '12px', padding: '24px 16px 18px',
+        background: focused ? V2.surface : 'rgba(255,255,255,0.045)',
+        border: `1px solid ${focused ? V2.brand : V2.border}`, borderRadius: V2.radiusCard,
+        transition: 'background 0.15s, border-color 0.15s, transform 0.15s',
+        boxShadow: focused
+          ? `0 8px 28px rgba(0,0,0,0.35), 0 0 0 2px ${V2.brand}, 0 0 18px rgba(139,116,232,0.55)`
+          : 'none',
+      }}
+    >
+      <div style={{
+        width: '72px', height: '72px', display: 'grid', placeItems: 'center',
+        color: focused ? V2.brandHover : V2.fg2, opacity: focused ? 1 : 0.9,
+        transform: focused ? 'scale(1.05)' : 'scale(1)', transition: 'transform 0.15s, color 0.15s',
+      }}>
+        <PlatformIcon slug={group.slug} fsSlug={group.fs_slug} size={72} />
+      </div>
+      <div style={{ fontSize: '12px', fontWeight: 600, textAlign: 'center', lineHeight: 1.35, color: focused ? V2.fg : V2.fg2 }}>
+        {group.label}
+      </div>
+      <div style={{ fontSize: '11px', color: V2.fgMuted }}>
+        {group.count} {group.count === 1 ? 'game' : 'games'}
+        {group.downloaded != null && group.downloaded > 0 && (
+          <span style={{ color: V2.success }}>{`  ·  ${group.downloaded} ↓`}</span>
+        )}
+      </div>
+    </Focusable>
+  );
+}
+
+// RomM AppNav — fixed glass top bar: logo (left) · centered tab pill
+// (Home/Platforms/Collections/Search) · right cluster. Geometry is grid
+// 1fr/auto/1fr so the pill stays viewport-centered (AppNav.vue). The tab
+// pill is RSliderBtnGroup's "tab" variant: surface bg + strong border, pill
+// radius, and the ACTIVE tab is a solid white (--r-color-fg) pill with dark
+// (--r-color-bg) text.
+type NavId = 'home' | 'platforms' | 'collections' | 'search';
+function V2NavBar({ active, onTab }: { active: NavId; onTab: (id: NavId) => void }) {
+  const [iso, setIso] = useState<string | null>(null);
+  const [word, setWord] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try { const a = await getImage('/assets/isotipo.svg'); if (alive) setIso(a?.data_uri || null); } catch { }
+      try { const b = await getImage('/assets/logotipo.svg'); if (alive) setWord(b?.data_uri || null); } catch { }
+    })();
+    return () => { alive = false; };
+  }, []);
+  const tabs: { id: NavId; label: string; Icon: any }[] = [
+    { id: 'home', label: 'Home', Icon: FaHome },
+    { id: 'platforms', label: 'Platforms', Icon: FaGamepad },
+    { id: 'collections', label: 'Collections', Icon: FaBookmark },
+    { id: 'search', label: 'Search', Icon: FaSearch },
+  ];
+
+  // Sliding active indicator (RSliderBtnGroup): one white pill whose left/width
+  // animates between the active tab's measured position, instead of toggling a
+  // background per button.
+  const btnRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const [ind, setInd] = useState<{ left: number; width: number } | null>(null);
+  const [shown, setShown] = useState(false); // drives the first-load grow/fade-in
+  const activeIdx = tabs.findIndex((t) => t.id === active);
+  useEffect(() => {
+    const el = btnRefs.current[activeIdx];
+    if (el) {
+      setInd({ left: el.offsetLeft, width: el.offsetWidth });
+      // Next frame: flip from the collapsed/transparent initial state to full so
+      // the indicator animates into place on first paint.
+      requestAnimationFrame(() => setShown(true));
+    }
+  }, [activeIdx]);
+
+  return (
+    <div style={{
+      position: 'sticky', top: 0, zIndex: 50, height: '58px',
+      display: 'grid', gridTemplateColumns: '1fr auto 1fr', alignItems: 'center',
+      padding: '0 20px', background: 'rgba(7,7,15,0.78)',
+      backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)',
+      borderBottom: `1px solid ${V2.border}`,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+        {iso && <img src={iso} style={{ width: '32px', height: '32px', display: 'block' }} />}
+        {word && <img src={word} style={{ height: '22px', width: 'auto', display: 'block' }} />}
+      </div>
+      <div style={{ justifySelf: 'center', display: 'flex', alignItems: 'center', gap: '10px' }}>
+      <Bumper label="L1" />
+      <Focusable flow-children="horizontal" style={{
+        position: 'relative', display: 'flex', gap: '2px', padding: '4px',
+        background: V2.surface, border: `1px solid ${V2.borderStrong}`, borderRadius: V2.radiusPill,
+      }}>
+        {/* Sliding indicator */}
+        {ind && (
+          <div style={{
+            position: 'absolute', top: '4px', bottom: '4px',
+            left: `${ind.left}px`, width: `${ind.width}px`,
+            background: V2.fg, borderRadius: V2.radiusPill, zIndex: 0,
+            opacity: shown ? 1 : 0,
+            transform: shown ? 'scaleX(1)' : 'scaleX(0.6)', transformOrigin: 'center',
+            transition: 'left 0.28s cubic-bezier(0.22,1,0.36,1), width 0.28s cubic-bezier(0.22,1,0.36,1), opacity 0.28s ease, transform 0.28s cubic-bezier(0.22,1,0.36,1)',
+          }} />
+        )}
+        {tabs.map(({ id, label, Icon }, i) => {
+          const on = active === id;
+          return (
+            <Focusable key={id} onActivate={() => onTab(id)} onClick={() => onTab(id)}>
+              <div ref={(el) => { btnRefs.current[i] = el; }}
+                style={{
+                  position: 'relative', zIndex: 1,
+                  display: 'flex', alignItems: 'center', gap: '7px', padding: '7px 18px',
+                  borderRadius: V2.radiusPill, fontSize: '13.5px', cursor: 'pointer',
+                  fontWeight: on ? 600 : 500, color: on ? V2.bg : V2.fg2,
+                  transition: 'color 0.2s ease',
+                }}>
+                <Icon size={12} /><span>{label}</span>
+              </div>
+            </Focusable>
+          );
+        })}
+      </Focusable>
+      <Bumper label="R1" />
+      </div>
+      <div style={{ justifySelf: 'end' }} />
+    </div>
+  );
+}
+
+// Bumper keycap hint (L1 / R1) flanking the nav pill — signals that the
+// shoulder buttons page through the tabs.
+function Bumper({ label }: { label: string }) {
+  return (
+    <span style={{
+      fontSize: '10px', fontWeight: 700, letterSpacing: '0.03em', color: V2.fg2,
+      padding: '3px 8px', borderRadius: V2.radiusChip, background: V2.surface,
+      border: `1px solid ${V2.borderStrong}`, boxShadow: '0 1px 2px rgba(0,0,0,0.4)',
+      lineHeight: 1, whiteSpace: 'nowrap',
+    }}>{label}</span>
+  );
+}
+
+// RomM RTabNav "underlined" variant — tabs over a bottom border with a 2px
+// brand underline that slides between the active tab (GameDetails tab strip).
+function V2TabNav({ tabs, active, onTab }:
+  { tabs: { id: string; label: string }[]; active: string; onTab: (id: string) => void }) {
+  const refs = useRef<(HTMLDivElement | null)[]>([]);
+  const [ind, setInd] = useState<{ left: number; width: number } | null>(null);
+  const idx = tabs.findIndex((t) => t.id === active);
+  useEffect(() => {
+    const el = refs.current[idx];
+    if (el) setInd({ left: el.offsetLeft, width: el.offsetWidth });
+  }, [idx, tabs.length]);
+  return (
+    <div style={{ position: 'relative', display: 'flex', gap: '2px', borderBottom: `1px solid ${V2.borderStrong}` }}>
+      {tabs.map((t, i) => {
+        const on = active === t.id;
+        return (
+          <Focusable key={t.id} onActivate={() => onTab(t.id)} onClick={() => onTab(t.id)}>
+            <div ref={(el) => { refs.current[i] = el; }}
+              style={{
+                padding: '8px 18px', fontSize: '13px', cursor: 'pointer',
+                fontWeight: 500, color: on ? V2.fg : V2.fgMuted, transition: 'color 0.15s ease',
+              }}>
+              {t.label}
+            </div>
+          </Focusable>
+        );
+      })}
+      {ind && (
+        <div style={{
+          position: 'absolute', bottom: '-1px', height: '2px', borderRadius: '2px 2px 0 0',
+          left: `${ind.left}px`, width: `${ind.width}px`, background: V2.brand,
+          transition: 'left 0.25s cubic-bezier(0.22,1,0.36,1), width 0.25s cubic-bezier(0.22,1,0.36,1)',
+        }} />
+      )}
+    </div>
+  );
+}
+
+// RomM RBtn language: 8px rounded-rect (not a pill), three tones — filled
+// brand (primary CTA), translucent surface (tonal), and bare text. Focus/hover
+// brightens + paints the brand ring (matches RBtn's currentColor overlay +
+// focus glow).
+function V2Button({ children, onClick, variant = 'tonal', color, disabled }:
+  { children: any; onClick: () => void; variant?: 'primary' | 'danger' | 'tonal' | 'text'; color?: string; disabled?: boolean }) {
+  const [active, setActive] = useState(false);
+  const base: any = {
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
+    height: '36px', padding: '0 16px', borderRadius: V2.radiusMd, fontSize: '14px',
+    fontWeight: 600, whiteSpace: 'nowrap', border: '1px solid transparent',
+    cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.5 : 1,
+    transition: 'background 0.15s, box-shadow 0.15s, filter 0.15s',
+  };
+  const tone =
+    variant === 'primary' ? { background: V2.brand, color: '#fff' }
+    : variant === 'danger' ? { background: V2.danger, color: '#fff' }
+    : variant === 'tonal' ? { background: V2.surface, color: color || V2.fg, border: `1px solid ${V2.border}` }
+    : { background: 'transparent', color: color || V2.fg2 };
+  const glow = active && !disabled
+    ? { boxShadow: `0 0 0 2px ${V2.brand}`, filter: 'brightness(1.12)' }
+    : {};
+  return (
+    <Focusable
+      onActivate={() => !disabled && onClick()}
+      onClick={() => !disabled && onClick()}
+      onFocus={() => setActive(true)} onBlur={() => setActive(false)}
+      onMouseEnter={() => setActive(true)} onMouseLeave={() => setActive(false)}
+      style={{ ...base, ...tone, ...glow }}
+    >
+      {children}
+    </Focusable>
+  );
+}
+
+// Module-level holders pass the selection between Game Browser routes without
+// re-fetching (same pattern as _historyGameHolder).
+let _libGroupHolder: { mode: string; group: LibGroup } | null = null;
+// Sibling groups (same mode) so the game grid can page prev/next with L1/R1.
+let _libGroupsHolder: { mode: string; groups: LibGroup[] } | null = null;
+let _libGameHolder: LibGame | null = null;
 
 const formatSpeed = (bytesPerSec: number): string => {
   if (bytesPerSec >= 1024 * 1024) return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`;
@@ -736,6 +1366,585 @@ function SaveHistoryVersionsPage() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Game Browser — controller-first library with cover art, per-game download,
+// and metadata. Styled with RomM v2 tokens (V2), not the Steam/Decky chrome.
+// Routes: /romm-sync-library  ->  /romm-sync-library/:key  ->  /romm-sync-game/:romId
+// ---------------------------------------------------------------------------
+
+function v2Page(children: any, bgUri: string | null = null) {
+  return (
+    <div style={{
+      fontFamily: V2.font, color: V2.fg, background: V2.bg,
+      position: 'relative', overflowY: 'auto', height: 'calc(100vh - 40px)',
+      marginTop: '40px',
+    }}>
+      <V2Bg uri={bgUri} />
+      <div style={{ position: 'relative', zIndex: 2, padding: '0 0 40px' }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+const NAV_ORDER: NavId[] = ['home', 'platforms', 'collections', 'search'];
+
+// RomM RTextField (filled) search field — rounded 8px box, bg-elevated fill,
+// magnify prefix, clear (×) suffix, brand border + halo on focus.
+function V2SearchField({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const [focused, setFocused] = useState(false);
+  return (
+    <Focusable onActivate={() => inputRef.current?.focus()} style={{ borderRadius: V2.radiusMd }}>
+      <style>{`.v2-search-input::placeholder{color:rgba(255,255,255,0.45)}`}</style>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: '10px', height: '40px', padding: '0 12px',
+        borderRadius: V2.radiusMd,
+        background: focused ? V2.surfaceHover : 'rgba(255,255,255,0.045)',
+        border: `1px solid ${focused ? V2.brand : V2.border}`,
+        boxShadow: focused ? `0 0 0 3px rgba(139,116,232,0.22)` : 'none',
+        transition: 'background 0.2s, border-color 0.2s, box-shadow 0.2s',
+      }}>
+        <FaSearch size={14} color={focused ? V2.brandHover : V2.fgMuted} style={{ flexShrink: 0 }} />
+        <input
+          ref={inputRef}
+          className="v2-search-input"
+          value={value}
+          placeholder="Search games"
+          onChange={(e: ChangeEvent<HTMLInputElement>) => onChange(e.target.value)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          style={{
+            flex: '1 1 auto', minWidth: 0, background: 'transparent', border: 'none', outline: 'none',
+            color: V2.fg, fontSize: '14px', fontFamily: 'inherit', padding: 0,
+          }}
+        />
+        {value && (
+          <div onClick={() => { onChange(''); inputRef.current?.focus(); }}
+            style={{
+              flexShrink: 0, cursor: 'pointer', color: V2.fgMuted, display: 'flex', alignItems: 'center',
+              padding: '2px', borderRadius: '50%',
+            }}>
+            <FaTimes size={13} />
+          </div>
+        )}
+      </div>
+    </Focusable>
+  );
+}
+
+// Search tab — debounced text filter over the whole library, results as a
+// cover-art grid (the nav 'Search' destination).
+function SearchPanel({ onOpen, onBg }: { onOpen: (g: LibGame) => void; onBg: (uri: string | null) => void }) {
+  const [q, setQ] = useState('');
+  const [results, setResults] = useState<LibGame[]>([]);
+  const [loading, setLoading] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(async () => {
+      if (!q.trim()) { setResults([]); return; }
+      setLoading(true);
+      try { const r = await searchGames(q); setResults(r?.success ? (r.games || []) : []); }
+      catch { setResults([]); }
+      finally { setLoading(false); }
+    }, 250);
+    return () => clearTimeout(t);
+  }, [q]);
+  return (
+    <div style={{ padding: '0 16px' }}>
+      <div style={{ maxWidth: '520px', margin: '0 auto 16px' }}>
+        <V2SearchField value={q} onChange={setQ} />
+      </div>
+      {loading ? (
+        <div style={{ padding: '16px', color: V2.fgMuted, fontSize: '13px', textAlign: 'center' }}>Searching…</div>
+      ) : !q.trim() ? (
+        <div style={{ padding: '24px', color: V2.fgMuted, fontSize: '13px', textAlign: 'center' }}>
+          Type to search your library.
+        </div>
+      ) : results.length === 0 ? (
+        <div style={{ padding: '24px', color: V2.fgMuted, fontSize: '13px', textAlign: 'center' }}>
+          No games match “{q.trim()}”.
+        </div>
+      ) : (
+        <Focusable style={{
+          display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(132px, 1fr))',
+          gap: '18px 16px', padding: '6px 0',
+        }}>
+          {results.map((g) => <GameTile key={g.rom_id} game={g} onOpen={onOpen} onActiveCover={onBg} />)}
+        </Focusable>
+      )}
+    </div>
+  );
+}
+
+function LibraryGroupsPage() {
+  const [active, setActive] = useState<NavId>('platforms');
+  const [groups, setGroups] = useState<LibGroup[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [bgUri, setBgUri] = useState<string | null>(null);
+  const mode = active === 'collections' ? 'collection' : 'platform';
+
+  const load = async (m: string) => {
+    setLoading(true);
+    try {
+      const res = await getLibraryGroups(m);
+      setGroups(res?.success ? (res.groups || []) : []);
+    } catch (e) {
+      console.error('get_library_groups failed', e);
+      setGroups([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Only platforms/collections fetch groups; home/search are placeholders.
+  useEffect(() => {
+    if (active === 'platforms' || active === 'collections') load(mode);
+  }, [active]);
+
+  const openGroup = (g: LibGroup) => {
+    _libGroupHolder = { mode, group: g };
+    _libGroupsHolder = { mode, groups };
+    Navigation.Navigate(`/romm-sync-library/${encodeURIComponent(g.key)}`);
+  };
+
+  const openGame = (g: LibGame) => {
+    _libGameHolder = g;
+    Navigation.Navigate(`/romm-sync-game/${g.rom_id}`);
+  };
+
+  const onTab = (id: NavId) => setActive(id);
+
+  // L1 / R1 page through the nav tabs (BackgroundArt cleared on home/search).
+  const cycle = (dir: -1 | 1) => {
+    const i = NAV_ORDER.indexOf(active);
+    setActive(NAV_ORDER[(i + dir + NAV_ORDER.length) % NAV_ORDER.length]);
+  };
+  const onButtonDown = (evt: any) => {
+    const b = evt?.detail?.button;
+    if (b === GamepadButton.BUMPER_LEFT) cycle(-1);
+    else if (b === GamepadButton.BUMPER_RIGHT) cycle(1);
+  };
+
+  const placeholder = (title: string) => (
+    <div style={{
+      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+      height: 'calc(100vh - 220px)', gap: '8px', color: V2.fgMuted,
+    }}>
+      <div style={{ fontSize: '20px', fontWeight: 700, color: V2.fg2 }}>{title}</div>
+      <div style={{ fontSize: '13px' }}>Coming soon</div>
+    </div>
+  );
+
+  return v2Page(
+    <Focusable onButtonDown={onButtonDown}>
+      <V2NavBar active={active} onTab={onTab} />
+
+      <div style={{ height: '8px' }} />
+
+      {active === 'home' ? (
+        placeholder('Home')
+      ) : active === 'search' ? (
+        <SearchPanel onOpen={openGame} onBg={setBgUri} />
+      ) : loading ? (
+        <div style={{ padding: '16px', color: V2.fgMuted, fontSize: '13px' }}>Loading…</div>
+      ) : groups.length === 0 ? (
+        <div style={{ padding: '16px', color: V2.fgMuted, fontSize: '13px' }}>
+          {mode === 'collection' ? 'No collections found on the server.' : 'No games found.'}
+        </div>
+      ) : mode === 'platform' ? (
+        <Focusable
+          style={{
+            display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))',
+            gap: '14px', padding: '0 16px',
+          }}
+        >
+          {groups.map((g) => <PlatformTile key={g.key} group={g} onOpen={openGroup} />)}
+        </Focusable>
+      ) : (
+        // Collections, grouped into sections (Collections / Smart / Virtual) like
+        // RomM's collection index.
+        (() => {
+          const sections: { title: string; kinds: string[] }[] = [
+            { title: 'Collections', kinds: ['favorite', 'collection'] },
+            { title: 'Smart', kinds: ['smart'] },
+            { title: 'Virtual', kinds: ['virtual'] },
+          ];
+          return sections.map((s) => {
+            const items = groups.filter((g) => s.kinds.includes(g.kind || 'collection'));
+            if (items.length === 0) return null;
+            return (
+              <div key={s.title} style={{ marginBottom: '6px' }}>
+                <div style={{
+                  fontSize: '11px', fontWeight: 700, letterSpacing: '0.06em',
+                  textTransform: 'uppercase', color: V2.fgMuted, padding: '6px 16px 10px',
+                  display: 'flex', alignItems: 'center', gap: '6px',
+                }}>
+                  <FaBookmark size={10} /><span>{s.title}</span>
+                </div>
+                <Focusable
+                  style={{
+                    display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(132px, 1fr))',
+                    gap: '18px 16px', padding: '0 16px 8px',
+                  }}
+                >
+                  {items.map((g) => <CollectionTile key={g.key} group={g} onOpen={openGroup} />)}
+                </Focusable>
+              </div>
+            );
+          });
+        })()
+      )}
+    </Focusable>,
+    bgUri,
+  );
+}
+
+function LibraryGamesPage() {
+  const holder = _libGroupHolder;
+  const mode = holder?.mode || 'platform';
+  const [group, setGroup] = useState<LibGroup | null>(holder?.group || null);
+  const [games, setGames] = useState<LibGame[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [bgUri, setBgUri] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      if (!group) { setLoading(false); return; }
+      setLoading(true); setBgUri(null);
+      try {
+        const res = await getLibraryGames(mode, group.key);
+        if (alive) setGames(res?.success ? (res.games || []) : []);
+      } catch (e) {
+        console.error('get_library_games failed', e);
+        if (alive) setGames([]);
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => { alive = false; };
+  }, [group?.key]);
+
+  const openGame = (g: LibGame) => {
+    _libGameHolder = g;
+    Navigation.Navigate(`/romm-sync-game/${g.rom_id}`);
+  };
+
+  // L1 / R1 page through sibling groups (same mode) without backing out.
+  const siblings = (_libGroupsHolder && _libGroupsHolder.mode === mode) ? _libGroupsHolder.groups : [];
+  const cycle = (dir: -1 | 1) => {
+    if (!group || siblings.length < 2) return;
+    const i = siblings.findIndex((s) => s.key === group.key);
+    if (i < 0) return;
+    const next = siblings[(i + dir + siblings.length) % siblings.length];
+    _libGroupHolder = { mode, group: next };
+    setGroup(next);
+  };
+  const onButtonDown = (evt: any) => {
+    const b = evt?.detail?.button;
+    if (b === GamepadButton.BUMPER_LEFT) cycle(-1);
+    else if (b === GamepadButton.BUMPER_RIGHT) cycle(1);
+  };
+
+  const jumpTo = (g: LibGroup) => { _libGroupHolder = { mode, group: g }; setGroup(g); };
+
+  if (!group) {
+    return v2Page(<div style={{ padding: '16px', color: V2.fgMuted }}>No group selected.</div>);
+  }
+
+  const canPage = siblings.length > 1;
+  // Context around the current group: 1 previous + up to 3 next, dimmed and
+  // dot-separated beside the big current title (no wrap — clearer than a strip).
+  const ci = siblings.findIndex((s) => s.key === group.key);
+  const prev = ci > 0 ? siblings[ci - 1] : null;
+  const nexts: LibGroup[] = [];
+  for (let k = 1; k <= 3 && ci + k < siblings.length; k++) nexts.push(siblings[ci + k]);
+
+  const dot = (key: string) => <span key={key} style={{ color: V2.fgMuted, opacity: 0.6, fontSize: '13px' }}>·</span>;
+  const sideName = (g: LibGroup) => (
+    <Focusable key={g.key} onActivate={() => jumpTo(g)} onClick={() => jumpTo(g)}
+      style={{
+        cursor: 'pointer', color: V2.fgMuted, fontSize: '13px', maxWidth: '120px',
+        flexShrink: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+      }}>
+      {g.label}
+    </Focusable>
+  );
+
+  return v2Page(
+    <Focusable onButtonDown={onButtonDown}>
+      <div style={{ padding: '16px 16px 12px' }}>
+        <div style={{ fontSize: '12px', color: V2.fgMuted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+          {mode === 'collection' ? 'Collection' : 'Platform'}
+        </div>
+        <Focusable flow-children="horizontal" style={{ display: 'flex', alignItems: 'baseline', gap: '8px', marginTop: '2px' }}>
+          {canPage && <Bumper label="L1" />}
+          {prev && <span style={{ opacity: 0.7, color: V2.fgMuted }}>‹</span>}
+          {prev && sideName(prev)}
+          {prev && dot('d-prev')}
+          <div style={{ fontSize: '24px', fontWeight: 800, letterSpacing: '-0.01em', flexShrink: 0 }}>{group.label}</div>
+          {nexts.map((g, i) => [dot(`d-${i}`), sideName(g)])}
+          {nexts.length > 0 && <span style={{ opacity: 0.7, color: V2.fgMuted }}>›</span>}
+          {ci + nexts.length < siblings.length - 1 && <span style={{ color: V2.fgMuted }}>…</span>}
+          {canPage && <Bumper label="R1" />}
+        </Focusable>
+        {!loading && <div style={{ fontSize: '12px', color: V2.fgMuted, marginTop: '4px' }}>{games.length} {games.length === 1 ? 'game' : 'games'}</div>}
+      </div>
+
+      {loading ? (
+        <div style={{ padding: '16px', color: V2.fgMuted, fontSize: '13px' }}>Loading games…</div>
+      ) : games.length === 0 ? (
+        <div style={{ padding: '16px', color: V2.fgMuted, fontSize: '13px' }}>No games in this group.</div>
+      ) : (
+        <Focusable
+          style={{
+            display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(132px, 1fr))',
+            gap: '18px 16px', padding: '6px 16px',
+          }}
+        >
+          {games.map((g) => (
+            <GameTile key={g.rom_id} game={g} onOpen={openGame} onActiveCover={setBgUri} />
+          ))}
+        </Focusable>
+      )}
+    </Focusable>,
+    bgUri,
+  );
+}
+
+function GameDetailPage() {
+  const game = _libGameHolder;
+  const [detail, setDetail] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState<null | 'download' | 'delete'>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [isDownloaded, setIsDownloaded] = useState<boolean>(!!game?.is_downloaded);
+  const [bgUri, setBgUri] = useState<string | null>(null);
+  const [tab, setTab] = useState('overview');
+
+  const load = async () => {
+    if (!game) { setLoading(false); return; }
+    setLoading(true);
+    try {
+      const res = await getGameDetail(game.rom_id);
+      if (res?.success) {
+        setDetail(res);
+        setIsDownloaded(!!res.is_downloaded);
+      }
+    } catch (e) {
+      console.error('get_game_detail failed', e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const doDownload = async () => {
+    if (!game) return;
+    setBusy('download');
+    try {
+      const res = await downloadGame(game.rom_id);
+      if (res?.success) {
+        toaster.toast({ title: 'Downloaded', body: detail?.name || game.name });
+        setIsDownloaded(true);
+      } else {
+        toaster.toast({ title: 'Download failed', body: res?.message || 'Unknown error' });
+      }
+    } catch (e) {
+      toaster.toast({ title: 'Download failed', body: String(e) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const doDelete = async () => {
+    if (!game) return;
+    setBusy('delete');
+    try {
+      const res = await deleteGame(game.rom_id);
+      if (res?.success) {
+        toaster.toast({ title: 'Deleted', body: detail?.name || game.name });
+        setIsDownloaded(false);
+      } else {
+        toaster.toast({ title: 'Delete failed', body: res?.message || 'Unknown error' });
+      }
+    } catch (e) {
+      toaster.toast({ title: 'Delete failed', body: String(e) });
+    } finally {
+      setBusy(null);
+      setConfirmDelete(false);
+    }
+  };
+
+  if (!game) {
+    return v2Page(<div style={{ padding: '16px', color: V2.fgMuted }}>No game selected.</div>);
+  }
+
+  const name = detail?.name || game.name;
+  const platform = detail?.platform || game.platform;
+  const year = fmtReleaseYear(detail?.release_date);
+  // RomM detail header: title + a single "·"-separated meta line
+  // (platform · year · size · state), not a row of chips.
+  const meta: { text: string; color?: string }[] = [];
+  if (platform) meta.push({ text: platform });
+  if (year) meta.push({ text: year });
+  if (detail?.fs_size_bytes) meta.push({ text: fmtBytes(detail.fs_size_bytes) });
+  meta.push(isDownloaded
+    ? { text: 'Downloaded', color: V2.success }
+    : { text: 'Not downloaded', color: V2.fgMuted });
+
+  const openHistory = () => {
+    _historyGameHolder = { rom_id: game.rom_id, name, platform: platform || '' };
+    Navigation.Navigate(`/romm-sync-save-history/${game.rom_id}`);
+  };
+
+  // Overview "InfoGrid" sections — label + chip items (RomM InfoGrid).
+  const infoGrid: { label: string; items: string[] }[] = [];
+  if (detail?.genres?.length) infoGrid.push({ label: 'Genres', items: detail.genres });
+  if (detail?.franchises?.length) infoGrid.push({ label: 'Franchise', items: detail.franchises });
+  if (detail?.companies?.length) infoGrid.push({ label: 'Developer', items: detail.companies });
+
+  // Tab strip — Files only when the server reported files (RomM hides empty tabs).
+  const tabList: { id: string; label: string }[] = [{ id: 'overview', label: 'Overview' }];
+  if (detail?.files?.length) tabList.push({ id: 'files', label: 'Files' });
+  tabList.push({ id: 'save-data', label: 'Save Data' });
+  tabList.push({ id: 'achievements', label: 'Achievements' });
+
+  // L1 / R1 page through the detail tabs (RomM pages detail tabs with bumpers).
+  const cycleTab = (dir: -1 | 1) => {
+    const i = tabList.findIndex((t) => t.id === tab);
+    const ni = (i < 0 ? 0 : i + dir + tabList.length) % tabList.length;
+    setTab(tabList[ni].id);
+  };
+  const onButtonDown = (evt: any) => {
+    const b = evt?.detail?.button;
+    if (b === GamepadButton.BUMPER_LEFT) cycleTab(-1);
+    else if (b === GamepadButton.BUMPER_RIGHT) cycleTab(1);
+  };
+
+  return v2Page(
+    <Focusable onButtonDown={onButtonDown} style={{ padding: '20px 16px' }}>
+      <Focusable flow-children="horizontal" style={{ display: 'flex', gap: '22px', alignItems: 'flex-start' }}>
+        {/* Cover */}
+        <div style={{ flex: '0 0 220px', maxWidth: '220px' }}>
+          <div style={{ boxShadow: V2.elev2, borderRadius: V2.radiusArt }}>
+            <GameCover romId={game.rom_id} hasCover={game.has_cover || !!detail?.has_cover} large
+              onLoaded={setBgUri} />
+          </div>
+        </div>
+
+        {/* Info + actions */}
+        <Focusable flow-children="vertical" style={{ flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '14px' }}>
+          <div>
+            <div style={{ fontSize: '30px', fontWeight: 800, lineHeight: '1.15', letterSpacing: '-0.01em' }}>{name}</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', marginTop: '8px', fontSize: '13px', color: V2.fg2 }}>
+              {meta.map((m, i) => (
+                <span key={i} style={{ display: 'inline-flex', alignItems: 'center' }}>
+                  {i > 0 && <span style={{ color: V2.fgMuted, margin: '0 8px' }}>·</span>}
+                  <span style={{ color: m.color || V2.fg2 }}>{m.text}</span>
+                </span>
+              ))}
+            </div>
+          </div>
+
+          {/* Actions */}
+          <Focusable flow-children="horizontal" style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+            {!isDownloaded ? (
+              <V2Button variant="primary" disabled={!!busy} onClick={doDownload}>
+                <FaSync size={13} style={{ animation: busy === 'download' ? 'spin 1s linear infinite' : 'none' }} />
+                <span>{busy === 'download' ? 'Downloading…' : 'Download'}</span>
+              </V2Button>
+            ) : !confirmDelete ? (
+              <V2Button variant="tonal" color={V2.danger} onClick={() => setConfirmDelete(true)}>
+                <FaTrash size={13} /><span>Delete download</span>
+              </V2Button>
+            ) : (
+              <>
+                <V2Button variant="danger" disabled={!!busy} onClick={doDelete}>
+                  <FaTrash size={13} /><span>{busy === 'delete' ? 'Deleting…' : 'Confirm delete'}</span>
+                </V2Button>
+                <V2Button variant="text" onClick={() => setConfirmDelete(false)}>Cancel</V2Button>
+              </>
+            )}
+          </Focusable>
+
+          {/* Tabbed panel (RomM GameDetails: RTabNav + tab content). L1/R1 page tabs. */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <div style={{ flex: '1 1 auto', minWidth: 0 }}><V2TabNav tabs={tabList} active={tab} onTab={setTab} /></div>
+            <Bumper label="L1" />
+            <Bumper label="R1" />
+          </div>
+          <div style={{ paddingTop: '14px' }}>
+            {loading ? (
+              <div style={{ color: V2.fgMuted, fontSize: '12px' }}>Loading details…</div>
+            ) : tab === 'overview' ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                {detail?.summary && (
+                  <div style={{ fontSize: '13px', color: V2.fg2, lineHeight: '1.6' }}>{detail.summary}</div>
+                )}
+                {infoGrid.length > 0 && (
+                  <div style={{
+                    display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '16px 24px',
+                  }}>
+                    {infoGrid.map((s) => (
+                      <div key={s.label} style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                        <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: V2.fgMuted }}>
+                          {s.label}
+                        </div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                          {s.items.map((it, i) => (
+                            <span key={i} style={{
+                              fontSize: '12px', padding: '3px 10px', borderRadius: V2.radiusChip,
+                              background: V2.surface, color: V2.fg2, border: `1px solid ${V2.border}`,
+                            }}>{it}</span>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {!detail?.summary && infoGrid.length === 0 && (
+                  <div style={{ color: V2.fgMuted, fontSize: '12px' }}>No metadata available.</div>
+                )}
+              </div>
+            ) : tab === 'files' ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                {(detail?.files || []).length === 0 ? (
+                  <div style={{ color: V2.fgMuted, fontSize: '12px' }}>No file information.</div>
+                ) : (detail.files).map((f: any, i: number) => (
+                  <div key={i} style={{
+                    display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px',
+                    padding: '9px 12px', borderRadius: V2.radiusMd, background: V2.surface, fontSize: '12px',
+                  }}>
+                    <span style={{ color: V2.fg2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</span>
+                    <span style={{ color: V2.fgMuted, flexShrink: 0 }}>{fmtBytes(f.size)}</span>
+                  </div>
+                ))}
+              </div>
+            ) : tab === 'save-data' ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                <div style={{ fontSize: '12px', color: V2.fg2, lineHeight: '1.55' }}>
+                  Browse and restore server save/state versions for this game.
+                </div>
+                <div><V2Button variant="tonal" onClick={openHistory}>
+                  <FaHistory size={13} /><span>Open Save History</span>
+                </V2Button></div>
+              </div>
+            ) : (
+              // achievements
+              <div style={{ fontSize: '12px', color: V2.fgMuted, fontStyle: 'italic' }}>
+                RetroAchievements coming soon.
+              </div>
+            )}
+          </div>
+        </Focusable>
+      </Focusable>
+    </Focusable>,
+    bgUri,
+  );
+}
+
 function SettingsPage() {
   const [loggingEnabled, setLoggingEnabled] = useState<boolean>(true);
   const [loading, setLoading] = useState<boolean>(true);
@@ -1164,6 +2373,18 @@ function Content() {
         <span>{status.message.replace(', ', ' - ')}</span>
       </div>
 
+      <PanelSectionRow>
+        <ButtonItem
+          layout="below"
+          onClick={() => { Navigation.Navigate("/romm-sync-library"); Navigation.CloseSideMenus(); }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <FaGamepad size={14} />
+            <span>Browse Library</span>
+          </div>
+        </ButtonItem>
+      </PanelSectionRow>
+
       {status.status === 'running' && status.details?.last_update && (
         <>
           <PanelSectionRow>
@@ -1448,6 +2669,9 @@ export default definePlugin(() => {
   routerHook.addRoute("/romm-sync-config", () => <ConfigPage />, { exact: true });
   routerHook.addRoute("/romm-sync-save-history", () => <SaveHistoryGamesPage />, { exact: true });
   routerHook.addRoute("/romm-sync-save-history/:romId", () => <SaveHistoryVersionsPage />, { exact: true });
+  routerHook.addRoute("/romm-sync-library", () => <LibraryGroupsPage />, { exact: true });
+  routerHook.addRoute("/romm-sync-library/:key", () => <LibraryGamesPage />, { exact: true });
+  routerHook.addRoute("/romm-sync-game/:romId", () => <GameDetailPage />, { exact: true });
 
   return {
     name: "RomM Sync Monitor",
@@ -1462,6 +2686,9 @@ export default definePlugin(() => {
       routerHook.removeRoute("/romm-sync-config");
       routerHook.removeRoute("/romm-sync-save-history");
       routerHook.removeRoute("/romm-sync-save-history/:romId");
+      routerHook.removeRoute("/romm-sync-library");
+      routerHook.removeRoute("/romm-sync-library/:key");
+      routerHook.removeRoute("/romm-sync-game/:romId");
     },
   };
 });
