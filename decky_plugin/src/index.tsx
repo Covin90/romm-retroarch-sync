@@ -1969,11 +1969,12 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
           -webkit-backdrop-filter: blur(6px) !important; backdrop-filter: blur(6px) !important;
           display: flex !important; align-items: center !important; justify-content: center !important;
         }
-        /* Collapse the Steam dialog panel to nothing; our content div below is
-           the only visible (glass) card, so its min-width can't add padding. */
-        .romm-glass-modal {
+        /* Collapse the Steam dialog chrome (panel + any wrapper) to nothing;
+           our content div is the only visible (glass) card. The card is deeper
+           than these selectors so its styling is untouched. */
+        .romm-glass-modal, .romm-modal-backdrop > div {
           background: transparent !important; border: none !important; box-shadow: none !important;
-          padding: 0 !important; margin: auto !important;
+          outline: none !important; padding: 0 !important; margin: auto !important;
           display: flex !important; align-items: center !important; justify-content: center !important;
         }
       `}</style>
