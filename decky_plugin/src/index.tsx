@@ -1972,7 +1972,7 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
         .sd-shimmer { background-image: linear-gradient(100deg, transparent 20%, rgba(255,255,255,0.22) 50%, transparent 80%) !important; background-size: 200% 100% !important; background-repeat: no-repeat; animation: sdShimmer 1.1s linear infinite; }
       `}</style>
       <Focusable flow-children="vertical" style={{
-        fontFamily: V2.font, color: V2.fg, width: '460px', maxWidth: '86vw', boxSizing: 'border-box',
+        fontFamily: V2.font, color: V2.fg, width: '520px', maxWidth: '90vw', boxSizing: 'border-box',
         padding: '18px', display: 'flex', flexDirection: 'column', gap: '12px',
         maxHeight: '82vh', overflowY: 'auto',
         background: 'linear-gradient(180deg, rgba(20,20,30,0.7) 0%, rgba(10,10,18,0.78) 100%)',
@@ -2012,7 +2012,7 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
           {isState && <><br /><span style={{ color: V2.fg, fontWeight: 600 }}>Restore as copy</span> writes this version into a new free slot, leaving your current slots untouched.</>}
         </div>
 
-        <Focusable flow-children="horizontal" style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+        <Focusable flow-children="horizontal" style={{ display: 'flex', gap: '8px', flexWrap: 'nowrap', justifyContent: 'flex-end', alignItems: 'center' }}>
           <V2Button variant="text" disabled={!!busy} onClick={() => closeModal?.()}>Cancel</V2Button>
           {isState && (
             <V2Button variant="tonal" disabled={!!busy} onClick={() => run(true)}>
