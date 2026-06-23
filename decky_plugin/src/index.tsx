@@ -2052,6 +2052,9 @@ type StatusFilter = 'all' | 'earned' | 'locked';
 function AchievementsTab({ achievements }: { achievements: Achievement[] }) {
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('all');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  // Drive the summary progress bar from 0 → pct after mount so it animates in.
+  const [barReady, setBarReady] = useState(false);
+  useEffect(() => { const t = setTimeout(() => setBarReady(true), 60); return () => clearTimeout(t); }, []);
 
   if (!achievements.length) {
     return (
@@ -2113,17 +2116,39 @@ function AchievementsTab({ achievements }: { achievements: Achievement[] }) {
     );
   };
 
+  const pct = achievements.length ? Math.round((earnedCount / achievements.length) * 100) : 0;
+  const EASE = 'cubic-bezier(0.22,1,0.36,1)';
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-      <div style={{ display: 'flex', background: V2.surface, border: `1px solid ${V2.border}`, borderRadius: V2.radiusLg, padding: '14px 0' }}>
-        {stat(`${earnedCount} / ${achievements.length}`, 'Achievements')}
-        <div style={{ width: '1px', background: V2.border }} />
-        {stat(totalPoints, 'Total Points')}
-        {progressionCount > 0 && <><div style={{ width: '1px', background: V2.border }} />{stat(progressionCount, 'Progression')}</>}
-        {missableCount > 0 && <><div style={{ width: '1px', background: V2.border }} />{stat(missableCount, 'Missable', true)}</>}
+      <style>{`
+        @keyframes achFade { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+        .ach-fade { animation: achFade 320ms ${EASE} both; animation-delay: calc(var(--ach-i, 0) * 28ms); }
+        .ach-row { transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ${EASE}, box-shadow 0.15s ease; }
+        .ach-row:hover, .ach-row:focus-within {
+          background: ${V2.surfaceHover}; border-color: ${V2.borderStrong};
+          transform: translateY(-1px); box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+        }
+      `}</style>
+
+      <div className="ach-fade" style={{ display: 'flex', flexDirection: 'column', background: V2.surface, border: `1px solid ${V2.border}`, borderRadius: V2.radiusLg, overflow: 'hidden' }}>
+        <div style={{ display: 'flex', padding: '14px 0' }}>
+          {stat(`${earnedCount} / ${achievements.length}`, 'Achievements')}
+          <div style={{ width: '1px', background: V2.border }} />
+          {stat(totalPoints, 'Total Points')}
+          {progressionCount > 0 && <><div style={{ width: '1px', background: V2.border }} />{stat(progressionCount, 'Progression')}</>}
+          {missableCount > 0 && <><div style={{ width: '1px', background: V2.border }} />{stat(missableCount, 'Missable', true)}</>}
+        </div>
+        <div style={{ height: '4px', background: 'rgba(255,255,255,0.06)' }}>
+          <div style={{
+            height: '100%', width: barReady ? `${pct}%` : '0%',
+            background: `linear-gradient(90deg, ${V2.brand}, ${V2.success})`,
+            borderRadius: '0 2px 2px 0', transition: `width 800ms ${EASE}`,
+          }} />
+        </div>
       </div>
 
-      <Focusable style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '6px' }}>
+      <Focusable className="ach-fade" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '6px', '--ach-i': 1 } as any}>
         {(['all', 'progression', 'missable', 'win_condition'] as TypeFilter[]).map((f) =>
           filterBtn(f, typeLabel(f), typeFilter === f, () => setTypeFilter(f)))}
         <span style={{ width: '1px', height: '16px', background: V2.surfaceHover, margin: '0 4px' }} />
@@ -2135,11 +2160,12 @@ function AchievementsTab({ achievements }: { achievements: Achievement[] }) {
         {filtered.map((a, i) => {
           const src = a.earned ? a.badge_url : a.badge_url_lock;
           return (
-            <div key={a.ra_id ?? i} style={{
+            <div key={a.ra_id ?? i} className="ach-row ach-fade" style={{
               display: 'grid', gridTemplateColumns: '52px 1fr auto', gap: '14px', alignItems: 'center',
               padding: '10px 14px', background: V2.surface, border: `1px solid ${V2.border}`,
               borderRadius: V2.radiusMd, opacity: a.earned ? 1 : 0.55,
-            }}>
+              '--ach-i': Math.min(i, 12) + 2,
+            } as any}>
               <div style={{ width: '52px', height: '52px', borderRadius: '8px', overflow: 'hidden', background: V2.coverPlaceholder, flexShrink: 0 }}>
                 {src && <img src={src} alt={a.title} loading="lazy" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
                   onError={(e) => { (e.target as HTMLImageElement).style.visibility = 'hidden'; }} />}
