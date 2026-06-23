@@ -1091,16 +1091,12 @@ function slotLabel(e: HistoryEntry): string {
 // every Focusable) inside the plugin UI. We rely on our own per-component focus
 // styling (card scale/glow, row lift, button glow) instead, so the Steam box is
 // fully removed rather than restyled.
+// Steam draws its gamepad focus box in JS; we disable it per-element via the
+// noFocusRing prop on every Focusable. Here we only strip the CEF :focus
+// outline (our components supply their own glow), without touching box-shadow
+// so our focus glows survive.
 const V2_FOCUS_STYLE = `
-  .romm-ui *:focus, .romm-ui *:focus-visible, .romm-ui *:focus-within { outline: none !important; }
-  .romm-ui [class*="gpfocus"], .romm-ui .Focusable:focus, .romm-ui .Focusable:focus-within {
-    outline: none !important; box-shadow: none !important;
-  }
-  .romm-ui [class*="gpfocus"]::before, .romm-ui [class*="gpfocus"]::after,
-  .romm-ui .Focusable:focus::before, .romm-ui .Focusable:focus::after {
-    content: none !important; display: none !important;
-    box-shadow: none !important; background: none !important; border: none !important;
-  }
+  .romm-ui *:focus, .romm-ui *:focus-visible { outline: none !important; }
 `;
 
 function v2Page(children: any, bgUri: string | null = null) {
@@ -1983,6 +1979,7 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
   const meta = [slotLabel(entry), entry.device || '', fmtHistSize(entry.size_bytes)].filter(Boolean).join(' · ');
 
   return (
+    <ModalRoot bHideCloseIcon onCancel={closeModal} onEscKeypress={closeModal}>
     <Focusable noFocusRing
       className="romm-ui"
       onCancelButton={() => closeModal?.()}
@@ -2055,6 +2052,7 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
         </Focusable>
       </Focusable>
     </Focusable>
+    </ModalRoot>
   );
 }
 
@@ -2227,10 +2225,16 @@ function SaveDataTab({ romId }: { romId: number }) {
       <style>{`
         @keyframes sdFade { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
         .sd-fade { animation: sdFade 300ms ${EASE} both; animation-delay: calc(var(--sd-i, 0) * 26ms); }
-        .sd-row { transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ${EASE}; }
-        .sd-row:hover, .sd-row:focus-within { background: ${V2.surfaceHover}; border-color: ${V2.borderStrong}; transform: translateY(-1px); }
+        .sd-row { transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ${EASE}, box-shadow 0.15s ease; }
+        .sd-row:hover, .sd-row:focus-within {
+          background: ${V2.surfaceHover}; border-color: ${V2.brand}; transform: translateY(-1px);
+          box-shadow: 0 0 0 2px ${V2.brand}, 0 0 16px rgba(139,116,232,0.45);
+        }
         .sd-tile { transition: transform 0.15s ${EASE}, box-shadow 0.15s ease, border-color 0.15s ease; }
-        .sd-tile:hover, .sd-tile:focus-within { transform: translateY(-2px); box-shadow: 0 8px 22px rgba(0,0,0,0.4); border-color: ${V2.borderStrong}; }
+        .sd-tile:hover, .sd-tile:focus-within {
+          transform: translateY(-2px); border-color: ${V2.brand};
+          box-shadow: 0 8px 22px rgba(0,0,0,0.4), 0 0 0 2px ${V2.brand}, 0 0 16px rgba(139,116,232,0.45);
+        }
         @keyframes sdShimmer { 0% { background-position: -150% 0; } 100% { background-position: 150% 0; } }
         .sd-shimmer { background-image: linear-gradient(100deg, transparent 20%, rgba(255,255,255,0.22) 50%, transparent 80%) !important; background-size: 200% 100% !important; background-repeat: no-repeat; animation: sdShimmer 1.1s linear infinite; }
       `}</style>
