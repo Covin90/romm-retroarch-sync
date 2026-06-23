@@ -238,7 +238,7 @@ function GameTile({ game, onOpen, onActiveCover }:
   const primary = () => { if (dl) doLaunch(); else doDownload(); };
 
   return (
-    <Focusable
+    <Focusable noFocusRing
       onActivate={primary}
       onClick={primary}
       onSecondaryButton={() => onOpen(game)}
@@ -366,7 +366,7 @@ function CollectionTile({ group, onOpen }: { group: LibGroup; onOpen: (g: LibGro
     : group.kind === 'favorite' ? { label: '★', bg: '#ff4f6b' }
     : null;
   return (
-    <Focusable
+    <Focusable noFocusRing
       onActivate={() => onOpen(group)} onClick={() => onOpen(group)}
       onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
       onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
@@ -440,7 +440,7 @@ function PlatformIcon({ slug, fsSlug, size }: { slug?: string | null; fsSlug?: s
 function PlatformTile({ group, onOpen }: { group: LibGroup; onOpen: (g: LibGroup) => void }) {
   const [focused, setFocused] = useState(false);
   return (
-    <Focusable
+    <Focusable noFocusRing
       onActivate={() => onOpen(group)} onClick={() => onOpen(group)}
       onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
       onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
@@ -531,7 +531,7 @@ function V2NavBar({ active, onTab }: { active: NavId; onTab: (id: NavId) => void
       </div>
       <div style={{ justifySelf: 'center', display: 'flex', alignItems: 'center', gap: '10px' }}>
       <Bumper label="L1" />
-      <Focusable flow-children="horizontal" style={{
+      <Focusable noFocusRing flow-children="horizontal" style={{
         position: 'relative', display: 'flex', gap: '2px', padding: '4px',
         background: V2.surface, border: `1px solid ${V2.borderStrong}`, borderRadius: V2.radiusPill,
       }}>
@@ -549,7 +549,7 @@ function V2NavBar({ active, onTab }: { active: NavId; onTab: (id: NavId) => void
         {tabs.map(({ id, label, Icon }, i) => {
           const on = active === id;
           return (
-            <Focusable key={id} onActivate={() => onTab(id)} onClick={() => onTab(id)}>
+            <Focusable noFocusRing key={id} onActivate={() => onTab(id)} onClick={() => onTab(id)}>
               <div ref={(el) => { btnRefs.current[i] = el; }}
                 style={{
                   position: 'relative', zIndex: 1,
@@ -600,7 +600,7 @@ function V2TabNav({ tabs, active, onTab }:
       {tabs.map((t, i) => {
         const on = active === t.id;
         return (
-          <Focusable key={t.id} onActivate={() => onTab(t.id)} onClick={() => onTab(t.id)}>
+          <Focusable noFocusRing key={t.id} onActivate={() => onTab(t.id)} onClick={() => onTab(t.id)}>
             <div ref={(el) => { refs.current[i] = el; }}
               style={{
                 padding: '8px 18px', fontSize: '13px', cursor: 'pointer',
@@ -645,7 +645,7 @@ function V2Button({ children, onClick, variant = 'tonal', color, disabled }:
     ? { boxShadow: `0 0 0 2px ${V2.brand}`, filter: 'brightness(1.12)' }
     : {};
   return (
-    <Focusable
+    <Focusable noFocusRing
       className="romm-btn"
       onActivate={() => !disabled && onClick()}
       onClick={() => !disabled && onClick()}
@@ -1126,7 +1126,7 @@ function V2SearchField({ value, onChange }: { value: string; onChange: (v: strin
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [focused, setFocused] = useState(false);
   return (
-    <Focusable onActivate={() => inputRef.current?.focus()} style={{ borderRadius: V2.radiusMd }}>
+    <Focusable noFocusRing onActivate={() => inputRef.current?.focus()} style={{ borderRadius: V2.radiusMd }}>
       <style>{`.v2-search-input::placeholder{color:rgba(255,255,255,0.45)}`}</style>
       <div style={{
         display: 'flex', alignItems: 'center', gap: '10px', height: '40px', padding: '0 12px',
@@ -1198,7 +1198,7 @@ function SearchPanel({ onOpen, onBg }: { onOpen: (g: LibGame) => void; onBg: (ur
           No games match “{q.trim()}”.
         </div>
       ) : (
-        <Focusable style={{
+        <Focusable noFocusRing style={{
           display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(132px, 1fr))',
           gap: '18px 16px', padding: '6px 0',
         }}>
@@ -1289,7 +1289,7 @@ function CardRow({ icon, title, count, children }:
           onScroll={update}
           style={{ overflowX: 'auto', overflowY: 'visible' }}
         >
-          <Focusable style={{ display: 'flex', gap: '12px', padding: '24px 16px 28px' }}>
+          <Focusable noFocusRing style={{ display: 'flex', gap: '12px', padding: '24px 16px 28px' }}>
             {children}
           </Focusable>
         </div>
@@ -1438,7 +1438,7 @@ function LibraryGroupsPage() {
   };
 
   return v2Page(
-    <Focusable onButtonDown={onButtonDown}>
+    <Focusable noFocusRing onButtonDown={onButtonDown}>
       <V2NavBar active={active} onTab={onTab} />
 
       <div style={{ height: '8px' }} />
@@ -1454,7 +1454,7 @@ function LibraryGroupsPage() {
           {mode === 'collection' ? 'No collections found on the server.' : 'No games found.'}
         </div>
       ) : mode === 'platform' ? (
-        <Focusable
+        <Focusable noFocusRing
           style={{
             display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))',
             gap: '14px', padding: '0 16px',
@@ -1483,7 +1483,7 @@ function LibraryGroupsPage() {
                 }}>
                   <FaBookmark size={10} /><span>{s.title}</span>
                 </div>
-                <Focusable
+                <Focusable noFocusRing
                   style={{
                     display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(132px, 1fr))',
                     gap: '18px 16px', padding: '0 16px 8px',
@@ -1564,7 +1564,7 @@ function LibraryGamesPage() {
 
   const dot = (key: string) => <span key={key} style={{ color: V2.fgMuted, opacity: 0.6, fontSize: '13px' }}>·</span>;
   const sideName = (g: LibGroup) => (
-    <Focusable key={g.key} onActivate={() => jumpTo(g)} onClick={() => jumpTo(g)}
+    <Focusable noFocusRing key={g.key} onActivate={() => jumpTo(g)} onClick={() => jumpTo(g)}
       style={{
         cursor: 'pointer', color: V2.fgMuted, fontSize: '13px', maxWidth: '120px',
         flexShrink: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
@@ -1574,12 +1574,12 @@ function LibraryGamesPage() {
   );
 
   return v2Page(
-    <Focusable onButtonDown={onButtonDown}>
+    <Focusable noFocusRing onButtonDown={onButtonDown}>
       <div style={{ padding: '16px 16px 12px' }}>
         <div style={{ fontSize: '12px', color: V2.fgMuted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
           {mode === 'collection' ? 'Collection' : 'Platform'}
         </div>
-        <Focusable flow-children="horizontal" style={{ display: 'flex', alignItems: 'baseline', gap: '8px', marginTop: '2px' }}>
+        <Focusable noFocusRing flow-children="horizontal" style={{ display: 'flex', alignItems: 'baseline', gap: '8px', marginTop: '2px' }}>
           {canPage && <Bumper label="L1" />}
           {prev && <span style={{ opacity: 0.7, color: V2.fgMuted }}>‹</span>}
           {prev && sideName(prev)}
@@ -1598,7 +1598,7 @@ function LibraryGamesPage() {
       ) : games.length === 0 ? (
         <div style={{ padding: '16px', color: V2.fgMuted, fontSize: '13px' }}>No games in this group.</div>
       ) : (
-        <Focusable
+        <Focusable noFocusRing
           style={{
             display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(132px, 1fr))',
             gap: '18px 16px', padding: '6px 16px',
@@ -1690,7 +1690,7 @@ function ScreenshotLightbox({ paths, index, closeModal }:
   };
   return (
     <ModalRoot onCancel={closeModal} onEscKeypress={closeModal}>
-      <Focusable onButtonDown={onButtonDown}
+      <Focusable noFocusRing onButtonDown={onButtonDown}
         style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '14px' }}>
         <div style={{
           position: 'relative', width: '100%', display: 'flex',
@@ -1733,7 +1733,7 @@ function ScreenshotThumb({ paths, index }: { paths: string[]; index: number; }) 
   const [focused, setFocused] = useState(false);
   const open = () => showModal(<ScreenshotLightbox paths={paths} index={index} />);
   return (
-    <Focusable
+    <Focusable noFocusRing
       onActivate={open}
       onClick={open}
       onFocus={() => setFocused(true)}
@@ -1760,7 +1760,7 @@ function ScreenshotThumb({ paths, index }: { paths: string[]; index: number; }) 
 // Responsive grid of screenshot thumbnails (RomM ScreenshotsTab).
 function ScreenshotGrid({ paths }: { paths: string[]; }) {
   return (
-    <Focusable style={{
+    <Focusable noFocusRing style={{
       display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
       gap: '10px', padding: '6px 6px 4px',
     }}>
@@ -1830,7 +1830,7 @@ function AchievementsTab({ achievements }: { achievements: Achievement[] }) {
       else { bg = V2.fg; border = V2.fg; color = V2.bg; }
     }
     return (
-      <Focusable
+      <Focusable noFocusRing
         key={key}
         onActivate={onClick}
         onClick={onClick}
@@ -1883,7 +1883,7 @@ function AchievementsTab({ achievements }: { achievements: Achievement[] }) {
         </div>
       </div>
 
-      <Focusable className="ach-fade" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '6px', '--ach-i': 1 } as any}>
+      <Focusable noFocusRing className="ach-fade" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '6px', '--ach-i': 1 } as any}>
         {(['all', 'progression', 'missable', 'win_condition'] as TypeFilter[]).map((f) =>
           filterBtn(f, typeLabel(f), typeFilter === f, () => setTypeFilter(f)))}
         <span style={{ width: '1px', height: '16px', background: V2.surfaceHover, margin: '0 4px' }} />
@@ -1891,7 +1891,7 @@ function AchievementsTab({ achievements }: { achievements: Achievement[] }) {
         {filterBtn('locked', '⊘ Locked', statusFilter === 'locked', () => toggleStatus('locked'), 'locked')}
       </Focusable>
 
-      <Focusable style={{ display: 'flex', flexDirection: 'column' }}>
+      <Focusable noFocusRing style={{ display: 'flex', flexDirection: 'column' }}>
         {(() => { let vi = 0; return achievements.map((a, i) => {
           const src = a.earned ? a.badge_url : a.badge_url_lock;
           const vis = isVisible(a);
@@ -1975,7 +1975,7 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
   const meta = [slotLabel(entry), entry.device || '', fmtHistSize(entry.size_bytes)].filter(Boolean).join(' · ');
 
   return (
-    <Focusable
+    <Focusable noFocusRing
       className="romm-ui"
       onCancelButton={() => closeModal?.()}
       onButtonDown={(e: any) => { if (e?.detail?.button === GamepadButton.CANCEL) closeModal?.(); }}
@@ -1991,7 +1991,7 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
         .sd-shimmer { background-image: linear-gradient(100deg, transparent 20%, rgba(255,255,255,0.22) 50%, transparent 80%) !important; background-size: 200% 100% !important; background-repeat: no-repeat; animation: sdShimmer 1.1s linear infinite; }
         ${V2_FOCUS_STYLE}
       `}</style>
-      <Focusable flow-children="vertical" style={{
+      <Focusable noFocusRing autoFocus flow-children="vertical" style={{
         fontFamily: V2.font, color: V2.fg, width: '520px', maxWidth: '90vw', boxSizing: 'border-box',
         padding: '18px', display: 'flex', flexDirection: 'column', gap: '12px',
         maxHeight: '82vh', overflowY: 'auto',
@@ -2032,7 +2032,7 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
           {isState && <><br /><span style={{ color: V2.fg, fontWeight: 600 }}>Restore as copy</span> writes this version into a new free slot, leaving your current slots untouched.</>}
         </div>
 
-        <Focusable flow-children="horizontal" style={{ display: 'flex', gap: '8px', flexWrap: 'nowrap', justifyContent: 'flex-end', alignItems: 'center' }}>
+        <Focusable noFocusRing flow-children="horizontal" style={{ display: 'flex', gap: '8px', flexWrap: 'nowrap', justifyContent: 'flex-end', alignItems: 'center' }}>
           <V2Button variant="text" disabled={!!busy} onClick={() => closeModal?.()}>Cancel</V2Button>
           {isState && (
             <V2Button variant="tonal" disabled={!!busy} onClick={() => run(true)}>
@@ -2157,7 +2157,7 @@ function SaveDataTab({ romId }: { romId: number }) {
   const pill = (id: 'saves' | 'states', label: string, count: number) => {
     const active = sub === id;
     return (
-      <Focusable
+      <Focusable noFocusRing
         key={id}
         onActivate={() => setSub(id)}
         onClick={() => setSub(id)}
@@ -2227,7 +2227,7 @@ function SaveDataTab({ romId }: { romId: number }) {
         .sd-shimmer { background-image: linear-gradient(100deg, transparent 20%, rgba(255,255,255,0.22) 50%, transparent 80%) !important; background-size: 200% 100% !important; background-repeat: no-repeat; animation: sdShimmer 1.1s linear infinite; }
       `}</style>
 
-      <Focusable flow-children="horizontal" style={{ display: 'flex', gap: '8px' }}>
+      <Focusable noFocusRing flow-children="horizontal" style={{ display: 'flex', gap: '8px' }}>
         {pill('saves', 'Saves', saves.length)}
         {pill('states', 'States', states.length)}
       </Focusable>
@@ -2236,7 +2236,7 @@ function SaveDataTab({ romId }: { romId: number }) {
         saves.length === 0 ? (
           <div style={{ color: V2.fgMuted, fontSize: '12px', padding: '12px 0' }}>No saves for this game.</div>
         ) : (
-          <Focusable style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          <Focusable noFocusRing style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
             {groupBySlot(saves).map((g) => (
               <div key={`sg-${g.slot}`} style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                 {slotHeader(g.slot, g.items.length)}
@@ -2245,7 +2245,7 @@ function SaveDataTab({ romId }: { romId: number }) {
                   const sub2 = [e.device || '', fmtHistSize(e.size_bytes)].filter(Boolean).join(' · ');
                   return (
                     <div key={`save-${e.id}`} className="sd-fade" style={{ '--sd-i': Math.min(idx, 14) } as any}>
-                      <Focusable
+                      <Focusable noFocusRing
                         className="sd-row"
                         onActivate={() => openRestore(e)}
                         onClick={() => openRestore(e)}
@@ -2290,13 +2290,13 @@ function SaveDataTab({ romId }: { romId: number }) {
             {groupBySlot(states).map((g) => (
               <div key={`stg-${g.slot}`} style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                 {slotHeader(g.slot, g.items.length)}
-                <Focusable style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: '12px' }}>
+                <Focusable noFocusRing style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: '12px' }}>
                   {g.items.map((e, idx) => {
                     const isCur = idx === 0;
                     const shot = shots[e.id];
                     const loadingShot = shot === undefined || shot === 'loading';
                     return (
-                      <Focusable
+                      <Focusable noFocusRing
                         key={`state-${e.id}`}
                         className="sd-tile sd-fade"
                         onActivate={() => openRestore(e)}
@@ -2445,8 +2445,8 @@ function GameDetailPage() {
   };
 
   return v2Page(
-    <Focusable onButtonDown={onButtonDown} style={{ padding: '20px 16px' }}>
-      <Focusable flow-children="horizontal" style={{ display: 'flex', gap: '22px', alignItems: 'flex-start' }}>
+    <Focusable noFocusRing onButtonDown={onButtonDown} style={{ padding: '20px 16px' }}>
+      <Focusable noFocusRing flow-children="horizontal" style={{ display: 'flex', gap: '22px', alignItems: 'flex-start' }}>
         {/* Cover */}
         <div style={{ flex: '0 0 220px', maxWidth: '220px' }}>
           <div style={{ boxShadow: V2.elev2, borderRadius: V2.radiusArt }}>
@@ -2456,7 +2456,7 @@ function GameDetailPage() {
         </div>
 
         {/* Info + actions */}
-        <Focusable flow-children="vertical" style={{ flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '14px' }}>
+        <Focusable noFocusRing flow-children="vertical" style={{ flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '14px' }}>
           <div>
             <div style={{ fontSize: '30px', fontWeight: 800, lineHeight: '1.15', letterSpacing: '-0.01em' }}>{name}</div>
             <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', marginTop: '8px', fontSize: '13px', color: V2.fg2 }}>
@@ -2470,7 +2470,7 @@ function GameDetailPage() {
           </div>
 
           {/* Actions */}
-          <Focusable flow-children="horizontal" style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+          <Focusable noFocusRing flow-children="horizontal" style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
             {!isDownloaded ? (
               <V2Button variant="primary" disabled={!!busy} onClick={doDownload}>
                 <FaSync size={13} style={{ animation: busy === 'download' ? 'spin 1s linear infinite' : 'none' }} />
