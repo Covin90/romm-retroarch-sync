@@ -1922,12 +1922,14 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
 }) {
   const isState = entry.save_type === 'states';
   const [shot, setShot] = useState<string | null>(shotUri ?? null);
-  const [loadingShot, setLoadingShot] = useState(isState && !shotUri);
+  // Fetch a preview for any version (saves can carry screenshots too), unless
+  // we were handed a cached one. Loading runs until the fetch resolves.
+  const [loadingShot, setLoadingShot] = useState(!shotUri);
   const [busy, setBusy] = useState<null | 'restore' | 'copy'>(null);
 
   useEffect(() => {
-    if (!isState || shotUri) return;
-    getSaveScreenshot(romId, entry.id, 'states')
+    if (shotUri) return;
+    getSaveScreenshot(romId, entry.id, entry.save_type)
       .then((r: any) => setShot(r?.data_uri || null))
       .catch(() => setShot(null))
       .finally(() => setLoadingShot(false));
@@ -1955,10 +1957,20 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
   const meta = [slotLabel(entry), entry.device || '', fmtHistSize(entry.size_bytes)].filter(Boolean).join(' · ');
 
   return (
-    <ModalRoot onCancel={closeModal} onEscKeypress={closeModal} bHideCloseIcon bAllowFullSize>
+    <ModalRoot onCancel={closeModal} onEscKeypress={closeModal} bHideCloseIcon bAllowFullSize
+      className="romm-glass-modal" modalClassName="romm-glass-modal">
+      <style>{`
+        @keyframes sdShimmer { 0% { background-position: -150% 0; } 100% { background-position: 150% 0; } }
+        .sd-shimmer { background-image: linear-gradient(100deg, transparent 20%, rgba(255,255,255,0.22) 50%, transparent 80%) !important; background-size: 200% 100% !important; background-repeat: no-repeat; animation: sdShimmer 1.1s linear infinite; }
+        .romm-glass-modal {
+          background: linear-gradient(180deg, rgba(28,28,44,0.92) 0%, rgba(12,12,22,0.94) 100%) !important;
+          -webkit-backdrop-filter: blur(24px) !important; backdrop-filter: blur(24px) !important;
+          border: 1px solid rgba(255,255,255,0.12) !important; border-radius: 14px !important;
+          box-shadow: 0 14px 44px rgba(0,0,0,0.6) !important;
+        }
+      `}</style>
       <div style={{
-        fontFamily: V2.font, color: V2.fg, background: V2.bg,
-        border: `1px solid ${V2.border}`, borderRadius: V2.radiusCard,
+        fontFamily: V2.font, color: V2.fg,
         padding: '22px', display: 'flex', flexDirection: 'column', gap: '16px',
       }}>
         <div>
@@ -1969,30 +1981,23 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
           {meta && <div style={{ fontSize: '13px', color: V2.fg2, marginTop: '4px' }}>{meta}</div>}
         </div>
 
-        {isState && (
-          <div className={loadingShot ? 'sd-shimmer' : ''} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '180px', background: V2.coverPlaceholder, borderRadius: V2.radiusLg, overflow: 'hidden', border: `1px solid ${V2.border}` }}>
-            {loadingShot ? (
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', color: V2.fgMuted }}>
-                <FaSync size={16} style={{ animation: 'spin 1s linear infinite' }} />
-                <span style={{ fontSize: '12px' }}>Downloading screenshot…</span>
-              </div>
-            ) : shot ? (
-              <img src={shot} style={{ maxWidth: '100%', maxHeight: '300px', display: 'block' }} />
-            ) : (
-              <span style={{ fontSize: '12px', color: V2.fgMuted }}>No screenshot</span>
-            )}
-          </div>
-        )}
+        <div className={loadingShot ? 'sd-shimmer' : ''} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '180px', backgroundColor: V2.coverPlaceholder, borderRadius: V2.radiusLg, overflow: 'hidden', border: `1px solid ${V2.border}` }}>
+          {loadingShot ? (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', color: V2.fgMuted }}>
+              <FaSync size={16} style={{ animation: 'spin 1s linear infinite' }} />
+              <span style={{ fontSize: '12px' }}>Loading preview…</span>
+            </div>
+          ) : shot ? (
+            <img src={shot} style={{ maxWidth: '100%', maxHeight: '300px', display: 'block' }} />
+          ) : (
+            <span style={{ fontSize: '12px', color: V2.fgMuted }}>No preview available</span>
+          )}
+        </div>
 
         <div style={{ fontSize: '12.5px', color: V2.fg2, lineHeight: 1.55, background: V2.surface, border: `1px solid ${V2.border}`, borderRadius: V2.radiusMd, padding: '10px 12px' }}>
           <span style={{ color: V2.fg, fontWeight: 600 }}>Restore (overwrite)</span> replaces the current file with this version. The current file is backed up first.
           {isState && <><br /><span style={{ color: V2.fg, fontWeight: 600 }}>Restore as copy</span> writes this version into a new free slot, leaving your current slots untouched.</>}
         </div>
-
-        <style>{`
-          @keyframes sdShimmer { from { background-position: -180% 0; } to { background-position: 180% 0; } }
-          .sd-shimmer { background-image: linear-gradient(100deg, transparent 25%, rgba(255,255,255,0.18) 50%, transparent 75%); background-size: 200% 100%; animation: sdShimmer 1.15s ease-in-out infinite; }
-        `}</style>
 
         <Focusable flow-children="horizontal" style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           <V2Button variant="text" disabled={!!busy} onClick={() => closeModal?.()}>Cancel</V2Button>
@@ -2132,8 +2137,8 @@ function SaveDataTab({ romId }: { romId: number }) {
         .sd-row:hover, .sd-row:focus-within { background: ${V2.surfaceHover}; border-color: ${V2.borderStrong}; transform: translateY(-1px); }
         .sd-tile { transition: transform 0.15s ${EASE}, box-shadow 0.15s ease, border-color 0.15s ease; }
         .sd-tile:hover, .sd-tile:focus-within { transform: translateY(-2px); box-shadow: 0 8px 22px rgba(0,0,0,0.4); border-color: ${V2.borderStrong}; }
-        @keyframes sdShimmer { from { background-position: -180% 0; } to { background-position: 180% 0; } }
-        .sd-shimmer { background-image: linear-gradient(100deg, transparent 25%, rgba(255,255,255,0.18) 50%, transparent 75%); background-size: 200% 100%; animation: sdShimmer 1.15s ease-in-out infinite; }
+        @keyframes sdShimmer { 0% { background-position: -150% 0; } 100% { background-position: 150% 0; } }
+        .sd-shimmer { background-image: linear-gradient(100deg, transparent 20%, rgba(255,255,255,0.22) 50%, transparent 80%) !important; background-size: 200% 100% !important; background-repeat: no-repeat; animation: sdShimmer 1.1s linear infinite; }
       `}</style>
 
       <Focusable flow-children="horizontal" style={{ display: 'flex', gap: '8px' }}>
@@ -2206,7 +2211,7 @@ function SaveDataTab({ romId }: { romId: number }) {
                           '--sd-i': Math.min(idx, 14),
                         } as any}
                       >
-                        <div className={loadingShot ? 'sd-shimmer' : ''} style={{ position: 'relative', aspectRatio: '16 / 9', background: V2.coverPlaceholder, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+                        <div className={loadingShot ? 'sd-shimmer' : ''} style={{ position: 'relative', aspectRatio: '16 / 9', backgroundColor: V2.coverPlaceholder, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
                           {loadingShot ? (
                             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', color: V2.fgMuted }}>
                               <FaSync size={14} style={{ animation: 'spin 1s linear infinite' }} />
