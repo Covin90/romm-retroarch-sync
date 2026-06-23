@@ -2203,6 +2203,237 @@ function AchievementsTab({ achievements }: { achievements: Achievement[] }) {
   );
 }
 
+// Inline Save Data tab — Saves + States subtabs, mirrors RomM's SaveDataTab.
+// Saves are a vertical info list; States are a screenshot tile grid. Selecting
+// an item reveals inline restore actions (restore-in-place, and restore-as-copy
+// for states) backed by the same callables the standalone history page uses.
+function SaveDataTab({ romId }: { romId: number }) {
+  const [sub, setSub] = useState<'saves' | 'states'>('saves');
+  const [loading, setLoading] = useState(true);
+  const [saves, setSaves] = useState<HistoryEntry[]>([]);
+  const [states, setStates] = useState<HistoryEntry[]>([]);
+  const [shots, setShots] = useState<Record<number, string | null>>({});
+  const [selected, setSelected] = useState<HistoryEntry | null>(null);
+  const [confirm, setConfirm] = useState<null | 'restore' | 'copy'>(null);
+  const [restoring, setRestoring] = useState(false);
+  const EASE = 'cubic-bezier(0.22,1,0.36,1)';
+
+  const load = async () => {
+    setLoading(true);
+    setSelected(null);
+    setConfirm(null);
+    try {
+      const res = await getSaveHistory(romId);
+      if (res?.success) {
+        setSaves(res.saves || []);
+        setStates(res.states || []);
+      } else {
+        setSaves([]); setStates([]);
+      }
+    } catch (e) {
+      console.error('get_save_history failed', e);
+      setSaves([]); setStates([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => { load(); }, []);
+
+  // Lazily fetch state screenshots once the States subtab is opened.
+  useEffect(() => {
+    if (sub !== 'states') return;
+    states.forEach((s) => {
+      if (s.id in shots) return;
+      setShots((p) => ({ ...p, [s.id]: null }));
+      getSaveScreenshot(romId, s.id, 'states')
+        .then((r: any) => setShots((p) => ({ ...p, [s.id]: r?.data_uri || null })))
+        .catch(() => setShots((p) => ({ ...p, [s.id]: null })));
+    });
+  }, [sub, states]);
+
+  const isSel = (e: HistoryEntry) => selected?.id === e.id && selected?.save_type === e.save_type;
+  const selectEntry = (e: HistoryEntry) => {
+    setConfirm(null);
+    setSelected((cur) => (cur?.id === e.id && cur?.save_type === e.save_type) ? null : e);
+  };
+
+  const doRestore = async (asCopy: boolean) => {
+    if (!selected) return;
+    setRestoring(true);
+    try {
+      const res = await restoreSaveVersion(romId, selected.id, selected.save_type, asCopy);
+      if (res?.success) {
+        toaster.toast({ title: 'Restored', body: res.tgt_name ? `→ ${res.tgt_name}` : 'Version restored' });
+        await load();
+      } else {
+        toaster.toast({ title: 'Restore failed', body: res?.message || 'Unknown error' });
+      }
+    } catch (e) {
+      toaster.toast({ title: 'Restore failed', body: String(e) });
+    } finally {
+      setRestoring(false);
+      setConfirm(null);
+    }
+  };
+
+  const actionPanel = (e: HistoryEntry) => (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '10px 12px', background: V2.surface, border: `1px solid ${V2.borderStrong}`, borderRadius: V2.radiusMd }}>
+      {confirm === null ? (
+        <Focusable flow-children="horizontal" style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          <V2Button variant="primary" disabled={restoring} onClick={() => setConfirm('restore')}>
+            <FaUndo size={12} /><span>Restore this version</span>
+          </V2Button>
+          {e.save_type === 'states' && (
+            <V2Button variant="tonal" disabled={restoring} onClick={() => setConfirm('copy')}>
+              <FaCopy size={12} /><span>Restore as copy</span>
+            </V2Button>
+          )}
+        </Focusable>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div style={{ fontSize: '11.5px', color: V2.warning, lineHeight: 1.45 }}>
+            {confirm === 'restore'
+              ? 'Overwrite the current file with this version? The current file is backed up (.backup).'
+              : 'Download this version into a new free slot? Your current slots stay untouched.'}
+          </div>
+          <Focusable flow-children="horizontal" style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+            <V2Button variant={confirm === 'restore' ? 'danger' : 'primary'} disabled={restoring} onClick={() => doRestore(confirm === 'copy')}>
+              {restoring ? <FaSync size={12} style={{ animation: 'spin 1s linear infinite' }} /> : (confirm === 'copy' ? <FaCopy size={12} /> : <FaUndo size={12} />)}
+              <span>{restoring ? 'Restoring…' : (confirm === 'copy' ? 'Yes, restore as copy' : 'Yes, restore')}</span>
+            </V2Button>
+            <V2Button variant="text" disabled={restoring} onClick={() => setConfirm(null)}>Cancel</V2Button>
+          </Focusable>
+        </div>
+      )}
+    </div>
+  );
+
+  const pill = (id: 'saves' | 'states', label: string, count: number) => {
+    const active = sub === id;
+    return (
+      <Focusable
+        key={id}
+        onActivate={() => { setSub(id); setSelected(null); setConfirm(null); }}
+        onClick={() => { setSub(id); setSelected(null); setConfirm(null); }}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: '7px',
+          background: active ? V2.fg : V2.surface, border: `1px solid ${active ? V2.fg : V2.border}`,
+          borderRadius: V2.radiusPill, color: active ? V2.bg : V2.fg2,
+          padding: '5px 14px', fontSize: '12px', fontWeight: 600, cursor: 'pointer',
+        }}
+      >
+        {label}
+        <span style={{
+          fontSize: '10px', fontWeight: 700, padding: '0px 6px', borderRadius: V2.radiusPill,
+          background: active ? 'rgba(0,0,0,0.18)' : V2.surfaceHover, color: active ? V2.bg : V2.fgMuted,
+        }}>{count}</span>
+      </Focusable>
+    );
+  };
+
+  if (loading) {
+    return <div style={{ color: V2.fgMuted, fontSize: '12px', padding: '12px 0' }}>Loading save data…</div>;
+  }
+
+  const total = saves.length + states.length;
+  if (total === 0) {
+    return <div style={{ color: V2.fgMuted, fontSize: '13px', padding: '24px 0', textAlign: 'center', fontStyle: 'italic' }}>
+      No server saves or states for this game yet.
+    </div>;
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+      <style>{`
+        @keyframes sdFade { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .sd-fade { animation: sdFade 300ms ${EASE} both; animation-delay: calc(var(--sd-i, 0) * 26ms); }
+        .sd-row { transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ${EASE}; }
+        .sd-row:hover, .sd-row:focus-within { background: ${V2.surfaceHover}; border-color: ${V2.borderStrong}; transform: translateY(-1px); }
+        .sd-tile { transition: transform 0.15s ${EASE}, box-shadow 0.15s ease, border-color 0.15s ease; }
+        .sd-tile:hover, .sd-tile:focus-within { transform: translateY(-2px); box-shadow: 0 8px 22px rgba(0,0,0,0.4); border-color: ${V2.borderStrong}; }
+      `}</style>
+
+      <Focusable flow-children="horizontal" style={{ display: 'flex', gap: '8px' }}>
+        {pill('saves', 'Saves', saves.length)}
+        {pill('states', 'States', states.length)}
+      </Focusable>
+
+      {sub === 'saves' ? (
+        saves.length === 0 ? (
+          <div style={{ color: V2.fgMuted, fontSize: '12px', padding: '12px 0' }}>No saves for this game.</div>
+        ) : (
+          <Focusable style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {saves.map((e, i) => {
+              const sub2 = [slotLabel(e), e.device || '', fmtHistSize(e.size_bytes)].filter(Boolean).join(' · ');
+              return (
+                <div key={`save-${e.id}`} className="sd-fade" style={{ '--sd-i': Math.min(i, 14) } as any}>
+                  <Focusable
+                    className="sd-row"
+                    onActivate={() => selectEntry(e)}
+                    onClick={() => selectEntry(e)}
+                    style={{
+                      display: 'flex', flexDirection: 'column', gap: '2px', textAlign: 'left',
+                      padding: '10px 13px', background: V2.surface, cursor: 'pointer',
+                      border: `1px solid ${isSel(e) ? V2.borderStrong : V2.border}`,
+                      borderRadius: V2.radiusMd, borderLeft: `3px solid ${isSel(e) ? V2.success : 'transparent'}`,
+                    }}
+                  >
+                    <div style={{ fontSize: '13px', fontWeight: 600, color: V2.fg, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.file_name}</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', color: V2.fgMuted }}>
+                      <span>{fmtHistTs(e.updated_at)}</span>
+                      {sub2 && <><span style={{ width: '3px', height: '3px', borderRadius: '50%', background: V2.fgMuted }} /><span>{sub2}</span></>}
+                    </div>
+                  </Focusable>
+                  {isSel(e) && actionPanel(e)}
+                </div>
+              );
+            })}
+          </Focusable>
+        )
+      ) : (
+        states.length === 0 ? (
+          <div style={{ color: V2.fgMuted, fontSize: '12px', padding: '12px 0' }}>No states for this game.</div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            <Focusable style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: '12px' }}>
+              {states.map((e, i) => {
+                const shot = shots[e.id];
+                return (
+                  <Focusable
+                    key={`state-${e.id}`}
+                    className="sd-tile sd-fade"
+                    onActivate={() => selectEntry(e)}
+                    onClick={() => selectEntry(e)}
+                    style={{
+                      display: 'flex', flexDirection: 'column', cursor: 'pointer', overflow: 'hidden',
+                      background: V2.surface, borderRadius: V2.radiusLg,
+                      border: `1px solid ${isSel(e) ? V2.brand : V2.border}`,
+                      '--sd-i': Math.min(i, 14),
+                    } as any}
+                  >
+                    <div style={{ aspectRatio: '16 / 9', background: V2.coverPlaceholder, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+                      {shot ? (
+                        <img src={shot} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+                      ) : (
+                        <span style={{ fontSize: '10px', color: V2.fgMuted }}>{shot === null && e.id in shots ? 'No screenshot' : 'Loading…'}</span>
+                      )}
+                    </div>
+                    <div style={{ padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                      <div style={{ fontSize: '12px', fontWeight: 600, color: V2.fg }}>{slotLabel(e)}</div>
+                      <div style={{ fontSize: '10.5px', color: V2.fgMuted }}>{fmtHistTs(e.updated_at)}</div>
+                    </div>
+                  </Focusable>
+                );
+              })}
+            </Focusable>
+            {selected?.save_type === 'states' && actionPanel(selected)}
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
 function GameDetailPage() {
   const game = _libGameHolder;
   const [detail, setDetail] = useState<any>(null);
@@ -2284,11 +2515,6 @@ function GameDetailPage() {
   meta.push(isDownloaded
     ? { text: 'Downloaded', color: V2.success }
     : { text: 'Not downloaded', color: V2.fgMuted });
-
-  const openHistory = () => {
-    _historyGameHolder = { rom_id: game.rom_id, name, platform: platform || '' };
-    Navigation.Navigate(`/romm-sync-save-history/${game.rom_id}`);
-  };
 
   // Overview "InfoGrid" sections — label + chip items (RomM InfoGrid).
   const infoGrid: { label: string; items: string[] }[] = [];
@@ -2417,14 +2643,7 @@ function GameDetailPage() {
             ) : tab === 'screenshots' ? (
               <ScreenshotGrid paths={detail?.screenshots || []} />
             ) : tab === 'save-data' ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                <div style={{ fontSize: '12px', color: V2.fg2, lineHeight: '1.55' }}>
-                  Browse and restore server save/state versions for this game.
-                </div>
-                <div><V2Button variant="tonal" onClick={openHistory}>
-                  <FaHistory size={13} /><span>Open Save History</span>
-                </V2Button></div>
-              </div>
+              <SaveDataTab romId={game.rom_id} />
             ) : (
               <AchievementsTab achievements={detail?.achievements || []} />
             )}
