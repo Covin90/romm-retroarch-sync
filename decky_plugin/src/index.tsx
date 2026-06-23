@@ -11,10 +11,11 @@ import {
   GamepadButton,
   showModal,
   ModalRoot,
+  ConfirmModal,
 } from "@decky/ui";
 import { callable, definePlugin, toaster, routerHook, openFilePicker, FileSelectionType } from "@decky/api";
 import { useState, useEffect, useRef, ChangeEvent } from "react";
-import { FaSync, FaTrash, FaCog, FaSteam, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight } from "react-icons/fa";
+import { FaSync, FaTrash, FaCog, FaSteam, FaGithub, FaBug, FaUndo, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight } from "react-icons/fa";
 import { BsGearFill } from "react-icons/bs";
 
 // Call backend methods
@@ -1913,6 +1914,77 @@ function AchievementsTab({ achievements }: { achievements: Achievement[] }) {
   );
 }
 
+// Restore modal — a Steam ConfirmModal that previews the chosen version
+// (screenshot for states) and exposes Restore / Restore-as-copy / Cancel.
+// closeModal is injected by showModal.
+function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
+  romId: number; entry: HistoryEntry; shotUri?: string; onDone: () => void; closeModal?: () => void;
+}) {
+  const isState = entry.save_type === 'states';
+  const [shot, setShot] = useState<string | null>(shotUri ?? null);
+  const [loadingShot, setLoadingShot] = useState(isState && !shotUri);
+
+  useEffect(() => {
+    if (!isState || shotUri) return;
+    getSaveScreenshot(romId, entry.id, 'states')
+      .then((r: any) => setShot(r?.data_uri || null))
+      .catch(() => setShot(null))
+      .finally(() => setLoadingShot(false));
+  }, []);
+
+  const run = async (asCopy: boolean) => {
+    toaster.toast({ title: asCopy ? 'Restoring as copy…' : 'Restoring…', body: slotLabel(entry) });
+    try {
+      const res = await restoreSaveVersion(romId, entry.id, entry.save_type, asCopy);
+      if (res?.success) {
+        toaster.toast({ title: 'Restored', body: res.tgt_name ? `→ ${res.tgt_name}` : 'Version restored' });
+        onDone();
+      } else {
+        toaster.toast({ title: 'Restore failed', body: res?.message || 'Unknown error' });
+      }
+    } catch (e) {
+      toaster.toast({ title: 'Restore failed', body: String(e) });
+    }
+  };
+
+  const meta = [slotLabel(entry), entry.device || '', fmtHistSize(entry.size_bytes)].filter(Boolean).join(' · ');
+
+  return (
+    <ConfirmModal
+      closeModal={closeModal}
+      bDestructiveWarning
+      strTitle={`Restore — ${fmtHistTs(entry.updated_at)}`}
+      strOKButtonText="Restore (overwrite)"
+      strCancelButtonText="Cancel"
+      strMiddleButtonText={isState ? 'Restore as copy' : undefined}
+      onOK={() => run(false)}
+      onMiddleButton={isState ? () => run(true) : undefined}
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', color: V2.fg }}>
+        {meta && <div style={{ fontSize: '13px', color: V2.fg2 }}>{meta}</div>}
+        {isState && (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '160px', background: 'rgba(0,0,0,0.3)', borderRadius: V2.radiusMd, overflow: 'hidden' }}>
+            {loadingShot ? (
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', color: V2.fgMuted }}>
+                <FaSync size={16} style={{ animation: 'spin 1s linear infinite' }} />
+                <span style={{ fontSize: '12px' }}>Downloading screenshot…</span>
+              </div>
+            ) : shot ? (
+              <img src={shot} style={{ maxWidth: '100%', maxHeight: '260px', borderRadius: V2.radiusMd }} />
+            ) : (
+              <span style={{ fontSize: '12px', color: V2.fgMuted }}>No screenshot</span>
+            )}
+          </div>
+        )}
+        <div style={{ fontSize: '12.5px', color: V2.fg2, lineHeight: 1.5 }}>
+          <strong>Restore (overwrite)</strong> replaces the current file with this version (the current file is backed up as <code>.backup</code>).
+          {isState && <><br /><strong>Restore as copy</strong> downloads this version into a new free slot, leaving your current slots untouched.</>}
+        </div>
+      </div>
+    </ConfirmModal>
+  );
+}
+
 // Inline Save Data tab — Saves + States subtabs, mirrors RomM's SaveDataTab.
 // Saves are a vertical info list; States are a screenshot tile grid. Selecting
 // an item reveals inline restore actions (restore-in-place, and restore-as-copy
@@ -1925,15 +1997,10 @@ function SaveDataTab({ romId }: { romId: number }) {
   // shots[id]: 'loading' while fetching, '' once resolved with no screenshot,
   // otherwise the data URI. Absence means not yet requested.
   const [shots, setShots] = useState<Record<number, string>>({});
-  const [selected, setSelected] = useState<HistoryEntry | null>(null);
-  const [confirm, setConfirm] = useState<null | 'restore' | 'copy'>(null);
-  const [restoring, setRestoring] = useState(false);
   const EASE = 'cubic-bezier(0.22,1,0.36,1)';
 
   const load = async () => {
     setLoading(true);
-    setSelected(null);
-    setConfirm(null);
     try {
       const res = await getSaveHistory(romId);
       if (res?.success) {
@@ -1963,72 +2030,19 @@ function SaveDataTab({ romId }: { romId: number }) {
     });
   }, [sub, states]);
 
-  const isSel = (e: HistoryEntry) => selected?.id === e.id && selected?.save_type === e.save_type;
-  // Set (don't toggle): on Steam Deck a single A press can fire both onActivate
-  // and onClick, and a toggle would cancel out and never open the action panel.
-  const selectEntry = (e: HistoryEntry) => {
-    setConfirm(null);
-    setSelected(e);
+  const openRestore = (e: HistoryEntry) => {
+    const cached = shots[e.id];
+    const shotUri = (cached && cached !== 'loading') ? cached : undefined;
+    showModal(<RestoreModal romId={romId} entry={e} shotUri={shotUri} onDone={load} />);
   };
-
-  const doRestore = async (asCopy: boolean) => {
-    if (!selected) return;
-    setRestoring(true);
-    try {
-      const res = await restoreSaveVersion(romId, selected.id, selected.save_type, asCopy);
-      if (res?.success) {
-        toaster.toast({ title: 'Restored', body: res.tgt_name ? `→ ${res.tgt_name}` : 'Version restored' });
-        await load();
-      } else {
-        toaster.toast({ title: 'Restore failed', body: res?.message || 'Unknown error' });
-      }
-    } catch (e) {
-      toaster.toast({ title: 'Restore failed', body: String(e) });
-    } finally {
-      setRestoring(false);
-      setConfirm(null);
-    }
-  };
-
-  const actionPanel = (e: HistoryEntry) => (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '10px 12px', background: V2.surface, border: `1px solid ${V2.borderStrong}`, borderRadius: V2.radiusMd }}>
-      {confirm === null ? (
-        <Focusable flow-children="horizontal" style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-          <V2Button variant="primary" disabled={restoring} onClick={() => setConfirm('restore')}>
-            <FaUndo size={12} /><span>Restore this version</span>
-          </V2Button>
-          {e.save_type === 'states' && (
-            <V2Button variant="tonal" disabled={restoring} onClick={() => setConfirm('copy')}>
-              <FaCopy size={12} /><span>Restore as copy</span>
-            </V2Button>
-          )}
-        </Focusable>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          <div style={{ fontSize: '11.5px', color: V2.warning, lineHeight: 1.45 }}>
-            {confirm === 'restore'
-              ? 'Overwrite the current file with this version? The current file is backed up (.backup).'
-              : 'Download this version into a new free slot? Your current slots stay untouched.'}
-          </div>
-          <Focusable flow-children="horizontal" style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-            <V2Button variant={confirm === 'restore' ? 'danger' : 'primary'} disabled={restoring} onClick={() => doRestore(confirm === 'copy')}>
-              {restoring ? <FaSync size={12} style={{ animation: 'spin 1s linear infinite' }} /> : (confirm === 'copy' ? <FaCopy size={12} /> : <FaUndo size={12} />)}
-              <span>{restoring ? 'Restoring…' : (confirm === 'copy' ? 'Yes, restore as copy' : 'Yes, restore')}</span>
-            </V2Button>
-            <V2Button variant="text" disabled={restoring} onClick={() => setConfirm(null)}>Cancel</V2Button>
-          </Focusable>
-        </div>
-      )}
-    </div>
-  );
 
   const pill = (id: 'saves' | 'states', label: string, count: number) => {
     const active = sub === id;
     return (
       <Focusable
         key={id}
-        onActivate={() => { setSub(id); setSelected(null); setConfirm(null); }}
-        onClick={() => { setSub(id); setSelected(null); setConfirm(null); }}
+        onActivate={() => setSub(id)}
+        onClick={() => setSub(id)}
         style={{
           display: 'inline-flex', alignItems: 'center', gap: '7px',
           background: active ? V2.fg : V2.surface, border: `1px solid ${active ? V2.fg : V2.border}`,
@@ -2115,22 +2129,23 @@ function SaveDataTab({ romId }: { romId: number }) {
                     <div key={`save-${e.id}`} className="sd-fade" style={{ '--sd-i': Math.min(idx, 14) } as any}>
                       <Focusable
                         className="sd-row"
-                        onActivate={() => selectEntry(e)}
-                        onClick={() => selectEntry(e)}
+                        onActivate={() => openRestore(e)}
+                        onClick={() => openRestore(e)}
                         style={{
-                          display: 'flex', flexDirection: 'column', gap: '3px', textAlign: 'left',
+                          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', textAlign: 'left',
                           padding: '10px 13px', background: V2.surface, cursor: 'pointer',
-                          border: `1px solid ${isSel(e) ? V2.borderStrong : V2.border}`,
-                          borderRadius: V2.radiusMd, borderLeft: `3px solid ${isSel(e) ? V2.success : 'transparent'}`,
+                          border: `1px solid ${V2.border}`, borderRadius: V2.radiusMd,
                         }}
                       >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                          <span style={{ fontSize: '13px', fontWeight: 600, color: V2.fg }}>{fmtHistTs(e.updated_at)}</span>
-                          {isCur && currentChip}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', minWidth: 0 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <span style={{ fontSize: '13px', fontWeight: 600, color: V2.fg }}>{fmtHistTs(e.updated_at)}</span>
+                            {isCur && currentChip}
+                          </div>
+                          {sub2 && <div style={{ fontSize: '11px', color: V2.fgMuted }}>{sub2}</div>}
                         </div>
-                        {sub2 && <div style={{ fontSize: '11px', color: V2.fgMuted }}>{sub2}</div>}
+                        <FaUndo size={13} style={{ color: V2.fgMuted, flexShrink: 0 }} />
                       </Focusable>
-                      {isSel(e) && actionPanel(e)}
                     </div>
                   );
                 })}
@@ -2155,12 +2170,12 @@ function SaveDataTab({ romId }: { romId: number }) {
                       <Focusable
                         key={`state-${e.id}`}
                         className="sd-tile sd-fade"
-                        onActivate={() => selectEntry(e)}
-                        onClick={() => selectEntry(e)}
+                        onActivate={() => openRestore(e)}
+                        onClick={() => openRestore(e)}
                         style={{
                           display: 'flex', flexDirection: 'column', cursor: 'pointer', overflow: 'hidden',
                           background: V2.surface, borderRadius: V2.radiusLg,
-                          border: `1px solid ${isSel(e) ? V2.brand : V2.border}`,
+                          border: `1px solid ${V2.border}`,
                           '--sd-i': Math.min(idx, 14),
                         } as any}
                       >
@@ -2184,7 +2199,6 @@ function SaveDataTab({ romId }: { romId: number }) {
                     );
                   })}
                 </Focusable>
-                {selected?.save_type === 'states' && g.items.some((it) => it.id === selected.id) && actionPanel(selected)}
               </div>
             ))}
           </div>
