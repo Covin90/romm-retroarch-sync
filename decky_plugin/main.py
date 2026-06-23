@@ -1743,7 +1743,8 @@ class Plugin:
                 'success': True,
                 'rom_id': rom_id,
                 'name': d.get('name') or local.get('name') or 'Unknown',
-                'platform': d.get('platform_name') or local.get('platform'),
+                'platform': (d.get('platform_display_name') or d.get('platform_custom_name')
+                             or d.get('platform_name') or d.get('platform_slug') or local.get('platform')),
                 'summary': d.get('summary') or meta.get('summary') or '',
                 'genres': _names(d.get('genres') or meta.get('genres')),
                 'franchises': _names(d.get('franchises') or meta.get('franchises')),
