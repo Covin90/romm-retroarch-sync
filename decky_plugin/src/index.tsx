@@ -1968,18 +1968,21 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
           background: rgba(7,7,15,0.35) !important;
           -webkit-backdrop-filter: blur(16px) !important; backdrop-filter: blur(16px) !important;
         }
-        /* The single glass panel. Strip the default Steam dialog chrome. */
+        /* The single glass panel. Strip the default Steam dialog chrome.
+           Frost (backdrop blur) over a near-neutral dark tint so it reads as
+           glass, not a flat purple slab. */
         .romm-glass-modal {
-          background: linear-gradient(180deg, rgba(28,28,44,0.78) 0%, rgba(12,12,22,0.82) 100%) !important;
+          background: linear-gradient(180deg, rgba(18,18,26,0.80) 0%, rgba(10,10,16,0.86) 100%) !important;
+          -webkit-backdrop-filter: blur(30px) saturate(1.1) !important; backdrop-filter: blur(30px) saturate(1.1) !important;
           border: 1px solid rgba(255,255,255,0.12) !important; border-radius: 14px !important;
           box-shadow: 0 14px 44px rgba(0,0,0,0.55) !important;
           padding: 0 !important;
         }
       `}</style>
       <div style={{
-        fontFamily: V2.font, color: V2.fg,
+        fontFamily: V2.font, color: V2.fg, width: '520px', maxWidth: '92vw',
         padding: '22px', display: 'flex', flexDirection: 'column', gap: '16px',
-        maxHeight: '78vh', overflowY: 'auto',
+        maxHeight: '82vh', overflowY: 'auto',
       }}>
         <div>
           <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: V2.brand }}>
@@ -1989,14 +1992,14 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
           {meta && <div style={{ fontSize: '13px', color: V2.fg2, marginTop: '4px' }}>{meta}</div>}
         </div>
 
-        <div className={loadingShot ? 'sd-shimmer' : ''} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '180px', backgroundColor: V2.coverPlaceholder, borderRadius: V2.radiusLg, overflow: 'hidden', border: `1px solid ${V2.border}` }}>
+        <div className={loadingShot ? 'sd-shimmer' : ''} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: loadingShot || !shot ? '140px' : undefined, backgroundColor: V2.coverPlaceholder, borderRadius: V2.radiusLg, overflow: 'hidden', border: `1px solid ${V2.border}` }}>
           {loadingShot ? (
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', color: V2.fgMuted }}>
               <FaSync size={16} style={{ animation: 'spin 1s linear infinite' }} />
               <span style={{ fontSize: '12px' }}>Loading preview…</span>
             </div>
           ) : shot ? (
-            <img src={shot} style={{ maxWidth: '100%', maxHeight: '300px', display: 'block' }} />
+            <img src={shot} style={{ width: '100%', height: 'auto', display: 'block' }} />
           ) : (
             <span style={{ fontSize: '12px', color: V2.fgMuted }}>No preview available</span>
           )}
