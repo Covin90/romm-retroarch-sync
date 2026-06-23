@@ -1973,7 +1973,7 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
            Frost (backdrop blur) over a near-neutral dark tint so it reads as
            glass, not a flat purple slab. */
         .romm-glass-modal {
-          width: 540px !important; max-width: 92vw !important; margin: auto !important;
+          max-width: 92vw !important; margin: auto !important;
           background: linear-gradient(180deg, rgba(18,18,26,0.80) 0%, rgba(10,10,16,0.86) 100%) !important;
           -webkit-backdrop-filter: blur(30px) saturate(1.1) !important; backdrop-filter: blur(30px) saturate(1.1) !important;
           border: 1px solid rgba(255,255,255,0.12) !important; border-radius: 14px !important;
@@ -1982,7 +1982,7 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
         }
       `}</style>
       <div style={{
-        fontFamily: V2.font, color: V2.fg,
+        fontFamily: V2.font, color: V2.fg, width: '460px', maxWidth: '86vw', boxSizing: 'border-box',
         padding: '18px', display: 'flex', flexDirection: 'column', gap: '12px',
         maxHeight: '80vh', overflowY: 'auto',
       }}>
