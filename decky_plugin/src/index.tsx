@@ -1922,7 +1922,9 @@ function SaveDataTab({ romId }: { romId: number }) {
   const [loading, setLoading] = useState(true);
   const [saves, setSaves] = useState<HistoryEntry[]>([]);
   const [states, setStates] = useState<HistoryEntry[]>([]);
-  const [shots, setShots] = useState<Record<number, string | null>>({});
+  // shots[id]: 'loading' while fetching, '' once resolved with no screenshot,
+  // otherwise the data URI. Absence means not yet requested.
+  const [shots, setShots] = useState<Record<number, string>>({});
   const [selected, setSelected] = useState<HistoryEntry | null>(null);
   const [confirm, setConfirm] = useState<null | 'restore' | 'copy'>(null);
   const [restoring, setRestoring] = useState(false);
@@ -1954,10 +1956,10 @@ function SaveDataTab({ romId }: { romId: number }) {
     if (sub !== 'states') return;
     states.forEach((s) => {
       if (s.id in shots) return;
-      setShots((p) => ({ ...p, [s.id]: null }));
+      setShots((p) => ({ ...p, [s.id]: 'loading' }));
       getSaveScreenshot(romId, s.id, 'states')
-        .then((r: any) => setShots((p) => ({ ...p, [s.id]: r?.data_uri || null })))
-        .catch(() => setShots((p) => ({ ...p, [s.id]: null })));
+        .then((r: any) => setShots((p) => ({ ...p, [s.id]: r?.data_uri || '' })))
+        .catch(() => setShots((p) => ({ ...p, [s.id]: '' })));
     });
   }, [sub, states]);
 
@@ -2087,6 +2089,8 @@ function SaveDataTab({ romId }: { romId: number }) {
         .sd-row:hover, .sd-row:focus-within { background: ${V2.surfaceHover}; border-color: ${V2.borderStrong}; transform: translateY(-1px); }
         .sd-tile { transition: transform 0.15s ${EASE}, box-shadow 0.15s ease, border-color 0.15s ease; }
         .sd-tile:hover, .sd-tile:focus-within { transform: translateY(-2px); box-shadow: 0 8px 22px rgba(0,0,0,0.4); border-color: ${V2.borderStrong}; }
+        @keyframes sdShimmer { from { background-position: -180% 0; } to { background-position: 180% 0; } }
+        .sd-shimmer { background-image: linear-gradient(100deg, transparent 30%, rgba(255,255,255,0.08) 50%, transparent 70%); background-size: 200% 100%; animation: sdShimmer 1.25s ease-in-out infinite; }
       `}</style>
 
       <Focusable flow-children="horizontal" style={{ display: 'flex', gap: '8px' }}>
@@ -2144,6 +2148,7 @@ function SaveDataTab({ romId }: { romId: number }) {
                   {g.items.map((e, idx) => {
                     const isCur = idx === 0;
                     const shot = shots[e.id];
+                    const loadingShot = shot === undefined || shot === 'loading';
                     return (
                       <Focusable
                         key={`state-${e.id}`}
@@ -2157,11 +2162,16 @@ function SaveDataTab({ romId }: { romId: number }) {
                           '--sd-i': Math.min(idx, 14),
                         } as any}
                       >
-                        <div style={{ position: 'relative', aspectRatio: '16 / 9', background: V2.coverPlaceholder, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
-                          {shot ? (
+                        <div className={loadingShot ? 'sd-shimmer' : ''} style={{ position: 'relative', aspectRatio: '16 / 9', background: V2.coverPlaceholder, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+                          {loadingShot ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', color: V2.fgMuted }}>
+                              <FaSync size={14} style={{ animation: 'spin 1s linear infinite' }} />
+                              <span style={{ fontSize: '10px' }}>Downloading…</span>
+                            </div>
+                          ) : shot ? (
                             <img src={shot} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
                           ) : (
-                            <span style={{ fontSize: '10px', color: V2.fgMuted }}>{shot === null && e.id in shots ? 'No screenshot' : 'Loading…'}</span>
+                            <span style={{ fontSize: '10px', color: V2.fgMuted }}>No screenshot</span>
                           )}
                           {isCur && <div style={{ position: 'absolute', top: '6px', left: '6px' }}>{currentChip}</div>}
                         </div>
