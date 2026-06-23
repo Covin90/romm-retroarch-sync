@@ -1958,15 +1958,17 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
 
   return (
     <ModalRoot onCancel={closeModal} onEscKeypress={closeModal} bHideCloseIcon bAllowFullSize
-      className="romm-glass-modal" modalClassName="romm-glass-modal">
+      className="romm-modal-scrim" modalClassName="romm-glass-modal">
       <style>{`
         @keyframes sdShimmer { 0% { background-position: -150% 0; } 100% { background-position: 150% 0; } }
         .sd-shimmer { background-image: linear-gradient(100deg, transparent 20%, rgba(255,255,255,0.22) 50%, transparent 80%) !important; background-size: 200% 100% !important; background-repeat: no-repeat; animation: sdShimmer 1.1s linear infinite; }
+        /* Dark scrim so the page cover art behind the modal is hidden. */
+        .romm-modal-scrim { background: rgba(7,7,15,0.8) !important; -webkit-backdrop-filter: blur(6px) !important; backdrop-filter: blur(6px) !important; }
+        /* Near-opaque glossy panel that reads clearly on top, no art bleed. */
         .romm-glass-modal {
-          background: linear-gradient(180deg, rgba(28,28,44,0.92) 0%, rgba(12,12,22,0.94) 100%) !important;
-          -webkit-backdrop-filter: blur(24px) !important; backdrop-filter: blur(24px) !important;
+          background: linear-gradient(180deg, rgba(34,34,52,0.985) 0%, rgba(13,13,23,0.99) 100%) !important;
           border: 1px solid rgba(255,255,255,0.12) !important; border-radius: 14px !important;
-          box-shadow: 0 14px 44px rgba(0,0,0,0.6) !important;
+          box-shadow: 0 18px 52px rgba(0,0,0,0.7) !important;
         }
       `}</style>
       <div style={{
@@ -2210,6 +2212,17 @@ function SaveDataTab({ romId }: { romId: number }) {
           <div style={{ color: V2.fgMuted, fontSize: '12px', padding: '12px 0' }}>No states for this game.</div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            {(() => {
+              const pending = states.filter((s) => shots[s.id] === undefined || shots[s.id] === 'loading').length;
+              if (pending === 0) return null;
+              const loaded = states.length - pending;
+              return (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', color: V2.fgMuted }}>
+                  <FaSync size={11} style={{ animation: 'spin 1s linear infinite' }} />
+                  <span>Loading previews {loaded}/{states.length}…</span>
+                </div>
+              );
+            })()}
             {groupBySlot(states).map((g) => (
               <div key={`stg-${g.slot}`} style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                 {slotHeader(g.slot, g.items.length)}
