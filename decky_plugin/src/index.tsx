@@ -1957,33 +1957,25 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
   const meta = [slotLabel(entry), entry.device || '', fmtHistSize(entry.size_bytes)].filter(Boolean).join(' · ');
 
   return (
-    <ModalRoot onCancel={closeModal} onEscKeypress={closeModal} bHideCloseIcon
-      className="romm-modal-backdrop" modalClassName="romm-glass-modal">
+    <Focusable
+      onCancelButton={() => closeModal?.()}
+      onButtonDown={(e: any) => { if (e?.detail?.button === GamepadButton.CANCEL) closeModal?.(); }}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 9999,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        background: 'rgba(7,7,15,0.45)',
+        WebkitBackdropFilter: 'blur(8px)', backdropFilter: 'blur(8px)',
+      }}
+    >
       <style>{`
         @keyframes sdShimmer { 0% { background-position: -150% 0; } 100% { background-position: 150% 0; } }
         .sd-shimmer { background-image: linear-gradient(100deg, transparent 20%, rgba(255,255,255,0.22) 50%, transparent 80%) !important; background-size: 200% 100% !important; background-repeat: no-repeat; animation: sdShimmer 1.1s linear infinite; }
-        /* Full-screen backdrop: keep it transparent and just blur+dim so the
-           app stays visible behind the modal (no solid color wash). */
-        .romm-modal-backdrop {
-          background: rgba(7,7,15,0.12) !important;
-          -webkit-backdrop-filter: blur(6px) !important; backdrop-filter: blur(6px) !important;
-          display: flex !important; align-items: center !important; justify-content: center !important;
-        }
-        /* Collapse the Steam dialog chrome (panel + any wrapper) to nothing;
-           our content div is the only visible (glass) card. The card is deeper
-           than these selectors so its styling is untouched. */
-        .romm-glass-modal, .romm-modal-backdrop > div {
-          background: transparent !important; border: none !important; box-shadow: none !important;
-          outline: none !important; padding: 0 !important; margin: auto !important;
-          display: flex !important; align-items: center !important; justify-content: center !important;
-        }
       `}</style>
-      <div style={{
+      <Focusable flow-children="vertical" style={{
         fontFamily: V2.font, color: V2.fg, width: '460px', maxWidth: '86vw', boxSizing: 'border-box',
-        alignSelf: 'center', margin: 'auto',
         padding: '18px', display: 'flex', flexDirection: 'column', gap: '12px',
         maxHeight: '82vh', overflowY: 'auto',
-        background: 'linear-gradient(180deg, rgba(20,20,30,0.62) 0%, rgba(10,10,18,0.7) 100%)',
+        background: 'linear-gradient(180deg, rgba(20,20,30,0.7) 0%, rgba(10,10,18,0.78) 100%)',
         WebkitBackdropFilter: 'blur(28px) saturate(1.1)', backdropFilter: 'blur(28px) saturate(1.1)',
         border: `1px solid rgba(255,255,255,0.12)`, borderRadius: V2.radiusCard,
         boxShadow: '0 16px 48px rgba(0,0,0,0.55)',
@@ -2033,8 +2025,8 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
             <span>Restore (overwrite)</span>
           </V2Button>
         </Focusable>
-      </div>
-    </ModalRoot>
+      </Focusable>
+    </Focusable>
   );
 }
 
