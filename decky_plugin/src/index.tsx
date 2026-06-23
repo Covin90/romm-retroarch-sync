@@ -1091,13 +1091,14 @@ function slotLabel(e: HistoryEntry): string {
 // styling (card scale/glow, row lift, button glow) instead, so the Steam box is
 // fully removed rather than restyled.
 const V2_FOCUS_STYLE = `
-  .romm-ui [class*="gpfocus"] { outline: none !important; box-shadow: none !important; }
-  .romm-ui [class*="gpfocus"]::before, .romm-ui [class*="gpfocus"]::after {
-    box-shadow: none !important; background: none !important; border: none !important; content: none !important;
+  .romm-ui *:focus, .romm-ui *:focus-visible, .romm-ui *:focus-within { outline: none !important; }
+  .romm-ui [class*="gpfocus"], .romm-ui .Focusable:focus, .romm-ui .Focusable:focus-within {
+    outline: none !important; box-shadow: none !important;
   }
-  /* Keep a tasteful on-brand ring on buttons so they still show focus. */
-  .romm-ui .romm-btn.gpfocuswithin, .romm-ui .romm-btn.gpfocus {
-    box-shadow: 0 0 0 2px ${'rgba(139,116,232,0.9)'} !important;
+  .romm-ui [class*="gpfocus"]::before, .romm-ui [class*="gpfocus"]::after,
+  .romm-ui .Focusable:focus::before, .romm-ui .Focusable:focus::after {
+    content: none !important; display: none !important;
+    box-shadow: none !important; background: none !important; border: none !important;
   }
 `;
 
