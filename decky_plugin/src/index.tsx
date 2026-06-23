@@ -11,11 +11,10 @@ import {
   GamepadButton,
   showModal,
   ModalRoot,
-  ConfirmModal,
 } from "@decky/ui";
 import { callable, definePlugin, toaster, routerHook, openFilePicker, FileSelectionType } from "@decky/api";
 import { useState, useEffect, useRef, ChangeEvent } from "react";
-import { FaSync, FaTrash, FaCog, FaSteam, FaGithub, FaBug, FaUndo, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight } from "react-icons/fa";
+import { FaSync, FaTrash, FaCog, FaSteam, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight } from "react-icons/fa";
 import { BsGearFill } from "react-icons/bs";
 
 // Call backend methods
@@ -1914,15 +1913,17 @@ function AchievementsTab({ achievements }: { achievements: Achievement[] }) {
   );
 }
 
-// Restore modal — a Steam ConfirmModal that previews the chosen version
-// (screenshot for states) and exposes Restore / Restore-as-copy / Cancel.
-// closeModal is injected by showModal.
+// Restore modal — a bare ModalRoot styled entirely in the RomM v2 design
+// language (tokens, V2Button) rather than Steam chrome. Previews the chosen
+// version (screenshot for states) and exposes Restore / Restore-as-copy /
+// Cancel. closeModal is injected by showModal.
 function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
   romId: number; entry: HistoryEntry; shotUri?: string; onDone: () => void; closeModal?: () => void;
 }) {
   const isState = entry.save_type === 'states';
   const [shot, setShot] = useState<string | null>(shotUri ?? null);
   const [loadingShot, setLoadingShot] = useState(isState && !shotUri);
+  const [busy, setBusy] = useState<null | 'restore' | 'copy'>(null);
 
   useEffect(() => {
     if (!isState || shotUri) return;
@@ -1933,55 +1934,81 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
   }, []);
 
   const run = async (asCopy: boolean) => {
-    toaster.toast({ title: asCopy ? 'Restoring as copy…' : 'Restoring…', body: slotLabel(entry) });
+    if (busy) return;
+    setBusy(asCopy ? 'copy' : 'restore');
     try {
       const res = await restoreSaveVersion(romId, entry.id, entry.save_type, asCopy);
       if (res?.success) {
         toaster.toast({ title: 'Restored', body: res.tgt_name ? `→ ${res.tgt_name}` : 'Version restored' });
         onDone();
+        closeModal?.();
       } else {
         toaster.toast({ title: 'Restore failed', body: res?.message || 'Unknown error' });
+        setBusy(null);
       }
     } catch (e) {
       toaster.toast({ title: 'Restore failed', body: String(e) });
+      setBusy(null);
     }
   };
 
   const meta = [slotLabel(entry), entry.device || '', fmtHistSize(entry.size_bytes)].filter(Boolean).join(' · ');
 
   return (
-    <ConfirmModal
-      closeModal={closeModal}
-      bDestructiveWarning
-      strTitle={`Restore — ${fmtHistTs(entry.updated_at)}`}
-      strOKButtonText="Restore (overwrite)"
-      strCancelButtonText="Cancel"
-      strMiddleButtonText={isState ? 'Restore as copy' : undefined}
-      onOK={() => run(false)}
-      onMiddleButton={isState ? () => run(true) : undefined}
-    >
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', color: V2.fg }}>
-        {meta && <div style={{ fontSize: '13px', color: V2.fg2 }}>{meta}</div>}
+    <ModalRoot onCancel={closeModal} onEscKeypress={closeModal} bHideCloseIcon bAllowFullSize>
+      <div style={{
+        fontFamily: V2.font, color: V2.fg, background: V2.bg,
+        border: `1px solid ${V2.border}`, borderRadius: V2.radiusCard,
+        padding: '22px', display: 'flex', flexDirection: 'column', gap: '16px',
+      }}>
+        <div>
+          <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: V2.brand }}>
+            Restore {isState ? 'state' : 'save'}
+          </div>
+          <div style={{ fontSize: '20px', fontWeight: 800, marginTop: '4px' }}>{fmtHistTs(entry.updated_at)}</div>
+          {meta && <div style={{ fontSize: '13px', color: V2.fg2, marginTop: '4px' }}>{meta}</div>}
+        </div>
+
         {isState && (
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '160px', background: 'rgba(0,0,0,0.3)', borderRadius: V2.radiusMd, overflow: 'hidden' }}>
+          <div className={loadingShot ? 'sd-shimmer' : ''} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '180px', background: V2.coverPlaceholder, borderRadius: V2.radiusLg, overflow: 'hidden', border: `1px solid ${V2.border}` }}>
             {loadingShot ? (
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', color: V2.fgMuted }}>
                 <FaSync size={16} style={{ animation: 'spin 1s linear infinite' }} />
                 <span style={{ fontSize: '12px' }}>Downloading screenshot…</span>
               </div>
             ) : shot ? (
-              <img src={shot} style={{ maxWidth: '100%', maxHeight: '260px', borderRadius: V2.radiusMd }} />
+              <img src={shot} style={{ maxWidth: '100%', maxHeight: '300px', display: 'block' }} />
             ) : (
               <span style={{ fontSize: '12px', color: V2.fgMuted }}>No screenshot</span>
             )}
           </div>
         )}
-        <div style={{ fontSize: '12.5px', color: V2.fg2, lineHeight: 1.5 }}>
-          <strong>Restore (overwrite)</strong> replaces the current file with this version (the current file is backed up as <code>.backup</code>).
-          {isState && <><br /><strong>Restore as copy</strong> downloads this version into a new free slot, leaving your current slots untouched.</>}
+
+        <div style={{ fontSize: '12.5px', color: V2.fg2, lineHeight: 1.55, background: V2.surface, border: `1px solid ${V2.border}`, borderRadius: V2.radiusMd, padding: '10px 12px' }}>
+          <span style={{ color: V2.fg, fontWeight: 600 }}>Restore (overwrite)</span> replaces the current file with this version. The current file is backed up first.
+          {isState && <><br /><span style={{ color: V2.fg, fontWeight: 600 }}>Restore as copy</span> writes this version into a new free slot, leaving your current slots untouched.</>}
         </div>
+
+        <style>{`
+          @keyframes sdShimmer { from { background-position: -180% 0; } to { background-position: 180% 0; } }
+          .sd-shimmer { background-image: linear-gradient(100deg, transparent 25%, rgba(255,255,255,0.18) 50%, transparent 75%); background-size: 200% 100%; animation: sdShimmer 1.15s ease-in-out infinite; }
+        `}</style>
+
+        <Focusable flow-children="horizontal" style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          <V2Button variant="text" disabled={!!busy} onClick={() => closeModal?.()}>Cancel</V2Button>
+          {isState && (
+            <V2Button variant="tonal" disabled={!!busy} onClick={() => run(true)}>
+              {busy === 'copy' ? <FaSync size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <FaCopy size={12} />}
+              <span>Restore as copy</span>
+            </V2Button>
+          )}
+          <V2Button variant="danger" disabled={!!busy} onClick={() => run(false)}>
+            {busy === 'restore' ? <FaSync size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <FaUndo size={12} />}
+            <span>Restore (overwrite)</span>
+          </V2Button>
+        </Focusable>
       </div>
-    </ConfirmModal>
+    </ModalRoot>
   );
 }
 
@@ -2106,7 +2133,7 @@ function SaveDataTab({ romId }: { romId: number }) {
         .sd-tile { transition: transform 0.15s ${EASE}, box-shadow 0.15s ease, border-color 0.15s ease; }
         .sd-tile:hover, .sd-tile:focus-within { transform: translateY(-2px); box-shadow: 0 8px 22px rgba(0,0,0,0.4); border-color: ${V2.borderStrong}; }
         @keyframes sdShimmer { from { background-position: -180% 0; } to { background-position: 180% 0; } }
-        .sd-shimmer { background-image: linear-gradient(100deg, transparent 30%, rgba(255,255,255,0.08) 50%, transparent 70%); background-size: 200% 100%; animation: sdShimmer 1.25s ease-in-out infinite; }
+        .sd-shimmer { background-image: linear-gradient(100deg, transparent 25%, rgba(255,255,255,0.18) 50%, transparent 75%); background-size: 200% 100%; animation: sdShimmer 1.15s ease-in-out infinite; }
       `}</style>
 
       <Focusable flow-children="horizontal" style={{ display: 'flex', gap: '8px' }}>
