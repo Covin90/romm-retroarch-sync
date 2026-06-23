@@ -1983,6 +1983,7 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
       `}</style>
       <div style={{
         fontFamily: V2.font, color: V2.fg, width: '460px', maxWidth: '86vw', boxSizing: 'border-box',
+        alignSelf: 'center', margin: 'auto',
         padding: '18px', display: 'flex', flexDirection: 'column', gap: '12px',
         maxHeight: '80vh', overflowY: 'auto',
       }}>
