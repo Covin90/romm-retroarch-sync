@@ -12,22 +12,67 @@ The plugin has two components:
 - **Backend** — `main.py` + `py_modules/sync_core.py` (Python, runs inside Decky Loader)
 
 `py_modules/sync_core.py` is a **dev symlink** to `../../src/sync_core.py`. It is resolved to a
-real file during the build step. Never commit the resolved copy — the symlink is intentional.
+real file during packaging. Never commit the resolved copy — the symlink is intentional.
+`pnpm run package` builds the frontend and a `postpackage` hook **restores the symlink** afterward,
+so the working tree is always left clean.
 
 ---
 
-## Build & Package
+## Loose deploy (dev iteration loop)
 
-Run the following from the **repo root**:
+When the dev machine **is** the Steam/Decky machine, the fastest loop is to overwrite the
+installed plugin's files in place — no zip, no reinstall, no `sudo` (the install dir is
+user-writable). The plugin lives at:
+
+```
+~/homebrew/plugins/romm-sync-monitor/
+```
+
+After editing source, copy only what changed, then reload the plugin from the Decky QAM
+(or toggle it off/on):
 
 ```bash
-# Step 1: Build frontend
-cd decky_plugin && pnpm run build && cd ..
+cd /home/covin/romm-retroarch-sync
+DEST=~/homebrew/plugins/romm-sync-monitor
 
-# Step 2: Package into zip
+# Frontend change (src/index.tsx):
+(cd decky_plugin && pnpm run build) && cp decky_plugin/dist/index.js decky_plugin/dist/index.js.map "$DEST/dist/"
+
+# Backend change (main.py):
+cp decky_plugin/main.py "$DEST/main.py"
+
+# Shared sync logic (src/sync_core.py) — DEST has a real copy, not a symlink:
+cp src/sync_core.py "$DEST/py_modules/sync_core.py"
+```
+
+Notes:
+- A **full plugin reload** is required for `main.py` / `sync_core.py` changes (Python is only
+  imported at load). Frontend (`dist/index.js`) also needs a reload to re-evaluate.
+- Backend Python logs land in `~/homebrew/logs/romm-sync-monitor/<timestamp>.log`. Frontend
+  `console.*`/toasts do **not**; bridge them to the backend with a temporary `debug_log`
+  callable when diagnosing frontend issues.
+- Loose deploy is for iteration only — always cut a real zip (below) for releases/handoff.
+
+---
+
+## Build & Package (release zip)
+
+Run the following from the **repo root**. `pnpm run package` builds the frontend and restores
+the `py_modules/sync_core.py` symlink via its `postpackage` hook.
+
+```bash
+cd /home/covin/romm-retroarch-sync
+
+# Step 1: Build frontend (auto-restores the symlink afterward)
+(cd decky_plugin && pnpm run package)
+
+# Step 2: Package into the versioned zip.
+# VERSION is derived from decky_plugin/package.json (the single source of truth),
+# not hardcoded — bump it there and the zip name follows automatically.
+VERSION="$(node -p "require('./decky_plugin/package.json').version.split('.').slice(0,2).join('.')")"
 PLUGIN_NAME="romm-sync-monitor"
 PLUGIN_DIR="decky_plugin"
-OUT_ZIP="${PLUGIN_NAME}.zip"
+OUT_ZIP="RomM-RetroArch-Sync-v${VERSION}-decky.zip"
 TMP_DIR=$(mktemp -d)
 mkdir -p "${TMP_DIR}/${PLUGIN_NAME}/dist" "${TMP_DIR}/${PLUGIN_NAME}/assets" "${TMP_DIR}/${PLUGIN_NAME}/bin"
 cp "${PLUGIN_DIR}/plugin.json" "${PLUGIN_DIR}/package.json" "${PLUGIN_DIR}/LICENSE" "${PLUGIN_DIR}/main.py" "${TMP_DIR}/${PLUGIN_NAME}/"
@@ -35,33 +80,26 @@ cp "${PLUGIN_DIR}/dist/index.js" "${PLUGIN_DIR}/dist/index.js.map" "${TMP_DIR}/$
 cp -rL "${PLUGIN_DIR}/py_modules" "${TMP_DIR}/${PLUGIN_NAME}/"
 cp "${PLUGIN_DIR}"/assets/logo.png "${PLUGIN_DIR}"/assets/romm-isotipo.svg "${PLUGIN_DIR}"/assets/romm-logotipo.svg "${PLUGIN_DIR}"/assets/auth_background.svg "${PLUGIN_DIR}"/assets/romm-*.png "${TMP_DIR}/${PLUGIN_NAME}/assets/"
 cp "${PLUGIN_DIR}/bin/7zz" "${TMP_DIR}/${PLUGIN_NAME}/bin/" && chmod +x "${TMP_DIR}/${PLUGIN_NAME}/bin/7zz"
-(cd "$TMP_DIR" && zip -r "$OUT_ZIP" "${PLUGIN_NAME}/")
+(cd "$TMP_DIR" && zip -rq "$OUT_ZIP" "${PLUGIN_NAME}/")
 mv "$TMP_DIR/$OUT_ZIP" .
 rm -rf "$TMP_DIR"
+
+# Step 3 (optional): sanity-check a fix is actually in the bundled sync_core
+unzip -p "$OUT_ZIP" "${PLUGIN_NAME}/py_modules/sync_core.py" | grep -c "_host_subprocess_env"
 ```
 
-The output zip is at the **repo root**: `romm-sync-monitor.zip` (~8 MB with bundled libs).
+The output zip is at the **repo root**: `RomM-RetroArch-Sync-v<VERSION>-decky.zip` (~11 MB with
+bundled libs), where `<VERSION>` comes from `decky_plugin/package.json`. To release a new
+version, bump `"version"` in that file — the zip name (and this whole flow) follows. The name
+matches the AppImage pattern `RomM-RetroArch-Sync-v<VERSION>.AppImage`.
 
 **Why `cp -rL`?** `py_modules/sync_core.py` and `py_modules/bios_manager.py` are symlinks in
 the dev tree. The `-L` flag dereferences all symlinks so real file content goes into the zip.
 Without it, the zip contains broken symlinks and the plugin fails to load.
 
-### Release Naming Convention
-
-For GitHub releases, rename the ZIP to follow the project's naming convention:
-
-```
-RomM-RetroArch-Sync-v<VERSION>-decky.zip
-```
-
-Example: `RomM-RetroArch-Sync-v1.5-decky.zip`
-
-After building, rename with:
-```bash
-mv romm-sync-monitor.zip RomM-RetroArch-Sync-v1.5-decky.zip
-```
-
-This matches the AppImage naming pattern: `RomM-RetroArch-Sync-v<VERSION>.AppImage`
+**Why `pnpm run package` and not `pnpm run build`?** `package` runs the build then a
+`postpackage` hook that re-creates the `py_modules/sync_core.py` symlink, so the working tree
+isn't left with a resolved copy. (Plain `build` also works but won't touch the symlink.)
 
 ---
 
@@ -130,7 +168,7 @@ romm-sync-monitor/
 
 ## Installation on SteamOS
 
-1. Transfer the ZIP file (e.g., `RomM-RetroArch-Sync-v1.5-decky.zip`) to the SteamOS device
+1. Transfer the ZIP file (e.g., `RomM-RetroArch-Sync-v1.6-decky.zip`) to the SteamOS device
 2. In Decky Loader: **gear icon → "Install plugin from ZIP"**
 3. Select the zip file
 
@@ -141,10 +179,10 @@ Do **not** restart Decky Loader after installation — use the Decky QAM reload 
 If `sshpass` is installed and the Deck is reachable, you can send the zip directly:
 
 ```bash
-sshpass -p "<password>" scp RomM-RetroArch-Sync-v1.5-decky.zip deck@<deck-ip>:~/
+sshpass -p "<password>" scp RomM-RetroArch-Sync-v1.6-decky.zip deck@<deck-ip>:~/
 ```
 
-Then install from `~/RomM-RetroArch-Sync-v1.5-decky.zip` on the Deck via Decky Loader.
+Then install from `~/RomM-RetroArch-Sync-v1.6-decky.zip` on the Deck via Decky Loader.
 
 ---
 
