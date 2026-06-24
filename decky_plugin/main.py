@@ -1004,6 +1004,15 @@ class Plugin:
             ds = load_decky_settings()
             needs_onboarding = ds.get('needs_onboarding', False)
 
+            # Self-heal: once we have working credentials (password auth or a
+            # paired token), onboarding is complete. Clear a stale flag so the
+            # setup wizard can never trap the user on the "Get Started" panel.
+            has_creds = bool(url and ((username and has_password) or has_token))
+            if has_creds and needs_onboarding:
+                ds.pop('needs_onboarding', None)
+                save_decky_settings(ds)
+                needs_onboarding = False
+
             return {
                 'url':                url,
                 'username':           username,

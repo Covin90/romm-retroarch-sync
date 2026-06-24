@@ -4002,6 +4002,56 @@ function TitleView() {
 // Full-screen guided first-run flow (RomM v2 visual language): Welcome →
 // Connect (login or pair code, with Test) → Folders → Finish. Auto-opened on
 // startup when no connection is configured; also reachable from the QAM.
+
+// RomSwitch — React port of RomM's frontend/src/v2/lib/forms/RSwitch/RSwitch.vue.
+// An iOS-style 36×20px track with a 14px knob that slides on toggle, with the
+// brand-purple background, inner sheen, outer glow, spring easing and active
+// press squash that define the RomM v2 toggle's feel.
+function RomSwitch({ checked, onChange, disabled, label, description }:
+  { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean; label?: string; description?: string }) {
+  const row = (inner: any) => (
+    <div
+      onClick={() => { if (!disabled) onChange(!checked); }}
+      style={{
+        display: 'flex', alignItems: 'center', gap: '14px', width: '100%',
+        padding: '12px 14px', borderRadius: V2.radiusMd, cursor: disabled ? 'not-allowed' : 'pointer',
+        background: 'rgba(255,255,255,0.045)', border: `1px solid ${V2.border}`,
+        opacity: disabled ? 0.55 : 1, transition: 'background 0.2s, border-color 0.2s',
+      }}
+    >
+      <div className={`r-switch${checked ? ' r-switch--on' : ''}${disabled ? ' r-switch--disabled' : ''}`} style={{ display: 'inline-flex', alignItems: 'center', background: 'transparent', border: 'none', padding: 0 }}>
+        <span className="r-switch__track" style={{ position: 'relative', flexShrink: 0, borderRadius: '999px', background: checked ? V2.brand : V2.borderStrong, overflow: 'hidden', width: '36px', height: '20px', transition: 'background 260ms cubic-bezier(0.45,0.05,0.55,0.95), box-shadow 260ms cubic-bezier(0.45,0.05,0.55,0.95)' }}>
+          <span className="r-switch__knob" style={{ position: 'absolute', top: '3px', left: '3px', borderRadius: '50%', background: checked ? '#111117' : V2.fg, width: '14px', height: '14px', transform: checked ? 'translateX(16px) scaleX(1)' : 'translateX(0) scaleX(1)', transformOrigin: checked ? 'right center' : 'left center', transition: 'transform 340ms cubic-bezier(0.34,1.56,0.64,1), background 200ms cubic-bezier(0.22,1,0.36,1)', boxShadow: '0 1px 2px rgba(0,0,0,0.22)' }} />
+        </span>
+      </div>
+      {(label || description) && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', flex: '1 1 auto', minWidth: 0 }}>
+          {label && <span style={{ fontSize: '14px', fontWeight: 500, color: V2.fg }}>{label}</span>}
+          {description && <span style={{ fontSize: '12px', color: V2.fgMuted, lineHeight: 1.45 }}>{description}</span>}
+        </div>
+      )}
+      {inner}
+    </div>
+  );
+  // The scoped <style> block carries the box-shadow sheen/glow + hover halo +
+  // active-press squash that can't be expressed as inline styles.
+  return (
+    <>
+      <style>{`
+        .r-switch--on .r-switch__track{box-shadow:inset 0 1px 0 rgba(255,255,255,0.18),0 0 12px rgba(139,116,232,0.38)}
+        .r-switch:not(.r-switch--disabled){cursor:pointer}
+        .r-switch--disabled{cursor:not-allowed;opacity:0.55}
+        .r-switch > div:hover .r-switch__knob,.r-switch:hover:not(.r-switch--disabled) .r-switch__knob{box-shadow:0 2px 4px rgba(0,0,0,0.28),0 0 0 5px rgba(255,255,255,0.10)}
+        .r-switch--on:hover .r-switch__knob,.r-switch--on:hover:not(.r-switch--disabled) .r-switch__knob{box-shadow:0 2px 4px rgba(0,0,0,0.28),0 0 0 5px rgba(139,116,232,0.22)}
+        .r-switch:active:not(.r-switch--disabled) .r-switch__knob{transform:translateX(0) scaleX(1.35);transition:transform 110ms cubic-bezier(0.22,1,0.36,1)}
+        .r-switch--on:active:not(.r-switch--disabled) .r-switch__knob{transform:translateX(16px) scaleX(1.35);transition:transform 110ms cubic-bezier(0.22,1,0.36,1)}
+        @media(prefers-reduced-motion:reduce){.r-switch__track,.r-switch__knob{transition:none!important}.r-switch:active .r-switch__knob{transform:translateX(0) scaleX(1)!important}.r-switch--on:active .r-switch__knob{transform:translateX(16px) scaleX(1)!important}}
+      `}</style>
+      {row(null)}
+    </>
+  );
+}
+
 function SetupWizard() {
   const [step, setStep] = useState(0);
   const [mode, setMode] = useState<'login' | 'pair'>('pair');
@@ -4019,6 +4069,7 @@ function SetupWizard() {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [addSteamTile, setAddSteamTile] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -4028,12 +4079,19 @@ function SetupWizard() {
         setRomDir(c.rom_directory || ''); setSaveDir(c.save_directory || ''); setBiosDir(c.bios_directory || '');
         setDeviceName(c.device_name || ''); setDeviceNameDefault(c.device_name_default || 'SteamOS');
         setHasPassword(c.has_password || false);
+        // Pre-check the Steam library tile if it was already added in a prior session.
+        try { setAddSteamTile((await findRommShortcut()) != null); } catch { /* ignore */ }
       } catch { /* ignore */ }
       try { const l = await getRommLogo(); setLogo(l?.data_uri || null); } catch { /* ignore */ }
     })();
   }, []);
 
-  const finish = () => { Navigation.Navigate("/romm-sync-library"); Navigation.CloseSideMenus(); };
+  const finish = () => {
+    // Pop the full-screen wizard route off the history stack first, otherwise
+    // pressing Back from the library lands the user right back in the wizard.
+    try { Navigation.NavigateBack(); } catch { /* ignore */ }
+    setTimeout(() => { Navigation.Navigate("/romm-sync-library"); Navigation.CloseSideMenus(); }, 60);
+  };
 
   const doTest = async () => {
     setTesting(true); setTestResult(null);
@@ -4045,6 +4103,13 @@ function SetupWizard() {
   const doFinish = async () => {
     setBusy(true);
     try {
+      // Add or remove the "RomM" Steam library tile before navigating away.
+      try {
+        const exists = (await findRommShortcut()) != null;
+        if (addSteamTile && !exists) await addRommShortcut();
+        else if (!addSteamTile && exists) await removeRommShortcut();
+      } catch (e) { console.error('[RomM] wizard steam tile', e); }
+
       if (mode === 'pair') {
         const r = await pairDevice(url.trim(), pairCode.trim());
         if (r?.success) { toaster.toast({ title: 'RomM Sync', body: 'Paired — connecting…' }); finish(); }
@@ -4201,6 +4266,14 @@ function SetupWizard() {
               {mode === 'pair'
                 ? 'We\'ll pair this device with your RomM server and open your library.'
                 : 'We\'ll save your connection and open your library.'}
+            </div>
+            <div style={{ width: '100%', maxWidth: '380px', marginTop: '4px' }}>
+              <RomSwitch
+                label="Add “RomM” to Steam library"
+                description="Adds a library tile that opens the RomM game browser when launched."
+                checked={addSteamTile}
+                onChange={setAddSteamTile}
+              />
             </div>
             {footer(
               <GameActionButton variant="emphasized" disabled={busy}
