@@ -14,7 +14,7 @@ import {
 } from "@decky/ui";
 import { callable, definePlugin, toaster, routerHook, openFilePicker, FileSelectionType } from "@decky/api";
 import { useState, useEffect, useRef, ChangeEvent } from "react";
-import { FaSync, FaTrash, FaCog, FaSteam, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight } from "react-icons/fa";
+import { FaSync, FaTrash, FaCog, FaSteam, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight, FaCheckCircle, FaUsers, FaExternalLinkAlt, FaPuzzlePiece, FaBoxOpen, FaClone, FaRedo, FaClock } from "react-icons/fa";
 import { BsGearFill } from "react-icons/bs";
 
 // Call backend methods
@@ -44,6 +44,37 @@ const downloadGame = callable<[number], any>("download_game");
 const deleteGame = callable<[number], any>("delete_game");
 const launchGame = callable<[number], any>("launch_game");
 const getHomeData = callable<[], any>("get_home_data");
+const getPluginLogo = callable<[], any>("get_plugin_logo");
+const getRommLogo = callable<[], any>("get_romm_logo");
+
+// Shared image-fetch queue. The home page mounts dozens of tiles at once, each
+// of which needs a base64 cover / screenshot / platform-icon over RPC. Firing
+// them all in parallel slams the backend (it serves one image at a time) and
+// stalls the whole grid. Instead we funnel every image RPC through a small
+// concurrency-limited queue so tiles fill in progressively, FIFO (≈ left to
+// right / top to bottom) — the same one-at-a-time backbone the Save Data page
+// uses for its state screenshots.
+function makeImageQueue(concurrency: number) {
+  let active = 0;
+  const pending: Array<() => void> = [];
+  const pump = () => {
+    while (active < concurrency && pending.length) {
+      active++;
+      pending.shift()!();
+    }
+  };
+  return function enqueue<T>(job: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      pending.push(() => {
+        job().then(resolve, reject).finally(() => { active--; pump(); });
+      });
+      pump();
+    });
+  };
+}
+const imageQueue = makeImageQueue(3);
+const qGetImage = (path: string) => imageQueue(() => getImage(path));
+const qGetGameCover = (romId: number, large: boolean) => imageQueue(() => getGameCover(romId, large));
 
 // ---------------------------------------------------------------------------
 // RomM v2 visual language (from rommapp/romm frontend/src/v2/styles/tokens.css).
@@ -59,6 +90,8 @@ const V2 = {
   fg: '#ffffff',
   fg2: 'rgba(255,255,255,0.75)',
   fgMuted: 'rgba(255,255,255,0.45)',
+  fgFaint: 'rgba(255,255,255,0.25)',
+  bgElevated: 'rgba(255,255,255,0.045)',
   brand: '#8b74e8',
   brandHover: '#a18fff',
   brandPressed: '#6043c8',
@@ -69,6 +102,7 @@ const V2 = {
   ra: '#ef4444',
   coverPlaceholder: '#1a1a2e',
   radiusArt: '8px',
+  radiusSm: '4px',
   radiusMd: '8px',
   radiusChip: '6px',
   radiusLg: '10px',
@@ -97,7 +131,7 @@ interface LibGroup {
   kind?: 'favorite' | 'smart' | 'virtual' | 'collection'; covers?: string[];
   slug?: string | null; fs_slug?: string | null;
 }
-interface LibGame { rom_id: number; name: string; platform: string | null; is_downloaded: boolean; has_cover: boolean; }
+interface LibGame { rom_id: number; name: string; platform: string | null; is_downloaded: boolean; has_cover: boolean; screenshot?: string | null; platform_slug?: string | null; }
 
 function fmtBytes(n: number | null | undefined): string {
   if (!n || isNaN(n as any)) return '';
@@ -109,13 +143,14 @@ function fmtBytes(n: number | null | undefined): string {
   return `${v.toFixed(1)} TB`;
 }
 
-function fmtReleaseYear(ts: number | null | undefined): string {
+// Full release date "02 Jan 2024" — RomM GameHeader meta uses the localized
+// day/short-month/year form rather than just the year.
+function fmtReleaseDate(ts: number | null | undefined): string {
   if (!ts) return '';
   try {
-    // RomM stores first_release_date as a unix timestamp (seconds).
     const d = new Date(Number(ts) * 1000);
     if (isNaN(d.getTime())) return '';
-    return String(d.getUTCFullYear());
+    return d.toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC' });
   } catch { return ''; }
 }
 
@@ -168,7 +203,7 @@ function GameCover({ romId, hasCover, large = false, radius = V2.radiusArt, onLo
     if (!hasCover) { setDone(true); onLoaded?.(null); return; }
     (async () => {
       try {
-        const r = await getGameCover(romId, large);
+        const r = await qGetGameCover(romId, large);
         if (alive) { setUri(r?.data_uri || null); onLoaded?.(r?.data_uri || null); }
       }
       catch { /* ignore */ }
@@ -191,12 +226,76 @@ function GameCover({ romId, hasCover, large = false, radius = V2.radiusArt, onLo
   );
 }
 
+// Landscape screenshot art (RomM continue-playing cover override). Fetches the
+// screenshot path as base64 via get_image, fills the art box object-fit:cover.
+// `onLoaded` bubbles the URI so the card can feed it to the background art.
+function ScreenshotArt({ path, onLoaded, onRatio }:
+  { path: string; onLoaded?: (uri: string | null) => void; onRatio?: (ratio: number) => void }) {
+  const [uri, setUri] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try { const r = await qGetImage(path); if (alive) { setUri(r?.data_uri || null); onLoaded?.(r?.data_uri || null); } }
+      catch { /* ignore */ }
+    })();
+    return () => { alive = false; };
+  }, [path]);
+  return (
+    <div style={{
+      position: 'absolute', inset: 0, background: V2.coverPlaceholder,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }}>
+      {uri && <img src={uri}
+        onLoad={(e: any) => {
+          const w = e.target?.naturalWidth, h = e.target?.naturalHeight;
+          if (w && h) onRatio?.(w / h);
+        }}
+        style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />}
+    </div>
+  );
+}
+
+// Cover-art PIP — a small 2D box-art thumbnail floated bottom-right while a
+// screenshot covers the rom's own art, so the game stays identifiable (RomM
+// CoverArtPip). Fades out on focus so it never collides with the action row.
+function CoverPip({ romId, hasCover, hidden }:
+  { romId: number; hasCover: boolean; hidden: boolean }) {
+  const [uri, setUri] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    if (!hasCover) return;
+    (async () => {
+      try { const r = await qGetGameCover(romId, false); if (alive) setUri(r?.data_uri || null); }
+      catch { /* ignore */ }
+    })();
+    return () => { alive = false; };
+  }, [romId]);
+  if (!uri) return null;
+  return (
+    <div style={{
+      position: 'absolute', right: '6px', bottom: '6px', width: '46px',
+      aspectRatio: '3 / 4', zIndex: 2, borderRadius: V2.radiusSm, overflow: 'hidden',
+      border: '1.5px solid rgba(255,255,255,0.12)',
+      boxShadow: '0 2px 8px rgba(0,0,0,0.45)', pointerEvents: 'none',
+      opacity: hidden ? 0 : 1, transition: 'opacity 0.12s ease',
+    }}>
+      <img src={uri} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+    </div>
+  );
+}
+
 // A single library grid card: art-only with a centered, single-line label
 // underneath (RomM's GameCard language). Focus/hover scales the art and paints
 // the brand glow; activating it opens the game; gaining focus feeds the cover
-// to the page's background art.
+// to the page's background art. When `game.screenshot` is set (continue-playing
+// rail), the art is a landscape screenshot with the box-art floated as a PIP,
+// matching RomM's Home — otherwise it's the portrait cover.
 function GameTile({ game, onOpen, onActiveCover }:
   { game: LibGame; onOpen: (g: LibGame) => void; onActiveCover: (uri: string | null) => void }) {
+  const wide = !!game.screenshot;
+  // Wide cards adopt the screenshot's NATURAL aspect ratio (RomM derives the
+  // card width from the cover's true shape at a fixed height); 16:9 until loaded.
+  const [shotRatio, setShotRatio] = useState(16 / 9);
   const uriRef = useRef<string | null>(null);
   const [focused, setFocused] = useState(false);
   const [dl, setDl] = useState(!!game.is_downloaded);
@@ -254,6 +353,9 @@ function GameTile({ game, onOpen, onActiveCover }:
     >
       <div style={{
         position: 'relative', overflow: 'hidden',
+        // Wide (continue-playing) cards are a fixed-height 16:9 screenshot with
+        // natural width; portrait cards keep the cover's 3:4 footprint.
+        ...(wide ? { height: '176px', aspectRatio: String(shotRatio) } : {}),
         transform: focused ? 'scale(1.04)' : 'scale(1)',
         transition: 'transform 0.18s ease',
         borderRadius: V2.radiusArt,
@@ -261,11 +363,38 @@ function GameTile({ game, onOpen, onActiveCover }:
           ? `0 8px 28px rgba(0,0,0,0.4), 0 0 0 2px ${V2.brand}, 0 0 18px rgba(139,116,232,0.6)`
           : 'none',
       }}>
-        <GameCover romId={game.rom_id} hasCover={game.has_cover}
-          onLoaded={(u) => { uriRef.current = u; }} />
+        {wide ? (
+          <>
+            <ScreenshotArt path={game.screenshot!} onLoaded={(u) => { uriRef.current = u; }} onRatio={setShotRatio} />
+            <CoverPip romId={game.rom_id} hasCover={game.has_cover} hidden={focused} />
+          </>
+        ) : (
+          <GameCover romId={game.rom_id} hasCover={game.has_cover}
+            onLoaded={(u) => { uriRef.current = u; }} />
+        )}
+        {/* Platform icon badge — top-right circular scrim with the real RomM
+            platform icon (RomM GameCard .r-gc__platform-icon: 7px inset, 3px
+            pad, 78% black scrim, 12%-white border, always visible). */}
+        {game.platform_slug && (
+          <div style={{
+            position: 'absolute', top: '7px', right: '7px', zIndex: 2,
+            padding: '3px', borderRadius: '50%',
+            background: 'rgba(0,0,0,0.78)', border: '1px solid rgba(255,255,255,0.12)',
+            lineHeight: 0,
+          }}>
+            <div style={{
+              width: '22px', height: '22px', display: 'flex',
+              alignItems: 'center', justifyContent: 'center', color: V2.fg,
+            }}>
+              <PlatformIcon slug={game.platform_slug} size={22} />
+            </div>
+          </div>
+        )}
+        {/* Downloaded status dot — top-left corner, opposite the platform
+            icon so the two affordances don't collide. */}
         {dl && (
           <div style={{
-            position: 'absolute', top: '6px', right: '6px',
+            position: 'absolute', top: '7px', left: '7px', zIndex: 2,
             width: '10px', height: '10px', borderRadius: '50%',
             background: V2.success, boxShadow: '0 0 0 2px rgba(0,0,0,0.45)',
           }} />
@@ -311,6 +440,9 @@ function GameTile({ game, onOpen, onActiveCover }:
         fontSize: '11.5px', color: focused ? V2.fg : V2.fg2, textAlign: 'center',
         whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
         transition: 'color 0.18s', padding: '0 1px',
+        // Wide cards have no fixed-width parent — pin the label to the art's
+        // width so a long name ellipsises instead of widening the card.
+        ...(wide ? { width: 0, minWidth: '100%', maxWidth: '100%' } : {}),
       }}>
         {game.name}
       </div>
@@ -325,7 +457,7 @@ function PathImage({ path }: { path: string }) {
   useEffect(() => {
     let alive = true;
     (async () => {
-      try { const r = await getImage(path); if (alive) setUri(r?.data_uri || null); }
+      try { const r = await qGetImage(path); if (alive) setUri(r?.data_uri || null); }
       catch { /* ignore */ }
     })();
     return () => { alive = false; };
@@ -422,7 +554,7 @@ function PlatformIcon({ slug, fsSlug, size }: { slug?: string | null; fsSlug?: s
     (async () => {
       for (const c of cands) {
         try {
-          const r = await getImage(c);
+          const r = await qGetImage(c);
           if (!alive) return;
           if (r?.data_uri) { setUri(r.data_uri); return; }
         } catch { /* try next */ }
@@ -656,6 +788,353 @@ function V2Button({ children, onClick, variant = 'tonal', color, disabled }:
     >
       {children}
     </Focusable>
+  );
+}
+
+// GameActionButton — RomM's GameActionBtn vocabulary (the action ribbon in the
+// GameDetails header), distinct from V2Button's RBtn rounded-rect. Two shapes:
+//   • emphasized + label → white pill CTA (#fff / #111117), used by Play / the
+//     primary Download (overlay-emphasis tokens).
+//   • surface, icon-only  → circular translucent-grey glass button matching the
+//     page background (RTag tokens); used for Delete / secondary actions.
+// `danger` is a filled-danger pill for the delete-confirm step. Pill radius
+// throughout; controller focus paints a brand ring + slight scale.
+function GameActionButton({ icon, label, onClick, variant = 'surface', accent, disabled }:
+  { icon: any; label?: string; onClick: () => void;
+    variant?: 'emphasized' | 'surface' | 'danger'; accent?: 'danger'; disabled?: boolean }) {
+  const [active, setActive] = useState(false);
+  const labelled = !!label;
+  const base: any = {
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
+    height: '44px', borderRadius: V2.radiusPill, fontSize: '14px', fontWeight: 600,
+    whiteSpace: 'nowrap', border: '1px solid transparent',
+    cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.5 : 1,
+    ...(labelled ? { padding: '0 24px' } : { width: '44px' }),
+    transition: 'background 0.15s, color 0.15s, transform 0.15s, box-shadow 0.15s, border-color 0.15s',
+  };
+  // Danger-accented surface (Delete): red icon + red-tinted surface/border that
+  // intensifies on focus, so it reads as destructive without being a filled CTA.
+  const dangerSurface = accent === 'danger';
+  const tone =
+    variant === 'emphasized'
+      ? { background: active ? '#e6e6e6' : '#ffffff', color: '#111117', borderColor: '#ffffff' }
+    : variant === 'danger'
+      ? { background: V2.danger, color: '#fff', borderColor: V2.danger }
+    : dangerSurface
+      ? { background: active ? 'rgba(255,80,80,0.18)' : 'rgba(255,80,80,0.10)',
+          color: V2.danger, borderColor: active ? V2.danger : 'rgba(255,80,80,0.40)' }
+    : { background: active ? V2.surfaceHover : V2.surface,
+        color: active ? V2.fg : V2.fg2, borderColor: V2.borderStrong };
+  const ring = dangerSurface ? V2.danger : V2.brand;
+  const glow = active && !disabled ? { boxShadow: `0 0 0 2px ${ring}` } : {};
+  return (
+    <Focusable noFocusRing
+      onActivate={() => !disabled && onClick()}
+      onClick={() => !disabled && onClick()}
+      onFocus={() => setActive(true)} onBlur={() => setActive(false)}
+      onMouseEnter={() => setActive(true)} onMouseLeave={() => setActive(false)}
+      style={{ ...base, ...tone, ...glow }}
+    >
+      {icon}
+      {label && <span>{label}</span>}
+    </Focusable>
+  );
+}
+
+// ── GameDetails sub-components (faithful to RomM's OverviewTab / MetadataTab) ──
+
+// Uppercase eyebrow heading for an overview section (RomM
+// .overview-tab__section-heading).
+function SectionHeading({ icon, children }: { icon?: any; children: any }) {
+  return (
+    <div style={{
+      display: 'inline-flex', alignItems: 'center', gap: '6px', margin: 0,
+      fontSize: '11px', fontWeight: 700, letterSpacing: '0.1em',
+      textTransform: 'uppercase', color: V2.fgFaint,
+    }}>
+      {icon}{children}
+    </div>
+  );
+}
+
+// PlayerCountBadge — pill with a player icon whose glyph scales with the
+// max player count parsed from the free-form string (RomM PlayerCountBadge).
+function PlayerCountBadge({ value }: { value: string }) {
+  const nums = (value.match(/\d+/g) || []).map(Number);
+  const n = nums.length ? Math.max(...nums) : null;
+  const label = n === 1 ? 'Single player' : (n && n > 1) ? `${value} players` : value;
+  return (
+    <div style={{
+      display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '5px 12px 5px 10px',
+      background: V2.surface, border: `1px solid ${V2.borderStrong}`, borderRadius: V2.radiusPill,
+      fontSize: '12px', color: V2.fg2,
+    }}>
+      <FaUsers size={14} color={V2.brand} />
+      <span style={{ fontWeight: 600, letterSpacing: '0.01em' }}>{label}</span>
+    </div>
+  );
+}
+
+// AgeRatingBadges — 44px icon badges from the IGDB rating-icon CDN (loaded
+// directly), falling back to a shield text chip when the icon 404s (RomM
+// AgeRatingBadges).
+function AgeRatingBadge({ item }: { item: { category: string; rating: string; icon_url: string | null } }) {
+  const [failed, setFailed] = useState(false);
+  const label = item.category ? `${item.category}: ${item.rating}` : item.rating;
+  if (item.icon_url && !failed) {
+    return <img src={item.icon_url} alt={label} title={label} loading="lazy"
+      onError={() => setFailed(true)}
+      style={{ width: '44px', height: '44px', objectFit: 'contain', borderRadius: V2.radiusSm,
+        background: V2.surface, padding: '3px', border: `1px solid ${V2.border}` }} />;
+  }
+  return (
+    <span title={label} style={{
+      display: 'inline-flex', alignItems: 'center', gap: '5px', padding: '4px 10px',
+      background: V2.surface, border: `1px solid ${V2.borderStrong}`, borderRadius: V2.radiusChip,
+      fontSize: '11.5px', fontWeight: 600, color: V2.fg2, letterSpacing: '0.02em',
+    }}>🛡 {label}</span>
+  );
+}
+function AgeRatingBadges({ items }: { items: any[] }) {
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', alignItems: 'center' }}>
+      {items.map((b, i) => <AgeRatingBadge key={i} item={b} />)}
+    </div>
+  );
+}
+
+// HLTBStrip — up to four columns (main story / +extra / completionist / all
+// styles). Durations are seconds → hours rounded to 0.5h (RomM HLTBStrip).
+function HLTBStrip({ hltb }: { hltb: any }) {
+  const fmtHours = (secs?: number | null): string | null => {
+    if (!secs || secs <= 0) return null;
+    const hours = secs / 3600;
+    if (hours < 1) { const m = Math.round(secs / 60); return m > 0 ? `${m}m` : null; }
+    return `${Math.round(hours * 2) / 2}h`;
+  };
+  const candidates: [string, number | undefined, number | undefined][] = [
+    ['Main Story', hltb?.main_story, hltb?.main_story_count],
+    ['Main + Extra', hltb?.main_plus_extra, hltb?.main_plus_extra_count],
+    ['Completionist', hltb?.completionist, hltb?.completionist_count],
+    ['All Styles', hltb?.all_styles, hltb?.all_styles_count],
+  ];
+  const entries = candidates
+    .map(([label, v, c]) => ({ label, value: fmtHours(v), count: c }))
+    .filter((e) => e.value);
+  if (!entries.length) return null;
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'stretch', background: V2.bgElevated,
+      border: `1px solid ${V2.border}`, borderRadius: V2.radiusLg, padding: '14px 0', maxWidth: '720px',
+    }}>
+      {entries.map((e, i) => (
+        <div key={e.label} style={{
+          flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px',
+          padding: '0 12px', borderRight: i < entries.length - 1 ? `1px solid ${V2.border}` : 'none',
+        }}>
+          <div style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: V2.fgFaint, textAlign: 'center' }}>{e.label}</div>
+          <div style={{ fontSize: '20px', fontWeight: 700, color: V2.fg }}>{e.value}</div>
+          {e.count ? <div style={{ fontSize: '10px', color: V2.fgFaint }}>{e.count.toLocaleString()} players</div> : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// InfoGrid — two-column section grid; each section is icon + uppercase label
+// over a row of chips (RomM InfoGrid).
+function InfoGrid({ sections }: { sections: { label: string; items: string[]; icon?: any }[] }) {
+  const visible = sections.filter((s) => s.items.length > 0);
+  if (!visible.length) return null;
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, auto))', gap: '18px 24px', width: '100%' }}>
+      {visible.map((s) => (
+        <div key={s.label}>
+          <div style={{
+            display: 'inline-flex', alignItems: 'center', gap: '6px', marginBottom: '8px',
+            fontSize: '10.5px', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: V2.fgFaint,
+          }}>
+            {s.icon && <span style={{ color: V2.brand, display: 'inline-flex' }}>{s.icon}</span>}
+            <span>{s.label}</span>
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+            {s.items.map((it, i) => (
+              <span key={i} style={{
+                background: V2.surface, border: `1px solid ${V2.borderStrong}`, borderRadius: V2.radiusChip,
+                padding: '4px 10px', fontSize: '11.5px', fontWeight: 500, color: V2.fg2,
+              }}>{it}</span>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// RelatedGameCard — static cover tile using IGDB's external cover URL (loads
+// directly, no auth). Cover + truncated label, focus lift (RomM RelatedGameCard
+// in GameCard static mode). Non-navigating (synthetic).
+function RelatedGameCard({ game }: { game: { id: number; name: string; cover_url?: string | null } }) {
+  const [focused, setFocused] = useState(false);
+  // IGDB thumb URLs are tiny (t_thumb); request the bigger cover art variant.
+  const cover = game.cover_url ? game.cover_url.replace('/t_thumb/', '/t_cover_big/') : null;
+  return (
+    <Focusable noFocusRing
+      onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+      onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
+      style={{ width: '110px', flexShrink: 0, display: 'flex', flexDirection: 'column', gap: '6px', cursor: 'default' }}
+    >
+      <div style={{
+        width: '100%', aspectRatio: '3 / 4', borderRadius: V2.radiusArt, overflow: 'hidden',
+        background: V2.coverPlaceholder, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        transform: focused ? 'scale(1.05)' : 'scale(1)', transition: 'transform 0.18s ease, box-shadow 0.18s ease',
+        boxShadow: focused ? `0 8px 24px rgba(0,0,0,0.4), 0 0 0 2px ${V2.brand}` : 'none',
+      }}>
+        {cover
+          ? <img src={cover} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+          : <span style={{ color: V2.fgMuted, fontSize: '10px', padding: '0 6px', textAlign: 'center' }}>{game.name}</span>}
+      </div>
+      <div style={{
+        fontSize: '11px', color: focused ? V2.fg : V2.fg2, textAlign: 'center',
+        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+      }}>{game.name}</div>
+    </Focusable>
+  );
+}
+
+// One related-games section: eyebrow heading + flex-wrap row of cards.
+function RelatedSection({ icon, title, items }: { icon: any; title: string; items: any[] }) {
+  if (!items?.length) return null;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+      <SectionHeading icon={icon}>{title}</SectionHeading>
+      <Focusable noFocusRing flow-children="horizontal" style={{ display: 'flex', flexWrap: 'wrap', gap: '14px 16px', padding: '6px 6px 4px' }}>
+        {items.map((g) => <RelatedGameCard key={g.id ?? g.name} game={g} />)}
+      </Focusable>
+    </div>
+  );
+}
+
+// Metadata-provider registry (RomM providers.ts): id field · brand colour ·
+// logo asset · external URL builder.
+const PROVIDERS: { key: string; name: string; color: string; logo: string; url: ((id: any) => string) | null }[] = [
+  { key: 'igdb_id', name: 'IGDB', color: '#6366f1', logo: '/assets/scrappers/igdb.png', url: (id) => `https://www.igdb.com/search?type=1&q=${id}` },
+  { key: 'moby_id', name: 'MobyGames', color: '#f59e0b', logo: '/assets/scrappers/moby.png', url: (id) => `https://www.mobygames.com/game/${id}/` },
+  { key: 'ss_id', name: 'ScreenScraper', color: '#3b82f6', logo: '/assets/scrappers/ss.png', url: (id) => `https://www.screenscraper.fr/gameinfos.php?gameid=${id}` },
+  { key: 'ra_id', name: 'RetroAchievements', color: '#ef4444', logo: '/assets/scrappers/ra.png', url: (id) => `https://retroachievements.org/game/${id}` },
+  { key: 'sgdb_id', name: 'SteamGridDB', color: '#0ea5e9', logo: '/assets/scrappers/sgdb.png', url: (id) => `https://www.steamgriddb.com/game/${id}` },
+  { key: 'launchbox_id', name: 'LaunchBox', color: '#8b5cf6', logo: '/assets/scrappers/launchbox.png', url: (id) => `https://gamesdb.launchbox-app.com/games/dbid/${id}` },
+  { key: 'hasheous_id', name: 'Hasheous', color: '#6b7280', logo: '/assets/scrappers/hasheous.png', url: null },
+  { key: 'flashpoint_id', name: 'Flashpoint Archive', color: '#f97316', logo: '/assets/scrappers/flashpoint.png', url: null },
+  { key: 'hltb_id', name: 'HowLongToBeat', color: '#22c55e', logo: '/assets/scrappers/hltb.png', url: (id) => `https://howlongtobeat.com/game/${id}` },
+];
+
+// ProviderCard — logo + name + linked id (or "Not linked"); clickable when a
+// URL resolves. Logo is base64'd via get_image (RomM-served asset).
+function ProviderCard({ p, id }: { p: typeof PROVIDERS[number]; id: any }) {
+  const [focused, setFocused] = useState(false);
+  const logo = useRommImage(p.logo);
+  const linked = id !== null && id !== undefined && id !== '' && id !== 0;
+  const href = linked && p.url ? p.url(id) : null;
+  const open = () => { if (href) try { Navigation?.NavigateToExternalWeb?.(href); } catch { /* ignore */ } };
+  return (
+    <Focusable noFocusRing
+      onActivate={open} onClick={open}
+      onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+      onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
+      style={{
+        display: 'flex', flexDirection: 'column', gap: '6px', padding: '12px 14px',
+        background: V2.bgElevated, borderRadius: V2.radiusMd, color: V2.fg,
+        border: `1px solid ${focused && href ? p.color : V2.border}`,
+        opacity: linked ? 1 : 0.55, cursor: href ? 'pointer' : 'default',
+        transform: focused && href ? 'translateY(-1px)' : 'none',
+        transition: 'background 0.15s, border-color 0.15s, transform 0.15s',
+      }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+        {logo && <img src={logo} alt={p.name} style={{ width: '16px', height: '16px', objectFit: 'contain', borderRadius: '2px' }} />}
+        <span style={{ flex: 1, fontSize: '12.5px', fontWeight: 600, color: V2.fg }}>{p.name}</span>
+        {href && <FaExternalLinkAlt size={11} color={V2.fgMuted} />}
+      </div>
+      <div style={{ fontSize: '11.5px', color: V2.fg2, fontVariantNumeric: 'tabular-nums' }}>
+        {linked ? String(id) : <span style={{ fontStyle: 'italic', color: V2.fgFaint }}>Not linked</span>}
+      </div>
+    </Focusable>
+  );
+}
+
+// MetadataTab — file info · hashes (click-to-copy) · verification tags ·
+// provider grid (RomM MetadataTab).
+function MetadataTab({ detail }: { detail: any }) {
+  const providers = detail?.providers || {};
+  const ordered = [...PROVIDERS].sort((a, b) => {
+    const av = providers[a.key] ? 1 : 0, bv = providers[b.key] ? 1 : 0;
+    return bv - av;
+  });
+  const hashes = detail?.hashes || {};
+  const hashRows: [string, string | null][] = [
+    ['CRC', hashes.crc], ['MD5', hashes.md5], ['SHA1', hashes.sha1], ['RA', hashes.ra],
+  ];
+  const copy = (v: string) => { try { navigator.clipboard?.writeText(v); toaster.toast({ title: 'Copied', body: v }); } catch { /* ignore */ } };
+  const heading = (txt: string) => (
+    <div style={{ fontSize: '13px', fontWeight: 600, color: V2.fg }}>{txt}</div>
+  );
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+      {/* File info */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+        {heading('File info')}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '12px 24px' }}>
+          {[['Filename', detail?.fs_name || '—'], ['Size', detail?.fs_size_bytes ? fmtBytes(detail.fs_size_bytes) : '—']].map(([l, v]) => (
+            <div key={l as string} style={{ display: 'flex', flexDirection: 'column', gap: '4px', minWidth: 0 }}>
+              <div style={{ fontSize: '10.5px', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: V2.fgFaint }}>{l}</div>
+              <div style={{ fontSize: '13px', color: V2.fg2, wordBreak: 'break-all' }}>{v}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+      {/* Hashes */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+        {heading('Hashes')}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center' }}>
+          {hashRows.map(([label, val]) => (
+            <Focusable key={label} noFocusRing
+              onActivate={() => val && copy(val)} onClick={() => val && copy(val)}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '4px 10px',
+                background: V2.surface, border: `1px solid ${V2.borderStrong}`, borderRadius: V2.radiusChip,
+                fontSize: '11.5px', cursor: val ? 'pointer' : 'default',
+              }}>
+              <span style={{ fontWeight: 700, color: V2.fgFaint, letterSpacing: '0.06em' }}>{label}</span>
+              <span style={{ fontFamily: 'monospace', color: val ? V2.fg2 : V2.fgFaint }}>
+                {val ? `${String(val).slice(0, 8)}…` : '—'}
+              </span>
+            </Focusable>
+          ))}
+        </div>
+      </div>
+      {/* Verification */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+        {heading('Verification')}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center' }}>
+          {(detail?.verifications || []).map((v: any) => (
+            <span key={v.label} style={{
+              display: 'inline-flex', alignItems: 'center', gap: '5px', padding: '4px 10px',
+              borderRadius: V2.radiusChip, fontSize: '11.5px', fontWeight: 600,
+              background: v.match ? 'rgba(74,222,128,0.12)' : V2.surface,
+              border: `1px solid ${v.match ? 'rgba(74,222,128,0.4)' : V2.borderStrong}`,
+              color: v.match ? V2.success : V2.fgMuted,
+            }}>{v.match ? <FaCheckCircle size={12} /> : <FaTimes size={12} />}{v.label}</span>
+          ))}
+        </div>
+      </div>
+      {/* Provider links */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+        {heading('Metadata sources')}
+        <Focusable noFocusRing style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '10px' }}>
+          {ordered.map((p) => <ProviderCard key={p.key} p={p} id={providers[p.key]} />)}
+        </Focusable>
+      </div>
+    </div>
   );
 }
 
@@ -1161,6 +1640,103 @@ function V2SearchField({ value, onChange }: { value: string; onChange: (v: strin
   );
 }
 
+// V2TextField — labeled text input sharing the V2SearchField look (RomM
+// RTextField filled variant): rounded surface box, brand focus border + halo.
+// Used by the setup wizard so its fields match the library search bar.
+function V2TextField({ label, value, onChange, password, placeholder, icon, mono, maxLength }:
+  { label?: string; value: string; onChange: (v: string) => void; password?: boolean; placeholder?: string; icon?: any; mono?: boolean; maxLength?: number }) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const [focused, setFocused] = useState(false);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%' }}>
+      {label && <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: V2.fgMuted, textAlign: 'center' }}>{label}</div>}
+      <Focusable noFocusRing onActivate={() => inputRef.current?.focus()} style={{ borderRadius: V2.radiusMd }}>
+        <style>{`.v2-field-input::placeholder{color:rgba(255,255,255,0.40)}`}</style>
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: '10px', height: '40px', padding: '0 12px',
+          borderRadius: V2.radiusMd,
+          background: focused ? V2.surfaceHover : 'rgba(255,255,255,0.045)',
+          border: `1px solid ${focused ? V2.brand : V2.border}`,
+          boxShadow: focused ? `0 0 0 3px rgba(139,116,232,0.22)` : 'none',
+          transition: 'background 0.2s, border-color 0.2s, box-shadow 0.2s',
+        }}>
+          {icon && <span style={{ flexShrink: 0, color: focused ? V2.brandHover : V2.fgMuted, display: 'inline-flex' }}>{icon}</span>}
+          <input
+            ref={inputRef}
+            className="v2-field-input"
+            type={password ? 'password' : 'text'}
+            value={value}
+            placeholder={placeholder}
+            maxLength={maxLength}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => onChange(e.target.value)}
+            onFocus={() => setFocused(true)}
+            onBlur={() => setFocused(false)}
+            style={{
+              flex: '1 1 auto', minWidth: 0, background: 'transparent', border: 'none', outline: 'none',
+              color: V2.fg, fontFamily: mono ? 'monospace' : 'inherit', padding: 0, textAlign: 'center',
+              fontSize: mono ? '20px' : '14px',
+              fontWeight: mono ? 700 : 400,
+              letterSpacing: mono ? '0.3em' : 'normal',
+              textIndent: mono ? '0.3em' : 0, // balance the trailing letter-spacing so text stays centered
+              textTransform: mono ? 'uppercase' : 'none',
+            }}
+          />
+        </div>
+      </Focusable>
+    </div>
+  );
+}
+
+// PairCodeField — masked XXXX-XXXX entry. Shows an 8-slot template where each
+// typed character replaces one `*` (rather than a placeholder that vanishes on
+// the first keystroke). A transparent, char-aligned input sits over the mask so
+// the caret lands on the next empty slot.
+function PairCodeField({ label, value, onChange }:
+  { label?: string; value: string; onChange: (v: string) => void }) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const [focused, setFocused] = useState(false);
+  const digits = value.replace(/-/g, '');
+  const font: any = { fontFamily: 'monospace', fontSize: '20px', fontWeight: 700, letterSpacing: '0.3em', textIndent: '0.3em' };
+  // Mask cells: typed chars bright, remaining slots a muted '*', dash between.
+  const cells: any[] = [];
+  for (let i = 0; i < 8; i++) {
+    const ch = digits[i];
+    cells.push(<span key={i} style={{ color: ch ? V2.fg : V2.fgMuted }}>{ch || '*'}</span>);
+    if (i === 3) cells.push(<span key="dash" style={{ color: digits.length > 4 ? V2.fg : V2.fgMuted }}>-</span>);
+  }
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%' }}>
+      {label && <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: V2.fgMuted, textAlign: 'center' }}>{label}</div>}
+      <Focusable noFocusRing onActivate={() => inputRef.current?.focus()} style={{ borderRadius: V2.radiusMd }}>
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'center', height: '40px', padding: '0 12px',
+          borderRadius: V2.radiusMd,
+          background: focused ? V2.surfaceHover : 'rgba(255,255,255,0.045)',
+          border: `1px solid ${focused ? V2.brand : V2.border}`,
+          boxShadow: focused ? `0 0 0 3px rgba(139,116,232,0.22)` : 'none',
+          transition: 'background 0.2s, border-color 0.2s, box-shadow 0.2s',
+        }}>
+          <div style={{ position: 'relative', display: 'inline-block' }}>
+            <div style={{ ...font, whiteSpace: 'pre', pointerEvents: 'none' }}>{cells}</div>
+            <input
+              ref={inputRef}
+              value={value}
+              maxLength={9}
+              onChange={(e: ChangeEvent<HTMLInputElement>) => onChange(e.target.value)}
+              onFocus={() => setFocused(true)}
+              onBlur={() => setFocused(false)}
+              style={{
+                position: 'absolute', inset: 0, width: '100%', background: 'transparent', border: 'none',
+                outline: 'none', color: 'transparent', caretColor: V2.brand, padding: 0, textTransform: 'uppercase', ...font,
+              }}
+            />
+          </div>
+        </div>
+      </Focusable>
+    </div>
+  );
+}
+
 // Search tab — debounced text filter over the whole library, results as a
 // cover-art grid (the nav 'Search' destination).
 function SearchPanel({ onOpen, onBg }: { onOpen: (g: LibGame) => void; onBg: (uri: string | null) => void }) {
@@ -1331,7 +1907,9 @@ function HomePanel({ onOpen, onOpenGroup, onBg }:
       {continuePlaying.length > 0 && (
         <CardRow icon={<FaPlay size={14} />} title="Continue playing" count={continuePlaying.length}>
           {continuePlaying.map((g) => (
-            <div key={g.rom_id} style={{ width: '132px', flexShrink: 0 }}>
+            // Screenshot cards size to their natural (landscape) width; games
+            // with no screenshot fall back to the portrait 132px cover.
+            <div key={g.rom_id} style={{ flexShrink: 0, ...(g.screenshot ? {} : { width: '132px' }) }}>
               <GameTile game={g} onOpen={onOpen} onActiveCover={onBg} />
             </div>
           ))}
@@ -1618,7 +2196,7 @@ function useRommImage(path: string | null): string | null {
     let alive = true;
     if (!path) { setUri(null); return; }
     (async () => {
-      try { const r = await getImage(path); if (alive) setUri(r?.data_uri || null); }
+      try { const r = await qGetImage(path); if (alive) setUri(r?.data_uri || null); }
       catch { if (alive) setUri(null); }
     })();
     return () => { alive = false; };
@@ -2358,7 +2936,7 @@ function GameDetailPage() {
   const game = _libGameHolder;
   const [detail, setDetail] = useState<any>(null);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<null | 'download' | 'delete'>(null);
+  const [busy, setBusy] = useState<null | 'download' | 'delete' | 'launch'>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [isDownloaded, setIsDownloaded] = useState<boolean>(!!game?.is_downloaded);
   const [bgUri, setBgUri] = useState<string | null>(null);
@@ -2400,6 +2978,20 @@ function GameDetailPage() {
     }
   };
 
+  const doLaunch = async () => {
+    if (!game) return;
+    setBusy('launch');
+    try {
+      const res = await launchGame(game.rom_id);
+      if (res?.success) toaster.toast({ title: 'Launching', body: detail?.name || game.name });
+      else toaster.toast({ title: 'Launch failed', body: res?.message || 'Unknown error' });
+    } catch (e) {
+      toaster.toast({ title: 'Launch failed', body: String(e) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const doDelete = async () => {
     if (!game) return;
     setBusy('delete');
@@ -2425,22 +3017,33 @@ function GameDetailPage() {
 
   const name = detail?.name || game.name;
   const platform = detail?.platform || game.platform;
-  const year = fmtReleaseYear(detail?.release_date);
-  // RomM detail header: title + a single "·"-separated meta line
-  // (platform · year · size · state), not a row of chips.
+  const releaseDate = fmtReleaseDate(detail?.release_date);
+  // RomM GameHeader meta row: platform-icon + platform · release date ·
+  // verified — text items only (the tag chips render after as RTags).
   const meta: { text: string; color?: string }[] = [];
   if (platform) meta.push({ text: platform });
-  if (year) meta.push({ text: year });
-  if (detail?.fs_size_bytes) meta.push({ text: fmtBytes(detail.fs_size_bytes) });
-  meta.push(isDownloaded
-    ? { text: 'Downloaded', color: V2.success }
-    : { text: 'Not downloaded', color: V2.fgMuted });
+  if (releaseDate) meta.push({ text: releaseDate });
 
-  // Overview "InfoGrid" sections — label + chip items (RomM InfoGrid).
-  const infoGrid: { label: string; items: string[] }[] = [];
+  // Header tag chips (RomM GameHeader): regions (info), languages (brand),
+  // custom tags (neutral) — each an RTag.
+  const headerTags: { text: string; tone: 'info' | 'brand' | 'neutral' }[] = [
+    ...((detail?.regions || []) as string[]).map((r) => ({ text: r, tone: 'info' as const })),
+    ...((detail?.languages || []) as string[]).map((l) => ({ text: l, tone: 'brand' as const })),
+    ...((detail?.tags || []) as string[]).map((t) => ({ text: t, tone: 'neutral' as const })),
+  ];
+
+  // Overview "InfoGrid" sections — icon + label + chip items (RomM InfoGrid).
+  const infoGrid: { label: string; items: string[]; icon?: any }[] = [];
   if (detail?.genres?.length) infoGrid.push({ label: 'Genres', items: detail.genres });
-  if (detail?.franchises?.length) infoGrid.push({ label: 'Franchise', items: detail.franchises });
-  if (detail?.companies?.length) infoGrid.push({ label: 'Developer', items: detail.companies });
+  if (detail?.companies?.length) infoGrid.push({ label: 'Companies', items: detail.companies });
+  if (detail?.franchises?.length) infoGrid.push({ label: 'Franchises', items: detail.franchises });
+  if (detail?.collections?.length) infoGrid.push({ label: 'Collections', items: detail.collections });
+
+  const related = detail?.related || {};
+  const hasRelated = ['expansions', 'dlcs', 'remakes', 'remasters']
+    .some((k) => (related[k] || []).length);
+  const ageRatings = detail?.age_ratings || [];
+  const userCollections: string[] = detail?.user_collections || [];
 
   // Tab strip — Files only when the server reported files (RomM hides empty tabs).
   const tabList: { id: string; label: string }[] = [{ id: 'overview', label: 'Overview' }];
@@ -2448,6 +3051,7 @@ function GameDetailPage() {
   if (detail?.screenshots?.length) tabList.push({ id: 'screenshots', label: 'Screenshots' });
   tabList.push({ id: 'save-data', label: 'Save Data' });
   if (detail?.achievements?.length) tabList.push({ id: 'achievements', label: 'Achievements' });
+  tabList.push({ id: 'metadata', label: 'Metadata' });
 
   // L1 / R1 page through the detail tabs (RomM pages detail tabs with bumpers).
   const cycleTab = (dir: -1 | 1) => {
@@ -2466,9 +3070,9 @@ function GameDetailPage() {
       <Focusable noFocusRing flow-children="horizontal" style={{ display: 'flex', gap: '22px', alignItems: 'flex-start' }}>
         {/* Cover */}
         <div style={{ flex: '0 0 220px', maxWidth: '220px' }}>
-          <div style={{ boxShadow: V2.elev2, borderRadius: V2.radiusArt }}>
+          <div style={{ boxShadow: V2.elev2, borderRadius: V2.radiusLg, overflow: 'hidden' }}>
             <GameCover romId={game.rom_id} hasCover={game.has_cover || !!detail?.has_cover} large
-              onLoaded={setBgUri} />
+              radius={V2.radiusLg} onLoaded={setBgUri} />
           </div>
         </div>
 
@@ -2476,33 +3080,79 @@ function GameDetailPage() {
         <Focusable noFocusRing flow-children="vertical" style={{ flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '14px' }}>
           <div>
             <div style={{ fontSize: '30px', fontWeight: 800, lineHeight: '1.15', letterSpacing: '-0.01em' }}>{name}</div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', marginTop: '8px', fontSize: '13px', color: V2.fg2 }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0', marginTop: '8px', fontSize: '13.5px', color: V2.fg2 }}>
+              {/* Platform icon leads the meta row (RomM GameHeader). */}
+              {game.platform_slug && (
+                <span style={{ display: 'inline-flex', width: '16px', height: '16px', marginRight: '6px', alignItems: 'center', justifyContent: 'center' }}>
+                  <PlatformIcon slug={game.platform_slug} size={16} />
+                </span>
+              )}
               {meta.map((m, i) => (
                 <span key={i} style={{ display: 'inline-flex', alignItems: 'center' }}>
-                  {i > 0 && <span style={{ color: V2.fgMuted, margin: '0 8px' }}>·</span>}
+                  {i > 0 && <span style={{ opacity: 0.3, margin: '0 8px' }}>·</span>}
                   <span style={{ color: m.color || V2.fg2 }}>{m.text}</span>
                 </span>
               ))}
+              {/* Verified — icon-only check (RomM GameHeader, crc_hash). */}
+              {detail?.verified && (
+                <>
+                  <span style={{ opacity: 0.3, margin: '0 8px' }}>·</span>
+                  <FaCheckCircle size={15} color={V2.success} title="Verified" />
+                </>
+              )}
+              {/* Region / language / custom tag chips (RomM RTags). */}
+              {headerTags.length > 0 && (
+                <>
+                  <span style={{ opacity: 0.3, margin: '0 8px' }}>·</span>
+                  <span style={{ display: 'inline-flex', flexWrap: 'wrap', gap: '6px' }}>
+                    {headerTags.map((tg, i) => {
+                      const palette =
+                        tg.tone === 'info' ? { c: '#93c5fd', b: 'rgba(147,197,253,0.14)', br: 'rgba(147,197,253,0.30)' }
+                        : tg.tone === 'brand' ? { c: V2.brandHover, b: 'rgba(139,116,232,0.16)', br: 'rgba(139,116,232,0.30)' }
+                        : { c: V2.fg2, b: V2.surface, br: V2.border };
+                      return (
+                        <span key={i} style={{
+                          fontSize: '11px', fontWeight: 600, lineHeight: 1.6, padding: '1px 8px',
+                          borderRadius: V2.radiusPill, color: palette.c,
+                          background: palette.b, border: `1px solid ${palette.br}`,
+                        }}>{tg.text}</span>
+                      );
+                    })}
+                  </span>
+                </>
+              )}
             </div>
           </div>
 
-          {/* Actions */}
-          <Focusable noFocusRing flow-children="horizontal" style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+          {/* Actions — RomM GameActions ribbon: an emphasized white pill for the
+              primary CTA (Download when absent, Play when present) + circular
+              surface icon buttons for the secondary actions (Delete). */}
+          <Focusable noFocusRing flow-children="horizontal" style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
             {!isDownloaded ? (
-              <V2Button variant="primary" disabled={!!busy} onClick={doDownload}>
-                <FaSync size={13} style={{ animation: busy === 'download' ? 'spin 1s linear infinite' : 'none' }} />
-                <span>{busy === 'download' ? 'Downloading…' : 'Download'}</span>
-              </V2Button>
+              <GameActionButton variant="emphasized" disabled={!!busy} onClick={doDownload}
+                label={busy === 'download' ? 'Downloading…' : 'Download'}
+                icon={busy === 'download'
+                  ? <FaSync size={15} style={{ animation: 'spin 1s linear infinite' }} />
+                  : <FaDownload size={15} />} />
             ) : !confirmDelete ? (
-              <V2Button variant="tonal" color={V2.danger} onClick={() => setConfirmDelete(true)}>
-                <FaTrash size={13} /><span>Delete download</span>
-              </V2Button>
+              <>
+                <GameActionButton variant="emphasized" disabled={!!busy} onClick={doLaunch}
+                  label={busy === 'launch' ? 'Launching…' : 'Play'}
+                  icon={busy === 'launch'
+                    ? <FaSync size={15} style={{ animation: 'spin 1s linear infinite' }} />
+                    : <FaPlay size={14} style={{ marginLeft: '2px' }} />} />
+                <GameActionButton variant="surface" accent="danger" onClick={() => setConfirmDelete(true)}
+                  icon={<FaTrash size={15} />} />
+              </>
             ) : (
               <>
-                <V2Button variant="danger" disabled={!!busy} onClick={doDelete}>
-                  <FaTrash size={13} /><span>{busy === 'delete' ? 'Deleting…' : 'Confirm delete'}</span>
-                </V2Button>
-                <V2Button variant="text" onClick={() => setConfirmDelete(false)}>Cancel</V2Button>
+                <GameActionButton variant="danger" disabled={!!busy} onClick={doDelete}
+                  label={busy === 'delete' ? 'Deleting…' : 'Confirm delete'}
+                  icon={busy === 'delete'
+                    ? <FaSync size={15} style={{ animation: 'spin 1s linear infinite' }} />
+                    : <FaTrash size={15} />} />
+                <GameActionButton variant="surface" onClick={() => setConfirmDelete(false)}
+                  icon={<FaTimes size={16} />} />
               </>
             )}
           </Focusable>
@@ -2517,32 +3167,70 @@ function GameDetailPage() {
             {loading ? (
               <div style={{ color: V2.fgMuted, fontSize: '12px' }}>Loading details…</div>
             ) : tab === 'overview' ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '30px' }}>
+                {/* 1. Summary */}
                 {detail?.summary && (
-                  <div style={{ fontSize: '13px', color: V2.fg2, lineHeight: '1.6' }}>{detail.summary}</div>
+                  <div style={{ fontSize: '13.5px', color: V2.fg2, lineHeight: '1.7' }}>{detail.summary}</div>
                 )}
-                {infoGrid.length > 0 && (
-                  <div style={{
-                    display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '16px 24px',
-                  }}>
-                    {infoGrid.map((s) => (
-                      <div key={s.label} style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                        <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: V2.fgMuted }}>
-                          {s.label}
-                        </div>
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
-                          {s.items.map((it, i) => (
-                            <span key={i} style={{
-                              fontSize: '12px', padding: '3px 10px', borderRadius: V2.radiusChip,
-                              background: V2.surface, color: V2.fg2, border: `1px solid ${V2.border}`,
-                            }}>{it}</span>
-                          ))}
-                        </div>
+
+                {/* 2. Left-labelled fact rows — Last played · Players · Age rating
+                    (RomM OverviewTab __facts). */}
+                {(() => {
+                  const lp = detail?.last_played ? new Date(detail.last_played) : null;
+                  const lpStr = lp && !isNaN(lp.getTime()) ? lp.toLocaleString() : null;
+                  const rows: { label: string; field: any }[] = [];
+                  if (lpStr) rows.push({ label: 'Last played', field: <span style={{ fontSize: '13px', color: V2.fg2 }}>{lpStr}</span> });
+                  if (detail?.player_count) rows.push({ label: 'Players', field: <PlayerCountBadge value={String(detail.player_count)} /> });
+                  if (ageRatings.length) rows.push({ label: 'Age rating', field: <AgeRatingBadges items={ageRatings} /> });
+                  if (userCollections.length) rows.push({
+                    label: 'Collections',
+                    field: (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                        {userCollections.map((c, i) => (
+                          <span key={i} style={{
+                            display: 'inline-flex', alignItems: 'center', gap: '5px', padding: '4px 10px',
+                            background: V2.surface, border: `1px solid ${V2.borderStrong}`, borderRadius: V2.radiusPill,
+                            fontSize: '11.5px', fontWeight: 600, color: V2.fg2,
+                          }}><FaBookmark size={10} color={V2.brand} />{c}</span>
+                        ))}
                       </div>
-                    ))}
+                    ),
+                  });
+                  if (!rows.length) return null;
+                  return (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                      {rows.map((r) => (
+                        <div key={r.label} style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                          <div style={{ width: '120px', flexShrink: 0, fontSize: '10.5px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: V2.fgFaint }}>{r.label}</div>
+                          <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: '12px' }}>{r.field}</div>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
+
+                {/* 3. Info grid */}
+                <InfoGrid sections={infoGrid} />
+
+                {/* 4. HLTB */}
+                {detail?.hltb && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    <SectionHeading icon={<FaClock size={12} />}>How long to beat</SectionHeading>
+                    <HLTBStrip hltb={detail.hltb} />
                   </div>
                 )}
-                {!detail?.summary && infoGrid.length === 0 && (
+
+                {/* 5. Related games — one labelled section per category. */}
+                {hasRelated && (
+                  <>
+                    <RelatedSection icon={<FaPuzzlePiece size={12} />} title="Expansions" items={related.expansions} />
+                    <RelatedSection icon={<FaBoxOpen size={12} />} title="DLC" items={related.dlcs} />
+                    <RelatedSection icon={<FaRedo size={12} />} title="Remakes" items={related.remakes} />
+                    <RelatedSection icon={<FaClone size={12} />} title="Remasters" items={related.remasters} />
+                  </>
+                )}
+
+                {!detail?.summary && infoGrid.length === 0 && !hasRelated && !detail?.hltb && !ageRatings.length && (
                   <div style={{ color: V2.fgMuted, fontSize: '12px' }}>No metadata available.</div>
                 )}
               </div>
@@ -2564,6 +3252,8 @@ function GameDetailPage() {
               <ScreenshotGrid paths={detail?.screenshots || []} />
             ) : tab === 'save-data' ? (
               <SaveDataTab romId={game.rom_id} />
+            ) : tab === 'metadata' ? (
+              <MetadataTab detail={detail} />
             ) : (
               <AchievementsTab achievements={detail?.achievements || []} />
             )}
@@ -2580,6 +3270,23 @@ function SettingsPage() {
   const [loading, setLoading] = useState<boolean>(true);
   const [confirmReset, setConfirmReset] = useState<boolean>(false);
   const [resetting, setResetting] = useState<boolean>(false);
+  const [tilePresent, setTilePresent] = useState<boolean>(false);
+  const [tileBusy, setTileBusy] = useState<boolean>(false);
+
+  useEffect(() => { (async () => { try { setTilePresent((await findRommShortcut()) != null); } catch { /* ignore */ } })(); }, []);
+
+  const handleAddTile = async () => {
+    setTileBusy(true);
+    try {
+      const id = await addRommShortcut();
+      if (id != null) { setTilePresent(true); toaster.toast({ title: 'RomM', body: 'Added “RomM” to your Steam library.' }); }
+    } finally { setTileBusy(false); }
+  };
+  const handleRemoveTile = async () => {
+    setTileBusy(true);
+    try { if (await removeRommShortcut()) { setTilePresent(false); toaster.toast({ title: 'RomM', body: 'Removed the library tile.' }); } }
+    finally { setTileBusy(false); }
+  };
 
   useEffect(() => {
     // Load initial logging preference
@@ -2643,6 +3350,22 @@ function SettingsPage() {
               <span>Configure RomM Connection</span>
             </div>
           </ButtonItem>
+        </PanelSectionRow>
+      </PanelSection>
+      <PanelSection title="Steam Library">
+        <PanelSectionRow>
+          <ButtonItem layout="below" disabled={tileBusy}
+            onClick={tilePresent ? handleRemoveTile : handleAddTile}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              {tilePresent ? <FaTrash size={14} /> : <FaSteam size={14} />}
+              <span>{tileBusy ? 'Working…' : tilePresent ? 'Remove “RomM” from library' : 'Add “RomM” to Steam library'}</span>
+            </div>
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <div style={{ fontSize: '11px', color: '#9ca3af', padding: '0 2px 4px' }}>
+            Adds a “RomM” tile to your library that opens the game browser. Launching it won't run a game — it jumps straight into RomM.
+          </div>
         </PanelSectionRow>
       </PanelSection>
       <PanelSection title="Debug Settings">
@@ -3275,12 +3998,335 @@ function TitleView() {
   );
 }
 
+// ─── Setup wizard ────────────────────────────────────────────────────────────
+// Full-screen guided first-run flow (RomM v2 visual language): Welcome →
+// Connect (login or pair code, with Test) → Folders → Finish. Auto-opened on
+// startup when no connection is configured; also reachable from the QAM.
+function SetupWizard() {
+  const [step, setStep] = useState(0);
+  const [mode, setMode] = useState<'login' | 'pair'>('pair');
+  const [logo, setLogo] = useState<string | null>(null);
+  const [url, setUrl] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [pairCode, setPairCode] = useState('');
+  const [romDir, setRomDir] = useState('');
+  const [saveDir, setSaveDir] = useState('');
+  const [biosDir, setBiosDir] = useState('');
+  const [deviceName, setDeviceName] = useState('');
+  const [deviceNameDefault, setDeviceNameDefault] = useState('SteamOS');
+  const [hasPassword, setHasPassword] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const c = await getConfig();
+        setUrl(c.url || ''); setUsername(c.username || '');
+        setRomDir(c.rom_directory || ''); setSaveDir(c.save_directory || ''); setBiosDir(c.bios_directory || '');
+        setDeviceName(c.device_name || ''); setDeviceNameDefault(c.device_name_default || 'SteamOS');
+        setHasPassword(c.has_password || false);
+      } catch { /* ignore */ }
+      try { const l = await getRommLogo(); setLogo(l?.data_uri || null); } catch { /* ignore */ }
+    })();
+  }, []);
+
+  const finish = () => { Navigation.Navigate("/romm-sync-library"); Navigation.CloseSideMenus(); };
+
+  const doTest = async () => {
+    setTesting(true); setTestResult(null);
+    try { setTestResult(await testRommConnection(url.trim(), username.trim(), password)); }
+    catch { setTestResult({ success: false, message: 'Test failed unexpectedly.' }); }
+    finally { setTesting(false); }
+  };
+
+  const doFinish = async () => {
+    setBusy(true);
+    try {
+      if (mode === 'pair') {
+        const r = await pairDevice(url.trim(), pairCode.trim());
+        if (r?.success) { toaster.toast({ title: 'RomM Sync', body: 'Paired — connecting…' }); finish(); }
+        else toaster.toast({ title: 'RomM Sync', body: r?.message || 'Pairing failed.' });
+      } else {
+        const dev = deviceName.trim() || deviceNameDefault;
+        const r = await saveConfig(url.trim(), username.trim(), password, romDir.trim(), saveDir.trim(), dev, biosDir.trim());
+        if (r?.success) { toaster.toast({ title: 'RomM Sync', body: 'Connected!' }); finish(); }
+        else toaster.toast({ title: 'RomM Sync', body: r?.error || 'Failed to save configuration.' });
+      }
+    } catch { toaster.toast({ title: 'RomM Sync', body: 'Something went wrong.' }); }
+    finally { setBusy(false); }
+  };
+
+  const TOTAL = 4;
+  const next = () => setStep((s) => Math.min(s + 1, TOTAL - 1));
+  const back = () => setStep((s) => Math.max(s - 1, 0));
+  const canConnect = mode === 'pair'
+    ? (url.trim() && pairCode.trim())
+    : (url.trim() && username.trim() && (password.length > 0 || hasPassword));
+
+  const onField = (set: (v: string) => void, isPair = false) => (v: string) => { set(v); if (!isPair) setTestResult(null); };
+  // Pair codes follow XXXX-XXXX — strip junk, uppercase, auto-insert the dash.
+  const formatPairCode = (raw: string) => {
+    const clean = (raw || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
+    return clean.length > 4 ? `${clean.slice(0, 4)}-${clean.slice(4)}` : clean;
+  };
+  const browse = (cur: string, set: (v: string) => void) => async () => {
+    try { const res = await openFilePicker(FileSelectionType.FOLDER, cur || '/home/deck', false, true); if (res?.realpath) set(res.realpath); }
+    catch { /* ignore */ }
+  };
+
+  // Footer: Back pinned left, Next/primary pinned right (space-between).
+  const footer = (primary: any) => (
+    <Focusable noFocusRing flow-children="horizontal" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', marginTop: '8px' }}>
+      <GameActionButton variant="surface" label="Back" icon={<FaChevronLeft size={13} />} onClick={back} />
+      {primary}
+    </Focusable>
+  );
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, color: V2.fg, fontFamily: V2.font,
+      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+      padding: '40px 24px', overflowY: 'auto',
+    }}>
+      <V2Bg uri={null} />
+      <style>{`
+        @keyframes wizIn { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: none; } }
+        @keyframes wizPop { 0% { opacity: 0; transform: scale(0.6); } 60% { transform: scale(1.08); } 100% { opacity: 1; transform: scale(1); } }
+        @keyframes wizDot { from { transform: scale(0.6); } to { transform: scale(1); } }
+        .wiz-step > div > * { animation: wizIn 0.5s cubic-bezier(.22,1,.36,1) both; }
+        .wiz-step > div > *:nth-child(1) { animation-delay: 0.02s; }
+        .wiz-step > div > *:nth-child(2) { animation-delay: 0.07s; }
+        .wiz-step > div > *:nth-child(3) { animation-delay: 0.12s; }
+        .wiz-step > div > *:nth-child(4) { animation-delay: 0.17s; }
+        .wiz-step > div > *:nth-child(5) { animation-delay: 0.22s; }
+        .wiz-step > div > *:nth-child(6) { animation-delay: 0.27s; }
+        .wiz-step > div > *:nth-child(n+7) { animation-delay: 0.32s; }
+        .wiz-logo { animation: wizPop 0.55s cubic-bezier(.22,1,.36,1) both !important; filter: drop-shadow(0 6px 24px rgba(139,116,232,0.45)); }
+        .wiz-check { animation: wizPop 0.6s cubic-bezier(.34,1.56,.64,1) both !important; }
+        .wiz-dot { transition: width 0.32s cubic-bezier(.22,1,.36,1), background 0.32s ease; }
+        .wiz-dot--active { animation: wizDot 0.32s ease; }
+      `}</style>
+      <Focusable noFocusRing style={{
+        position: 'relative', zIndex: 2, width: '100%', maxWidth: '440px',
+        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '22px', textAlign: 'center',
+      }}>
+        {/* Progress dots */}
+        <div style={{ display: 'flex', justifyContent: 'center', gap: '8px' }}>
+          {Array.from({ length: TOTAL }).map((_, i) => (
+            <div key={i} className={`wiz-dot${i === step ? ' wiz-dot--active' : ''}`} style={{
+              width: i === step ? '22px' : '8px', height: '8px', borderRadius: V2.radiusPill,
+              background: i <= step ? V2.brand : V2.surfaceHover,
+            }} />
+          ))}
+        </div>
+
+        <div key={step} className="wiz-step" style={{ width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '22px' }}>
+        {step === 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px', textAlign: 'center' }}>
+            {logo && <img className="wiz-logo" src={logo} style={{ width: '96px', height: '96px', objectFit: 'contain' }} />}
+            <div style={{ fontSize: '28px', fontWeight: 800, letterSpacing: '-0.01em' }}>Welcome to RomM Sync</div>
+            <div style={{ fontSize: '14px', color: V2.fg2, lineHeight: 1.6, maxWidth: '420px' }}>
+              Connect this device to your RomM server to browse your library, download games, and sync saves across devices.
+            </div>
+            <div style={{ marginTop: '8px' }}>
+              <GameActionButton variant="emphasized" label="Get started" icon={<FaPlay size={13} style={{ marginLeft: '2px' }} />} onClick={next} />
+            </div>
+          </div>
+        )}
+
+        {step === 1 && (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '14px', width: '100%' }}>
+            <div style={{ fontSize: '20px', fontWeight: 700 }}>Connect to RomM</div>
+            {/* Login / Pair toggle — emphasized when active, surface when not. */}
+            <Focusable noFocusRing flow-children="horizontal" style={{ display: 'flex', justifyContent: 'center', gap: '8px' }}>
+              {(['login', 'pair'] as const).map((m) => (
+                <GameActionButton key={m} variant={mode === m ? 'emphasized' : 'surface'}
+                  label={m === 'login' ? 'Username & password' : 'Pair code'} icon={null}
+                  onClick={() => { setMode(m); setTestResult(null); }} />
+              ))}
+            </Focusable>
+            <V2TextField label="RomM URL" value={url} onChange={onField(setUrl)} placeholder="https://romm.example.com" />
+            {mode === 'login' ? (
+              <>
+                <V2TextField label="Username" value={username} onChange={onField(setUsername)} />
+                <V2TextField label="Password" value={password} onChange={onField(setPassword)} password
+                  placeholder={hasPassword && !password ? 'Leave blank to keep saved' : undefined} />
+                {testResult && (
+                  <div style={{ fontSize: '13px', color: testResult.success ? V2.success : V2.danger }}>
+                    {testResult.success ? '✅' : '❌'} {testResult.message}
+                  </div>
+                )}
+                <GameActionButton variant="surface" label={testing ? 'Testing…' : 'Test connection'} icon={null}
+                  disabled={testing || !url.trim() || !username.trim()} onClick={doTest} />
+              </>
+            ) : (
+              <>
+                <PairCodeField label="Pairing code" value={pairCode}
+                  onChange={(v) => setPairCode(formatPairCode(v))} />
+              </>
+            )}
+            {footer(
+              <GameActionButton variant="emphasized" label="Next" icon={<FaChevronRight size={13} />} disabled={!canConnect} onClick={next} />
+            )}
+          </div>
+        )}
+
+        {step === 2 && (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px', width: '100%' }}>
+            <div style={{ fontSize: '20px', fontWeight: 700 }}>Folders</div>
+            <div style={{ fontSize: '13px', color: V2.fg2, lineHeight: 1.6, maxWidth: '420px' }}>
+              <div>Where ROMs, saves and BIOS files live on this device.</div>
+            </div>
+            <V2TextField label="ROM directory" value={romDir} onChange={setRomDir} />
+            <GameActionButton variant="surface" label="Browse…" icon={null} onClick={browse(romDir, setRomDir)} />
+            <V2TextField label="Save directory" value={saveDir} onChange={setSaveDir} />
+            <GameActionButton variant="surface" label="Browse…" icon={null} onClick={browse(saveDir, setSaveDir)} />
+            <V2TextField label="BIOS directory" value={biosDir} onChange={setBiosDir} />
+            <GameActionButton variant="surface" label="Browse…" icon={null} onClick={browse(biosDir, setBiosDir)} />
+            <V2TextField label="Device name" value={deviceName} onChange={setDeviceName} placeholder={deviceNameDefault} />
+            {footer(
+              <GameActionButton variant="emphasized" label="Next" icon={<FaChevronRight size={13} />} onClick={next} />
+            )}
+          </div>
+        )}
+
+        {step === 3 && (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px', textAlign: 'center', width: '100%' }}>
+            <div className="wiz-check"><FaCheckCircle size={56} color={V2.success} /></div>
+            <div style={{ fontSize: '24px', fontWeight: 800 }}>Ready to go</div>
+            <div style={{ fontSize: '14px', color: V2.fg2, lineHeight: 1.6, maxWidth: '420px' }}>
+              {mode === 'pair'
+                ? 'We\'ll pair this device with your RomM server and open your library.'
+                : 'We\'ll save your connection and open your library.'}
+            </div>
+            {footer(
+              <GameActionButton variant="emphasized" disabled={busy}
+                label={busy ? 'Connecting…' : 'Finish & open library'}
+                icon={busy ? <FaSync size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <FaPlay size={13} style={{ marginLeft: '2px' }} />}
+                onClick={doFinish} />
+            )}
+          </div>
+        )}
+        </div>
+      </Focusable>
+    </div>
+  );
+}
+
+// ─── Steam library "RomM" shortcut (opt-in) ──────────────────────────────────
+// Creates a non-Steam shortcut named "RomM" whose launch is intercepted and
+// redirected into the plugin's Game Browser instead of running anything. All
+// SteamClient calls are undocumented + version-fragile, so every call is
+// feature-detected and wrapped — failures degrade to a toast, never a crash.
+const ROMM_SHORTCUT_NAME = "RomM";
+const ROMM_SHORTCUT_EXE = "/bin/true"; // no-op: the tile only triggers navigation
+let _rommAppId: number | null = null;
+let _rommActionReg: { unregister: () => void } | null = null;
+// Guards the startup setup-wizard auto-open so it fires at most once per session.
+let _setupAutoOpened = false;
+
+const _sc = (): any => (typeof window !== 'undefined' ? (window as any).SteamClient : undefined);
+
+async function findRommShortcut(): Promise<number | null> {
+  try {
+    const apps = _sc()?.Apps;
+    if (!apps?.GetAllShortcuts) return null;
+    const all = await apps.GetAllShortcuts();
+    for (const s of (all || [])) {
+      const nm = s?.data?.strAppName || s?.data?.appname || s?.strAppName || s?.appname;
+      const aid = s?.appid ?? s?.unAppID ?? s?.data?.appid;
+      if (nm === ROMM_SHORTCUT_NAME && aid != null) return Number(aid);
+    }
+  } catch (e) { console.error('[RomM] findRommShortcut', e); }
+  return null;
+}
+
+async function ensureRommArtwork(appId: number) {
+  try {
+    const apps = _sc()?.Apps;
+    if (!apps?.SetCustomArtworkForApp) return;
+    const logo = await getPluginLogo();
+    if (!logo?.b64) return;
+    // 0 = portrait capsule (grid), 3 = header/landscape. Paint both with the logo.
+    try { await apps.SetCustomArtworkForApp(appId, logo.b64, logo.ext || 'png', 0); } catch { /* ignore */ }
+    try { await apps.SetCustomArtworkForApp(appId, logo.b64, logo.ext || 'png', 3); } catch { /* ignore */ }
+  } catch (e) { console.error('[RomM] ensureRommArtwork', e); }
+}
+
+// Create the shortcut if missing; returns the appId (or null on failure).
+async function addRommShortcut(): Promise<number | null> {
+  try {
+    const apps = _sc()?.Apps;
+    if (!apps?.AddShortcut) { toaster.toast({ title: 'RomM', body: 'Steam shortcuts API unavailable on this build.' }); return null; }
+    let appId = await findRommShortcut();
+    if (appId == null) {
+      appId = Number(await apps.AddShortcut(ROMM_SHORTCUT_NAME, ROMM_SHORTCUT_EXE, "", ""));
+      try { await apps.SetShortcutName?.(appId, ROMM_SHORTCUT_NAME); } catch { /* ignore */ }
+    }
+    _rommAppId = appId;
+    await ensureRommArtwork(appId);
+    registerRommLaunchIntercept();
+    return appId;
+  } catch (e) {
+    console.error('[RomM] addRommShortcut', e);
+    toaster.toast({ title: 'RomM', body: 'Could not add the library tile.' });
+    return null;
+  }
+}
+
+async function removeRommShortcut(): Promise<boolean> {
+  try {
+    const apps = _sc()?.Apps;
+    const appId = _rommAppId ?? await findRommShortcut();
+    if (appId == null) return true;
+    await apps?.RemoveShortcut?.(appId);
+    _rommAppId = null;
+    return true;
+  } catch (e) { console.error('[RomM] removeRommShortcut', e); return false; }
+}
+
+// Intercept the RomM tile's launch → cancel the no-op run and open the browser.
+function registerRommLaunchIntercept() {
+  try {
+    if (_rommActionReg) return;
+    const apps = _sc()?.Apps;
+    if (!apps?.RegisterForGameActionStart) return;
+    _rommActionReg = apps.RegisterForGameActionStart((_actionType: number, strAppId: string) => {
+      if (_rommAppId != null && Number(strAppId) === _rommAppId) {
+        try { Navigation.Navigate("/romm-sync-library"); Navigation.CloseSideMenus(); } catch (e) { console.error('[RomM] nav', e); }
+      }
+    });
+  } catch (e) { console.error('[RomM] registerRommLaunchIntercept', e); }
+}
+
 export default definePlugin(() => {
+  routerHook.addRoute("/romm-sync-setup", () => <SetupWizard />, { exact: true });
   routerHook.addRoute("/romm-sync-settings", () => <SettingsPage />, { exact: true });
   routerHook.addRoute("/romm-sync-config", () => <ConfigPage />, { exact: true });
   routerHook.addRoute("/romm-sync-library", () => <LibraryGroupsPage />, { exact: true });
   routerHook.addRoute("/romm-sync-library/:key", () => <LibraryGamesPage />, { exact: true });
   routerHook.addRoute("/romm-sync-game/:romId", () => <GameDetailPage />, { exact: true });
+
+  // Re-bind the launch intercept if the RomM tile was added in a prior session,
+  // and auto-open the setup wizard once when no connection is configured.
+  (async () => {
+    try {
+      const existing = await findRommShortcut();
+      if (existing != null) { _rommAppId = existing; registerRommLaunchIntercept(); }
+    } catch (e) { console.error('[RomM] shortcut rebind', e); }
+    try {
+      const cfg = await getConfig();
+      // Auto-open the wizard only when there's genuinely no connection, and only
+      // once per session — never re-trap the user after they've set things up.
+      if (cfg && !cfg.configured && !_setupAutoOpened) {
+        _setupAutoOpened = true;
+        setTimeout(() => { try { Navigation.Navigate("/romm-sync-setup"); } catch (e) { console.error('[RomM] setup auto-open', e); } }, 1500);
+      }
+    } catch (e) { console.error('[RomM] config probe', e); }
+  })();
 
   return {
     name: "RomM Sync Monitor",
@@ -3290,7 +4336,10 @@ export default definePlugin(() => {
     onDismount: () => {
       console.log('[PLUGIN] onDismount - Stopping background monitoring');
       stopBackgroundMonitoring();
+      try { _rommActionReg?.unregister(); } catch { /* ignore */ }
+      _rommActionReg = null;
 
+      routerHook.removeRoute("/romm-sync-setup");
       routerHook.removeRoute("/romm-sync-settings");
       routerHook.removeRoute("/romm-sync-config");
       routerHook.removeRoute("/romm-sync-library");

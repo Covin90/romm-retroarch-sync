@@ -968,6 +968,7 @@ class Plugin:
             url      = settings.get('RomM', 'url')
             username = settings.get('RomM', 'username')
             has_password = bool(settings.get('RomM', 'password'))
+            has_token = bool(settings.get('RomM', 'client_token'))  # set by pair_device
 
             rom_directory  = settings.get('Download', 'rom_directory')
             save_directory = settings.get('Download', 'save_directory')
@@ -1012,7 +1013,11 @@ class Plugin:
                 'bios_directory':     bios_directory,
                 'device_name':        settings.get('Device', 'device_name'),
                 'device_name_default': hostname,
-                'configured':         bool(url and username and has_password) and not needs_onboarding,
+                # Configured if we have either password auth OR a paired client
+                # token — pairing stores only a token (no username/password), so
+                # requiring a password would wrongly keep the setup wizard
+                # re-opening after a successful pair.
+                'configured':         bool(url and ((username and has_password) or has_token)) and not needs_onboarding,
                 'retrodeck_detected': retrodeck is not None,
             }
         except Exception as e:
@@ -1546,6 +1551,7 @@ class Plugin:
             'platform':      g.get('platform'),
             'is_downloaded': g.get('is_downloaded') if is_downloaded is None else is_downloaded,
             'has_cover':     bool(g.get('cover_path') or g.get('path_cover_small')),
+            'platform_slug': g.get('platform_slug') or (g.get('romm_data') or {}).get('platform_slug'),
         }
 
     async def get_library_games(self, mode: str, key: str):
@@ -1570,6 +1576,7 @@ class Plugin:
                         'platform': (local or {}).get('platform') or r.get('platform_name'),
                         'is_downloaded': bool(local and local.get('is_downloaded')),
                         'has_cover': bool(r.get('path_cover_small') or (local or {}).get('cover_path')),
+                        'platform_slug': (local or {}).get('platform_slug') or r.get('platform_slug'),
                     })
                     # stash cover path so get_game_cover can use it without a detail call
                     if rid and rid not in idx and r.get('path_cover_small'):
@@ -1676,6 +1683,41 @@ class Plugin:
             logging.error(f"get_image error: {e}", exc_info=True)
             return {'success': False, 'data_uri': None}
 
+    async def get_plugin_logo(self):
+        """Return the plugin's bundled logo as a base64 data URI + raw base64.
+
+        Used by the frontend to paint custom artwork on the optional 'RomM'
+        Steam library shortcut (SteamClient.SetCustomArtworkForApp wants raw
+        base64, while <img> wants a data URI).
+        """
+        try:
+            import base64
+            logo = Path(__file__).parent / "assets" / "logo.png"
+            if not logo.exists():
+                return {'success': False, 'b64': None, 'data_uri': None}
+            raw = base64.b64encode(logo.read_bytes()).decode('ascii')
+            return {'success': True, 'b64': raw, 'data_uri': f"data:image/png;base64,{raw}", 'ext': 'png'}
+        except Exception as e:
+            logging.error(f"get_plugin_logo error: {e}", exc_info=True)
+            return {'success': False, 'b64': None, 'data_uri': None}
+
+    async def get_romm_logo(self):
+        """Return RomM's bundled isotipo (brand mark) as an SVG data URI.
+
+        Bundled in the plugin assets so the setup wizard can show the real RomM
+        logo before any server connection exists (server assets need auth).
+        """
+        try:
+            import base64
+            iso = Path(__file__).parent / "assets" / "romm-isotipo.svg"
+            if not iso.exists():
+                return {'success': False, 'data_uri': None}
+            raw = base64.b64encode(iso.read_bytes()).decode('ascii')
+            return {'success': True, 'data_uri': f"data:image/svg+xml;base64,{raw}"}
+        except Exception as e:
+            logging.error(f"get_romm_logo error: {e}", exc_info=True)
+            return {'success': False, 'data_uri': None}
+
     async def get_game_detail(self, rom_id: int):
         """Return IGDB-style metadata + files + local state for a game."""
         try:
@@ -1739,10 +1781,93 @@ class Plugin:
                     'earned': bool(bid is not None and str(bid) in earned_ids),
                 })
 
+            # ── HLTB durations (RomM HLTBStrip) ──────────────────────────────
+            hltb_src = d.get('hltb_metadata') or meta.get('hltb_metadata') or {}
+            hltb = {
+                'main_story':            hltb_src.get('main_story'),
+                'main_story_count':      hltb_src.get('main_story_count'),
+                'main_plus_extra':       hltb_src.get('main_plus_extra'),
+                'main_plus_extra_count': hltb_src.get('main_plus_extra_count'),
+                'completionist':         hltb_src.get('completionist'),
+                'completionist_count':   hltb_src.get('completionist_count'),
+                'all_styles':            hltb_src.get('all_styles'),
+                'all_styles_count':      hltb_src.get('all_styles_count'),
+            } if hltb_src else None
+
+            # ── Age ratings (RomM AgeRatingBadges) ───────────────────────────
+            # Resolve each merged rating string to {category, rating, icon_url},
+            # recovering the IGDB icon URL from the igdb/ss provider lists or by
+            # the "CATEGORY:RATING" convention. Mirrors AgeRatingBadges.vue.
+            _CAT_SLUG = {'ESRB': 'esrb', 'PEGI': 'pegi', 'CERO': 'cero', 'USK': 'usk',
+                         'GRAC': 'grac', 'CLASS_IND': 'class_ind', 'ACB': 'acb'}
+            def _igdb_icon(category, rating):
+                slug = _CAT_SLUG.get((category or '').strip().upper())
+                if not slug or not rating:
+                    return None
+                norm = str(rating).lower().replace('+', '')
+                return f"https://www.igdb.com/icons/rating_icons/{slug}/{slug}_{norm}.png"
+            igdb_meta = d.get('igdb_metadata') or {}
+            ss_meta = d.get('ss_metadata') or {}
+            _igdb_by = {str(r.get('rating')).strip(): r for r in (igdb_meta.get('age_ratings') or []) if isinstance(r, dict)}
+            _ss_by = {str(r.get('rating')).strip(): r for r in (ss_meta.get('age_ratings') or []) if isinstance(r, dict)}
+            age_ratings = []
+            for entry in (meta.get('age_ratings') or []):
+                if not isinstance(entry, str):
+                    continue
+                e = entry.strip()
+                if ':' in e:
+                    cat, _, rat = e.partition(':')
+                    cat, rat = cat.strip(), rat.strip()
+                    age_ratings.append({'category': cat, 'rating': rat, 'icon_url': _igdb_icon(cat, rat)})
+                elif e in _igdb_by:
+                    m = _igdb_by[e]
+                    age_ratings.append({'category': m.get('category') or '', 'rating': m.get('rating') or e,
+                                        'icon_url': m.get('rating_cover_url') or _igdb_icon(m.get('category'), m.get('rating'))})
+                elif e in _ss_by:
+                    m = _ss_by[e]
+                    age_ratings.append({'category': m.get('category') or '', 'rating': m.get('rating') or e,
+                                        'icon_url': _igdb_icon(m.get('category'), m.get('rating'))})
+                else:
+                    age_ratings.append({'category': '', 'rating': e, 'icon_url': None})
+
+            # ── Related games (RomM RelatedGamesGrid) ────────────────────────
+            def _related(key):
+                out = []
+                for g in (igdb_meta.get(key) or []):
+                    if not isinstance(g, dict):
+                        continue
+                    out.append({'id': g.get('id'), 'name': g.get('name') or '',
+                                'slug': g.get('slug'), 'cover_url': g.get('cover_url')})
+                return out
+            related = {
+                'expansions': _related('expansions'),
+                'dlcs':       _related('dlcs'),
+                'remakes':    _related('remakes'),
+                'remasters':  _related('remasters'),
+                'similar':    _related('similar_games'),
+            }
+
+            # ── Provider ids + verification (RomM MetadataTab / providers.ts) ─
+            providers = {k: d.get(k) for k in (
+                'igdb_id', 'moby_id', 'ss_id', 'ra_id', 'sgdb_id',
+                'launchbox_id', 'hasheous_id', 'flashpoint_id', 'hltb_id')}
+            hashes = {'crc': d.get('crc_hash'), 'md5': d.get('md5_hash'),
+                      'sha1': d.get('sha1_hash'), 'ra': d.get('ra_hash')}
+            hh = d.get('hasheous_metadata') or {}
+            verifications = [
+                {'label': 'TOSEC',    'match': bool(hh.get('tosec_match'))},
+                {'label': 'No-Intro', 'match': bool(hh.get('nointro_match'))},
+                {'label': 'Redump',   'match': bool(hh.get('redump_match'))},
+                {'label': 'FBNeo',    'match': bool(hh.get('fbneo_match'))},
+                {'label': 'MAME',     'match': bool(hh.get('mame_arcade_match') or hh.get('mame_mess_match'))},
+                {'label': 'RA',       'match': bool(d.get('ra_id'))},
+            ]
+
             return {
                 'success': True,
                 'rom_id': rom_id,
                 'name': d.get('name') or local.get('name') or 'Unknown',
+                'fs_name': d.get('fs_name') or local.get('file_name'),
                 'platform': (d.get('platform_display_name') or d.get('platform_custom_name')
                              or d.get('platform_name') or d.get('platform_slug') or local.get('platform')),
                 'summary': d.get('summary') or meta.get('summary') or '',
@@ -1751,6 +1876,21 @@ class Plugin:
                 'companies': _names(d.get('companies') or meta.get('companies')),
                 'release_date': d.get('first_release_date') or meta.get('first_release_date'),
                 'rating': meta.get('total_rating') or d.get('total_rating'),
+                # Header chips + Overview extras (RomM GameHeader / OverviewTab).
+                'regions':      _names(d.get('regions')),
+                'languages':    _names(d.get('languages')),
+                'tags':         _names(d.get('tags')),
+                'collections':  _names(meta.get('collections')),  # IGDB series (metadatum)
+                'user_collections': _names(d.get('user_collections')),  # RomM collections this ROM is in
+                'player_count': (meta.get('player_count') or '').strip() if isinstance(meta.get('player_count'), str) else meta.get('player_count'),
+                'last_played':  (d.get('rom_user') or {}).get('last_played'),
+                'verified':     bool(d.get('crc_hash')),
+                'hltb':         hltb,
+                'age_ratings':  age_ratings,
+                'related':      related,
+                'providers':    providers,
+                'hashes':       hashes,
+                'verifications': verifications,
                 'files': files,
                 'screenshots': [s for s in (d.get('merged_screenshots') or []) if s],
                 'achievements': achievements,
@@ -1843,7 +1983,7 @@ class Plugin:
                     'order_by': 'last_played', 'order_dir': 'desc',
                     'last_played': 'true',  # server-side filter to played roms only
                     'limit': limit, 'offset': 0,
-                    'fields': 'id,name,fs_name,platform_name,path_cover_small,rom_user',
+                    'fields': 'id,name,fs_name,platform_name,platform_slug,path_cover_small,merged_screenshots,rom_user',
                 },
                 timeout=30,
             )
@@ -1865,15 +2005,23 @@ class Plugin:
             rid = rom.get('id')
             local = idx.get(rid)
             if local:
-                out.append(self._serialize_game(local))
+                item = self._serialize_game(local)
             else:
-                out.append({
+                item = {
                     'rom_id': rid,
                     'name': rom.get('name') or rom.get('fs_name') or 'Unknown',
                     'platform': rom.get('platform_name'),
                     'is_downloaded': False,
                     'has_cover': bool(rom.get('path_cover_small')),
-                })
+                    'platform_slug': rom.get('platform_slug'),
+                }
+            # RomM's Home paints continue-playing cards with the game's
+            # screenshot (landscape) and floats the box-art as a PIP. Carry the
+            # first merged screenshot path so the frontend can do the same; the
+            # frontend base64s it through get_image, like the screenshots tab.
+            shots = [s for s in (rom.get('merged_screenshots') or []) if s]
+            item['screenshot'] = shots[0] if shots else None
+            out.append(item)
         return out
 
     async def get_home_data(self):
