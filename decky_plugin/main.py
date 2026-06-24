@@ -1260,6 +1260,11 @@ class Plugin:
             self._settings.set('RomM', 'url', url)
             self._settings.set('RomM', 'client_token', token)
             self._settings.set('RomM', 'auto_connect', 'true')
+            # Clear the onboarding flag so get_config() reports configured — pairing
+            # is a complete setup path (save_config does the same for password auth).
+            ds = load_decky_settings()
+            ds.pop('needs_onboarding', None)
+            save_decky_settings(ds)
             logging.info("Paired with RomM via Client API Token")
 
             connected = self._connect_to_romm()
