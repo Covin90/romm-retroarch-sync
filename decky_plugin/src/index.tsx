@@ -2,7 +2,6 @@ import {
   ButtonItem,
   PanelSection,
   PanelSectionRow,
-  ToggleField,
   TextField,
   Navigation,
   staticClasses,
@@ -16,20 +15,19 @@ import { callable, definePlugin, toaster, routerHook, openFilePicker, FileSelect
 import { useState, useEffect, useRef, ChangeEvent } from "react";
 import { FaSync, FaTrash, FaCog, FaSteam, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight, FaCheckCircle, FaUsers, FaExternalLinkAlt, FaPuzzlePiece, FaBoxOpen, FaClone, FaRedo, FaClock } from "react-icons/fa";
 import { BsGearFill } from "react-icons/bs";
+import { MdVerified } from "react-icons/md";
 
 // Call backend methods
 const getServiceStatus = callable<[], any>("get_service_status");
 const refreshFromRomm = callable<[boolean], any>("refresh_from_romm");
-const toggleCollectionSync = callable<[string, boolean], boolean>("toggle_collection_sync");
-const deleteCollectionRoms = callable<[string], boolean>("delete_collection_roms");
 const getLoggingEnabled = callable<[], boolean>("get_logging_enabled");
 const updateLoggingEnabled = callable<[boolean], boolean>("set_logging_enabled");
 const getConfig = callable<[], any>("get_config");
-const resetAllSettings = callable<[], any>("reset_all_settings");
+const logout = callable<[boolean], any>("logout");
+const getAccountUsername = callable<[], any>("get_account_username");
 const saveConfig = callable<[string, string, string, string, string, string, string], any>("save_config");
 const testRommConnection = callable<[string, string, string], any>("test_connection");
 const pairDevice = callable<[string, string], any>("pair_device");
-const toggleCollectionSteamSync = callable<[string, boolean], any>("toggle_collection_steam_sync");
 const getSaveHistory = callable<[number], any>("get_save_history");
 const getSaveScreenshot = callable<[number, number, string], any>("get_save_screenshot");
 const restoreSaveVersion = callable<[number, number, string, boolean], any>("restore_save_version");
@@ -45,6 +43,7 @@ const deleteGame = callable<[number], any>("delete_game");
 const launchGame = callable<[number], any>("launch_game");
 const getHomeData = callable<[], any>("get_home_data");
 const getPluginLogo = callable<[], any>("get_plugin_logo");
+const getRommArtwork = callable<[], any>("get_romm_artwork");
 const getRommLogo = callable<[], any>("get_romm_logo");
 
 // Shared image-fetch queue. The home page mounts dozens of tiles at once, each
@@ -1578,6 +1577,26 @@ const V2_FOCUS_STYLE = `
   .romm-ui *:focus, .romm-ui *:focus-visible { outline: none !important; }
 `;
 
+// Shared list-row / tile hover+focus treatment — the canonical RomM interaction
+// vocabulary (brand ring + soft purple glow + slight lift). Injected globally by
+// v2Page so every list (saves, achievements, …) reads identically instead of
+// each component reinventing it. `.romm-row` for full-width rows, `.romm-tile`
+// for the card grid. Note: hosts must NOT clip these (no overflow:hidden on the
+// immediate wrapper) or the outset glow gets cut off.
+const _EASE = 'cubic-bezier(0.22,1,0.36,1)';
+const V2_ROW_STYLE = `
+  .romm-row { background: ${V2.surface}; border: 1px solid ${V2.border}; transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ${_EASE}, box-shadow 0.15s ease; }
+  .romm-row:hover, .romm-row:focus-within {
+    background: ${V2.surfaceHover}; border-color: ${V2.brand}; transform: translateY(-1px);
+    box-shadow: 0 0 0 2px ${V2.brand}, 0 0 16px rgba(139,116,232,0.45);
+  }
+  .romm-tile { background: ${V2.surface}; border: 1px solid ${V2.border}; transition: background 0.15s ease, transform 0.15s ${_EASE}, box-shadow 0.15s ease, border-color 0.15s ease; }
+  .romm-tile:hover, .romm-tile:focus-within {
+    background: ${V2.surfaceHover}; transform: translateY(-2px); border-color: ${V2.brand};
+    box-shadow: 0 8px 22px rgba(0,0,0,0.4), 0 0 0 2px ${V2.brand}, 0 0 16px rgba(139,116,232,0.45);
+  }
+`;
+
 function v2Page(children: any, bgUri: string | null = null) {
   return (
     <div className="romm-ui" style={{
@@ -1585,7 +1604,7 @@ function v2Page(children: any, bgUri: string | null = null) {
       position: 'relative', overflowY: 'auto', height: 'calc(100vh - 40px)',
       marginTop: '40px',
     }}>
-      <style>{V2_FOCUS_STYLE}</style>
+      <style>{V2_FOCUS_STYLE}{V2_ROW_STYLE}</style>
       <V2Bg uri={bgUri} />
       <div style={{ position: 'relative', zIndex: 2, padding: '0 0 40px' }}>
         {children}
@@ -2010,6 +2029,7 @@ function LibraryGroupsPage() {
     const b = evt?.detail?.button;
     if (b === GamepadButton.BUMPER_LEFT) cycle(-1);
     else if (b === GamepadButton.BUMPER_RIGHT) cycle(1);
+    else if (b === GamepadButton.SELECT) Navigation.Navigate("/romm-sync-settings");
   };
 
   return v2Page(
@@ -2121,6 +2141,7 @@ function LibraryGamesPage() {
     const b = evt?.detail?.button;
     if (b === GamepadButton.BUMPER_LEFT) cycle(-1);
     else if (b === GamepadButton.BUMPER_RIGHT) cycle(1);
+    else if (b === GamepadButton.SELECT) Navigation.Navigate("/romm-sync-settings");
   };
 
   const jumpTo = (g: LibGroup) => { _libGroupHolder = { mode, group: g }; setGroup(g); };
@@ -2427,13 +2448,7 @@ function AchievementsTab({ achievements }: { achievements: Achievement[] }) {
       <style>{`
         @keyframes achFade { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
         .ach-fade { animation: achFade 320ms ${EASE} both; animation-delay: calc(var(--ach-i, 0) * 28ms); }
-        /* Filtering collapses/expands rows in place so both entry and exit animate. */
-        .ach-slot { overflow: hidden; transition: max-height 280ms ${EASE}, opacity 220ms ease, margin-bottom 280ms ${EASE}; }
-        .ach-row { transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ${EASE}, box-shadow 0.15s ease; }
-        .ach-row:hover, .ach-row:focus-within {
-          background: ${V2.surfaceHover}; border-color: ${V2.borderStrong};
-          transform: translateY(-1px); box-shadow: 0 6px 18px rgba(0,0,0,0.35);
-        }
+        /* Row hover is the shared .romm-row (see V2_ROW_STYLE). */
       `}</style>
 
       <div className="ach-fade" style={{ display: 'flex', flexDirection: 'column', background: V2.surface, border: `1px solid ${V2.border}`, borderRadius: V2.radiusLg, overflow: 'hidden' }}>
@@ -2466,41 +2481,33 @@ function AchievementsTab({ achievements }: { achievements: Achievement[] }) {
         {filterBtn('locked', '⊘ Locked', statusFilter === 'locked', () => toggleStatus('locked'), 'locked')}
       </Focusable>
 
-      <Focusable noFocusRing style={{ display: 'flex', flexDirection: 'column' }}>
-        {(() => { let vi = 0; return achievements.map((a, i) => {
+      {/* Filtered-out rows simply unmount (with a fade on the survivors) so the
+          list re-flows without a clipping wrapper — that lets the shared
+          .romm-row outset glow show, identical to the saves list. */}
+      <Focusable noFocusRing style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+        {achievements.filter(isVisible).map((a, i) => {
           const src = a.earned ? a.badge_url : a.badge_url_lock;
-          const vis = isVisible(a);
-          const delay = vis ? (vi++) * 22 : 0; // stagger the expand of currently-visible rows
           return (
-            <div key={a.ra_id ?? i} className="ach-slot" style={{
-              maxHeight: vis ? '160px' : '0px',
-              opacity: vis ? 1 : 0,
-              marginBottom: vis ? '6px' : '0px',
-              pointerEvents: vis ? 'auto' : 'none',
-              transitionDelay: `${delay}ms`,
-            }}>
-              <div className="ach-row ach-fade" style={{
-                display: 'grid', gridTemplateColumns: '52px 1fr auto', gap: '14px', alignItems: 'center',
-                padding: '10px 14px', background: V2.surface, border: `1px solid ${V2.border}`,
-                borderRadius: V2.radiusMd, opacity: a.earned ? 1 : 0.55,
-                '--ach-i': Math.min(i, 12) + 2,
-              } as any}>
-                <div style={{ width: '52px', height: '52px', borderRadius: '8px', overflow: 'hidden', background: V2.coverPlaceholder, flexShrink: 0 }}>
-                  {src && <img src={src} alt={a.title} loading="lazy" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
-                    onError={(e) => { (e.target as HTMLImageElement).style.visibility = 'hidden'; }} />}
-                </div>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: '13px', fontWeight: 600, color: V2.fg }}>{a.title}</div>
-                  <div style={{ fontSize: '11.5px', color: V2.fgMuted, marginTop: '2px', lineHeight: 1.4 }}>{a.description}</div>
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px', whiteSpace: 'nowrap' }}>
-                  <div style={{ fontSize: '12px', fontWeight: 700, color: V2.fg2, fontVariantNumeric: 'tabular-nums' }}>{a.points} pts</div>
-                  {a.type && <span style={typeTagStyle(a.type)}>{typeLabel(a.type)}</span>}
-                </div>
+            <Focusable noFocusRing key={a.ra_id ?? i} onActivate={() => {}} className="romm-row ach-fade" style={{
+              display: 'grid', gridTemplateColumns: '52px 1fr auto', gap: '14px', alignItems: 'center',
+              padding: '10px 14px', borderRadius: V2.radiusMd, opacity: a.earned ? 1 : 0.55,
+              '--ach-i': Math.min(i, 12) + 2,
+            } as any}>
+              <div style={{ width: '52px', height: '52px', borderRadius: '8px', overflow: 'hidden', background: V2.coverPlaceholder, flexShrink: 0 }}>
+                {src && <img src={src} alt={a.title} loading="lazy" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                  onError={(e) => { (e.target as HTMLImageElement).style.visibility = 'hidden'; }} />}
               </div>
-            </div>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: '13px', fontWeight: 600, color: V2.fg }}>{a.title}</div>
+                <div style={{ fontSize: '11.5px', color: V2.fgMuted, marginTop: '2px', lineHeight: 1.4 }}>{a.description}</div>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px', whiteSpace: 'nowrap' }}>
+                <div style={{ fontSize: '12px', fontWeight: 700, color: V2.fg2, fontVariantNumeric: 'tabular-nums' }}>{a.points} pts</div>
+                {a.type && <span style={typeTagStyle(a.type)}>{typeLabel(a.type)}</span>}
+              </div>
+            </Focusable>
           );
-        }); })()}
+        })}
       </Focusable>
     </div>
   );
@@ -2808,16 +2815,7 @@ function SaveDataTab({ romId }: { romId: number }) {
       <style>{`
         @keyframes sdFade { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
         .sd-fade { animation: sdFade 300ms ${EASE} both; animation-delay: calc(var(--sd-i, 0) * 26ms); }
-        .sd-row { transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ${EASE}, box-shadow 0.15s ease; }
-        .sd-row:hover, .sd-row:focus-within {
-          background: ${V2.surfaceHover}; border-color: ${V2.brand}; transform: translateY(-1px);
-          box-shadow: 0 0 0 2px ${V2.brand}, 0 0 16px rgba(139,116,232,0.45);
-        }
-        .sd-tile { transition: transform 0.15s ${EASE}, box-shadow 0.15s ease, border-color 0.15s ease; }
-        .sd-tile:hover, .sd-tile:focus-within {
-          transform: translateY(-2px); border-color: ${V2.brand};
-          box-shadow: 0 8px 22px rgba(0,0,0,0.4), 0 0 0 2px ${V2.brand}, 0 0 16px rgba(139,116,232,0.45);
-        }
+        /* Row/tile hover is the shared .romm-row / .romm-tile (see V2_ROW_STYLE). */
         @keyframes sdShimmer { 0% { background-position: -150% 0; } 100% { background-position: 150% 0; } }
         .sd-shimmer { background-image: linear-gradient(100deg, transparent 20%, rgba(255,255,255,0.22) 50%, transparent 80%) !important; background-size: 200% 100% !important; background-repeat: no-repeat; animation: sdShimmer 1.1s linear infinite; }
       `}</style>
@@ -2841,13 +2839,12 @@ function SaveDataTab({ romId }: { romId: number }) {
                   return (
                     <div key={`save-${e.id}`} className="sd-fade" style={{ '--sd-i': Math.min(idx, 14) } as any}>
                       <Focusable noFocusRing
-                        className="sd-row"
+                        className="romm-row"
                         onActivate={() => openRestore(e)}
                         onClick={() => openRestore(e)}
                         style={{
                           display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', textAlign: 'left',
-                          padding: '10px 13px', background: V2.surface, cursor: 'pointer',
-                          border: `1px solid ${V2.border}`, borderRadius: V2.radiusMd,
+                          padding: '10px 13px', cursor: 'pointer', borderRadius: V2.radiusMd,
                         }}
                       >
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', minWidth: 0 }}>
@@ -2893,13 +2890,12 @@ function SaveDataTab({ romId }: { romId: number }) {
                     return (
                       <Focusable noFocusRing
                         key={`state-${e.id}`}
-                        className="sd-tile sd-fade"
+                        className="romm-tile sd-fade"
                         onActivate={() => openRestore(e)}
                         onClick={() => openRestore(e)}
                         style={{
                           display: 'flex', flexDirection: 'column', cursor: 'pointer', overflow: 'hidden',
-                          background: V2.surface, borderRadius: V2.radiusLg,
-                          border: `1px solid ${V2.border}`,
+                          borderRadius: V2.radiusLg,
                           '--sd-i': Math.min(idx, 14),
                         } as any}
                       >
@@ -3063,6 +3059,7 @@ function GameDetailPage() {
     const b = evt?.detail?.button;
     if (b === GamepadButton.BUMPER_LEFT) cycleTab(-1);
     else if (b === GamepadButton.BUMPER_RIGHT) cycleTab(1);
+    else if (b === GamepadButton.SELECT) Navigation.Navigate("/romm-sync-settings");
   };
 
   return v2Page(
@@ -3093,11 +3090,12 @@ function GameDetailPage() {
                   <span style={{ color: m.color || V2.fg2 }}>{m.text}</span>
                 </span>
               ))}
-              {/* Verified — icon-only check (RomM GameHeader, crc_hash). */}
+              {/* Verified — icon-only check matching RomM GameHeader
+                  (mdi-check-decagram seal); MdVerified is its react-icons twin. */}
               {detail?.verified && (
                 <>
                   <span style={{ opacity: 0.3, margin: '0 8px' }}>·</span>
-                  <FaCheckCircle size={15} color={V2.success} title="Verified" />
+                  <MdVerified size={17} color={V2.success} />
                 </>
               )}
               {/* Region / language / custom tag chips (RomM RTags). */}
@@ -3265,15 +3263,98 @@ function GameDetailPage() {
   );
 }
 
+// ── V2 settings primitives (full-screen, controller-first) ──────────────────
+// Uppercase eyebrow + a column of rows, matching the GameDetails section look.
+function V2SettingsSection({ title, children }: { title: string; children: any }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '24px' }}>
+      <div style={{
+        fontSize: '11px', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase',
+        color: V2.fgMuted, padding: '0 2px',
+      }}>{title}</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>{children}</div>
+    </div>
+  );
+}
+
+// A focusable surface row: leading icon, title + optional subtitle, optional
+// trailing control. Acts as a button when onClick is given.
+function V2SettingsRow({ icon, title, subtitle, onClick, right, danger, disabled }:
+  { icon?: any; title: any; subtitle?: any; onClick?: () => void; right?: any; danger?: boolean; disabled?: boolean }) {
+  const [active, setActive] = useState(false);
+  const interactive = !!onClick && !disabled;
+  const accent = danger ? V2.danger : V2.brand;
+  return (
+    <Focusable noFocusRing
+      onActivate={interactive ? onClick : undefined}
+      onClick={interactive ? onClick : undefined}
+      onFocus={() => setActive(true)} onBlur={() => setActive(false)}
+      onMouseEnter={() => setActive(true)} onMouseLeave={() => setActive(false)}
+      style={{
+        display: 'flex', alignItems: 'center', gap: '14px', padding: '14px 16px',
+        borderRadius: V2.radiusCard, background: active ? V2.surfaceHover : V2.surface,
+        border: `1px solid ${active && interactive ? accent : V2.border}`,
+        boxShadow: active && interactive ? `0 0 0 2px ${accent}` : 'none',
+        cursor: interactive ? 'pointer' : 'default', opacity: disabled ? 0.5 : 1,
+        transition: 'background 0.15s, border-color 0.15s, box-shadow 0.15s',
+      }}>
+      {icon && (
+        <div style={{
+          flexShrink: 0, width: '36px', height: '36px', borderRadius: V2.radiusMd,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: danger ? 'rgba(255,80,80,0.12)' : V2.bgElevated,
+          color: danger ? V2.danger : V2.brandHover,
+        }}>{icon}</div>
+      )}
+      <div style={{ flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '2px' }}>
+        <div style={{ fontSize: '14px', fontWeight: 600, color: danger ? V2.danger : V2.fg }}>{title}</div>
+        {subtitle && <div style={{ fontSize: '12px', color: V2.fgMuted, lineHeight: 1.35 }}>{subtitle}</div>}
+      </div>
+      {right != null && <div style={{ flexShrink: 0 }}>{right}</div>}
+    </Focusable>
+  );
+}
+
+// Small pill switch in the V2 palette (the row owns activation).
+function V2Switch({ checked }: { checked: boolean }) {
+  return (
+    <div style={{
+      width: '40px', height: '22px', borderRadius: V2.radiusPill, flexShrink: 0,
+      background: checked ? V2.brand : 'rgba(255,255,255,0.18)',
+      transition: 'background 0.15s', position: 'relative',
+    }}>
+      <div style={{
+        position: 'absolute', top: '2px', left: checked ? '20px' : '2px',
+        width: '18px', height: '18px', borderRadius: '50%', background: '#fff',
+        transition: 'left 0.15s',
+      }} />
+    </div>
+  );
+}
+
 function SettingsPage() {
   const [loggingEnabled, setLoggingEnabled] = useState<boolean>(true);
   const [loading, setLoading] = useState<boolean>(true);
-  const [confirmReset, setConfirmReset] = useState<boolean>(false);
-  const [resetting, setResetting] = useState<boolean>(false);
+  const [confirmLogout, setConfirmLogout] = useState<boolean>(false);
+  const [loggingOut, setLoggingOut] = useState<boolean>(false);
   const [tilePresent, setTilePresent] = useState<boolean>(false);
   const [tileBusy, setTileBusy] = useState<boolean>(false);
+  const [serverInfo, setServerInfo] = useState<string>('');
 
-  useEffect(() => { (async () => { try { setTilePresent((await findRommShortcut()) != null); } catch { /* ignore */ } })(); }, []);
+  useEffect(() => { (async () => {
+    // Reconcile here (not just at plugin load): by the time Settings opens the
+    // shortcut store is reliably ready, so duplicates get swept and the toggle
+    // reflects the real tile state even right after a plugin update.
+    try { setTilePresent((await reconcileRommTile()) != null); } catch { /* ignore */ }
+    try {
+      const cfg = await getConfig();
+      const url = cfg?.url || '';
+      // Prefer the live RomM account name; never show the stored credential/token.
+      let name = '';
+      try { name = (await getAccountUsername())?.username || ''; } catch { /* ignore */ }
+      setServerInfo(name && url ? `${name} · ${url}` : (name || url || ''));
+    } catch { /* ignore */ }
+  })(); }, []);
 
   const handleAddTile = async () => {
     setTileBusy(true);
@@ -3313,161 +3394,134 @@ function SettingsPage() {
     }
   };
 
-  const handleReset = async () => {
-    setResetting(true);
+  const handleLogout = async (wipeData: boolean) => {
+    setLoggingOut(true);
     try {
-      const result = await resetAllSettings();
+      const result = await logout(wipeData);
       if (result?.success) {
-        toaster.toast({ title: 'Reset complete', body: `${result.deleted_roms ?? 0} ROM file(s) deleted. Sync state cleared.` });
-        // Navigate to the config/welcome page so the user goes through onboarding
-        Navigation.Navigate("/romm-sync-config");
+        toaster.toast({
+          title: 'Logged out',
+          body: wipeData
+            ? `${result.deleted_roms ?? 0} ROM file(s) deleted. Signed out of RomM.`
+            : 'Signed out of RomM. Downloaded files were kept.',
+        });
+        // Hand back to the setup wizard so the user can sign in again.
+        Navigation.Navigate("/romm-sync-setup");
         Navigation.CloseSideMenus();
       } else {
-        toaster.toast({ title: 'Reset failed', body: result?.error ?? 'Unknown error' });
+        toaster.toast({ title: 'Logout failed', body: result?.error ?? 'Unknown error' });
       }
     } catch (error) {
-      toaster.toast({ title: 'Reset failed', body: String(error) });
+      toaster.toast({ title: 'Logout failed', body: String(error) });
     } finally {
-      setResetting(false);
-      setConfirmReset(false);
+      setLoggingOut(false);
+      setConfirmLogout(false);
     }
   };
 
-  return (
-    <div style={{ overflowY: 'auto', height: 'calc(100vh - 40px)', marginTop: "40px", paddingBottom: '40px', color: "white" }}>
-      <div className={staticClasses.Title} style={{ marginBottom: "20px" }}>RomM Sync Settings</div>
-      <PanelSection title="Connection">
-        <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            onClick={() => {
-              Navigation.Navigate("/romm-sync-config");
-              Navigation.CloseSideMenus();
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <FaCog size={14} />
-              <span>Configure RomM Connection</span>
-            </div>
-          </ButtonItem>
-        </PanelSectionRow>
-      </PanelSection>
-      <PanelSection title="Steam Library">
-        <PanelSectionRow>
-          <ButtonItem layout="below" disabled={tileBusy}
-            onClick={tilePresent ? handleRemoveTile : handleAddTile}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              {tilePresent ? <FaTrash size={14} /> : <FaSteam size={14} />}
-              <span>{tileBusy ? 'Working…' : tilePresent ? 'Remove “RomM” from library' : 'Add “RomM” to Steam library'}</span>
-            </div>
-          </ButtonItem>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <div style={{ fontSize: '11px', color: '#9ca3af', padding: '0 2px 4px' }}>
-            Adds a “RomM” tile to your library that opens the game browser. Launching it won't run a game — it jumps straight into RomM.
-          </div>
-        </PanelSectionRow>
-      </PanelSection>
-      <PanelSection title="Debug Settings">
-        <PanelSectionRow>
-          <ToggleField
-            label="Enable Debug Logging"
-            description="Write debug logs to ~/.config/romm-retroarch-sync/decky_debug.log"
-            checked={loggingEnabled}
-            onChange={handleLoggingToggle}
-            disabled={loading}
+  return v2Page(
+    <Focusable noFocusRing
+      onButtonDown={(e: any) => { if (e?.detail?.button === GamepadButton.CANCEL) Navigation.NavigateBack(); }}
+      style={{ maxWidth: '760px', margin: '0 auto', padding: '20px 20px 0' }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '24px' }}>
+        <GameActionButton icon={<FaChevronLeft size={16} />} onClick={() => Navigation.NavigateBack()} />
+        <div style={{ fontSize: '24px', fontWeight: 800, letterSpacing: '-0.01em' }}>Settings</div>
+      </div>
+
+      <V2SettingsSection title="Steam Library">
+        <V2SettingsRow
+          icon={<FaSteam size={16} />}
+          title="Add “RomM” to Steam library"
+          subtitle="A library tile that jumps straight into the RomM browser — it won't launch a game."
+          onClick={tileBusy ? undefined : (tilePresent ? handleRemoveTile : handleAddTile)}
+          right={<V2Switch checked={tilePresent} />}
+          disabled={tileBusy}
+        />
+      </V2SettingsSection>
+
+      <V2SettingsSection title="Debug">
+        <V2SettingsRow
+          icon={<FaBug size={16} />}
+          title="Enable debug logging"
+          subtitle="Write logs to ~/.config/romm-retroarch-sync/decky_debug.log"
+          onClick={loading ? undefined : () => handleLoggingToggle(!loggingEnabled)}
+          right={<V2Switch checked={loggingEnabled} />}
+          disabled={loading}
+        />
+      </V2SettingsSection>
+
+      <V2SettingsSection title="Account">
+        {!confirmLogout ? (
+          <V2SettingsRow
+            icon={<FaUndo size={16} />}
+            title="Log out"
+            subtitle={serverInfo ? `Signed in as ${serverInfo}` : 'Sign out and return to setup.'}
+            onClick={() => setConfirmLogout(true)}
+            danger
           />
-        </PanelSectionRow>
-      </PanelSection>
-      <PanelSection title="About">
-        <PanelSectionRow>
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', padding: '4px 0 8px' }}>
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px' }}>
-              <span style={{ fontWeight: 'bold', fontSize: '15px' }}>RomM RetroArch Sync</span>
-              <span style={{ color: '#9ca3af', fontSize: '11px' }}>v1.5.0</span>
-            </div>
-            <div style={{ color: '#9ca3af', fontSize: '11px' }}>by Covin</div>
-            <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
-              {[
-                { icon: <FaGithub size={12} />, label: 'GitHub', url: 'https://github.com/Covin90/romm-retroarch-sync' },
-                { icon: <FaBug size={12} />, label: 'Report Issue', url: 'https://github.com/Covin90/romm-retroarch-sync/issues' },
-              ].map(({ icon, label, url }) => (
-                <div
-                  key={label}
-                  onClick={() => Navigation.NavigateToExternalWeb(url)}
-                  style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '4px 10px', borderRadius: '4px', background: 'rgba(255,255,255,0.08)', cursor: 'pointer', fontSize: '12px' }}
-                >
-                  {icon}
-                  <span>{label}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </PanelSectionRow>
-      </PanelSection>
-      <PanelSection title="Danger Zone">
-        {!confirmReset ? (
-          <PanelSectionRow>
-            <ButtonItem
-              layout="below"
-              onClick={() => setConfirmReset(true)}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#f87171' }}>
-                <FaTrash size={14} />
-                <span>Reset to New User</span>
-              </div>
-            </ButtonItem>
-            <div style={{ fontSize: '11px', color: '#9ca3af', marginTop: '4px' }}>
-              Deletes all synced ROMs and clears sync state. Credentials are kept.
-            </div>
-          </PanelSectionRow>
         ) : (
-          <PanelSectionRow>
-            <div style={{ fontSize: '13px', color: '#fbbf24', marginBottom: '8px' }}>
-              This will delete all downloaded ROM files and clear collection sync state. Are you sure?
+          <div style={{
+            display: 'flex', flexDirection: 'column', gap: '12px', padding: '16px',
+            borderRadius: V2.radiusCard, background: 'rgba(255,80,80,0.08)',
+            border: `1px solid rgba(255,80,80,0.40)`,
+          }}>
+            <div style={{ fontSize: '13px', color: V2.fg2, lineHeight: 1.4 }}>
+              How do you want to log out? You'll return to the setup wizard either way.
             </div>
-            <ButtonItem
-              layout="below"
-              onClick={handleReset}
-              disabled={resetting}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#f87171' }}>
-                <FaTrash size={14} />
-                <span>{resetting ? 'Resetting...' : 'Yes, reset everything'}</span>
-              </div>
-            </ButtonItem>
-            <ButtonItem
-              layout="below"
-              onClick={() => setConfirmReset(false)}
-              disabled={resetting}
-            >
-              Cancel
-            </ButtonItem>
-          </PanelSectionRow>
+            <GameActionButton icon={<FaUndo size={14} />} label={loggingOut ? 'Logging out…' : 'Log out (keep downloads)'}
+              onClick={() => handleLogout(false)} disabled={loggingOut} />
+            <GameActionButton icon={<FaTrash size={14} />} label={loggingOut ? 'Logging out…' : 'Log out & delete all downloads'}
+              variant="danger" onClick={() => handleLogout(true)} disabled={loggingOut} />
+            <GameActionButton icon={<FaTimes size={14} />} label="Cancel"
+              onClick={() => setConfirmLogout(false)} disabled={loggingOut} />
+          </div>
         )}
-      </PanelSection>
-    </div>
+      </V2SettingsSection>
+
+      <V2SettingsSection title="About">
+        <div style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px',
+          padding: '20px 16px', borderRadius: V2.radiusCard, background: V2.surface,
+          border: `1px solid ${V2.border}`,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px' }}>
+            <span style={{ fontWeight: 800, fontSize: '16px' }}>RomM RetroArch Sync</span>
+            <span style={{ color: V2.fgMuted, fontSize: '12px' }}>v1.6.0</span>
+          </div>
+          <div style={{ color: V2.fgMuted, fontSize: '12px' }}>by Covin</div>
+          <div style={{ display: 'flex', gap: '10px', marginTop: '6px' }}>
+            {[
+              { icon: <FaGithub size={13} />, label: 'GitHub', url: 'https://github.com/Covin90/romm-retroarch-sync' },
+              { icon: <FaBug size={13} />, label: 'Report Issue', url: 'https://github.com/Covin90/romm-retroarch-sync/issues' },
+            ].map(({ icon, label, url }) => (
+              <V2Button key={label} variant="tonal" onClick={() => Navigation.NavigateToExternalWeb(url)}>
+                {icon}<span>{label}</span>
+              </V2Button>
+            ))}
+          </div>
+        </div>
+      </V2SettingsSection>
+    </Focusable>
   );
 }
 
 function Content() {
-  const [status, setStatus] = useState<any>({ status: 'loading', message: 'Loading...' });
-  const [loading, setLoading] = useState(false);
-  const [togglingCollection, setTogglingCollection] = useState<string | null>(null);
-  const [steamSyncingCollection, setSteamSyncingCollection] = useState<string | null>(null);
+  // Slim QAM launcher: connection status + entry into the full-screen app.
+  // All management (collections, BIOS, settings) now lives in-app — open it
+  // with the gear here, or press Select anywhere in the browser.
+  const [status, setStatus] = useState<any>({ status: 'loading', message: 'Loading…' });
   const [configured, setConfigured] = useState<boolean | null>(null);
   const configuredRef = useRef<boolean | null>(null);
   const intervalRef = useRef<any>(null);
-  const optimisticOverrides = useRef<Map<string, { auto_sync: boolean, sync_state: string, downloaded?: number, total?: number }>>(new Map());
-  const [biosExpanded, setBiosExpanded] = useState(false);
 
   const getStatusColor = () => {
     switch (status.status) {
-      case 'connected': return '#4ade80'; // green
-      case 'running': return '#fbbf24'; // yellow
-      case 'stopped': return '#f87171'; // red
-      case 'error': return '#f87171'; // red
-      default: return '#9ca3af'; // gray
+      case 'connected': return '#4ade80';
+      case 'running': return '#fbbf24';
+      case 'stopped': return '#f87171';
+      case 'error': return '#f87171';
+      default: return '#9ca3af';
     }
   };
 
@@ -3486,175 +3540,20 @@ function Content() {
 
   const refreshStatus = async () => {
     try {
-      // If not yet configured, re-check so the panel transitions automatically
-      // after the user saves from ConfigPage — without calling getConfig() every cycle.
       if (configuredRef.current === false) {
-        const isConfigured = await checkConfigured();
-        if (!isConfigured) return;
+        if (!(await checkConfigured())) return;
       }
-
-      const result = await getServiceStatus();
-
-      // Check if backend data matches any overrides - if so, clear them
-      if (optimisticOverrides.current.size > 0) {
-        result.collections.forEach((col: any) => {
-          const override = optimisticOverrides.current.get(col.name);
-          if (override && override.auto_sync === col.auto_sync) {
-            const backendHasProgress = (col.downloaded !== undefined && col.total !== undefined && col.total > 0);
-            const shouldClear = backendHasProgress && (
-              override.sync_state === col.sync_state ||
-              col.sync_state === 'synced'
-            );
-            if (shouldClear) {
-              console.log(`[REFRESH] Clearing override for ${col.name}`);
-              optimisticOverrides.current.delete(col.name);
-            }
-          }
-        });
-      }
-
-      // Apply remaining optimistic overrides
-      if (optimisticOverrides.current.size > 0) {
-        const modifiedResult = {
-          ...result,
-          collections: result.collections.map((col: any) => {
-            const override = optimisticOverrides.current.get(col.name);
-            if (override) {
-              return {
-                ...col,
-                auto_sync: override.auto_sync,
-                sync_state: override.sync_state,
-                ...(override.downloaded !== undefined ? { downloaded: override.downloaded } : {}),
-                ...(override.total !== undefined ? { total: override.total } : {})
-              };
-            }
-            return col;
-          })
-        };
-        setStatus(modifiedResult);
-      } else {
-        setStatus(result);
-      }
-    } catch (error) {
+      setStatus(await getServiceStatus());
+    } catch {
       setStatus({ status: 'error', message: '❌ Plugin error' });
     }
   };
 
-  const stopPolling = () => {
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
-  };
-
-  const startPolling = () => {
-    stopPolling();
-    intervalRef.current = setInterval(refreshStatus, 2000); // Poll every 2 seconds for more responsive UI
-  };
-
   useEffect(() => {
     checkConfigured().then(refreshStatus);
-    startPolling();
-    return () => stopPolling();
+    intervalRef.current = setInterval(refreshStatus, 2000);
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
   }, []);
-
-  const handleReconnect = async () => {
-    setLoading(true);
-    setTimeout(refreshStatus, 1500);
-    setLoading(false);
-  };
-
-  const handleToggleCollection = async (collectionName: string, enabled: boolean) => {
-    console.log(`[TOGGLE] Starting toggle for ${collectionName}, enabled=${enabled}`);
-
-    // Get current collection state to determine total
-    const currentCollection = status?.collections.find((c: any) => c.name === collectionName);
-    const totalRoms = currentCollection?.total;
-    const hasValidTotal = totalRoms !== undefined && totalRoms > 0;
-
-    // FIRST: Set override BEFORE anything else to protect against concurrent polling
-    // Only include downloaded: 0, total: X if we have a valid total (> 0)
-    // Otherwise, let backend fetch the real total from server
-    optimisticOverrides.current.set(collectionName, {
-      auto_sync: enabled,
-      sync_state: enabled ? 'syncing' : 'not_synced',
-      ...(enabled && hasValidTotal ? { downloaded: 0, total: totalRoms } : {})
-    });
-    console.log(`[TOGGLE] Set override for ${collectionName} with downloaded=0, total=${hasValidTotal ? totalRoms : 'none'}, map size:`, optimisticOverrides.current.size);
-
-    setTogglingCollection(collectionName);
-
-    // Update UI immediately - change auto_sync and set initial sync_state
-    setStatus((prevStatus: any) => {
-      const updatedCollections = prevStatus.collections.map((col: any) => {
-        if (col.name === collectionName) {
-          // When enabling, show as syncing (with 0/total if we have valid total)
-          // When disabling, show as not_synced
-          if (enabled) {
-            if (hasValidTotal) {
-              return { ...col, auto_sync: true, sync_state: 'syncing', downloaded: 0, total: totalRoms };
-            } else {
-              // No valid total yet - just set syncing, let backend populate counts
-              return { ...col, auto_sync: true, sync_state: 'syncing' };
-            }
-          } else {
-            return { ...col, auto_sync: false, sync_state: 'not_synced' };
-          }
-        }
-        return col;
-      });
-      return {
-        ...prevStatus,
-        collections: updatedCollections,
-        actively_syncing_count: updatedCollections.filter((c: any) => c.auto_sync).length
-      };
-    });
-
-    try {
-      console.log(`[TOGGLE] Calling backend toggleCollectionSync...`);
-      const result = await toggleCollectionSync(collectionName, enabled);
-      console.log(`[TOGGLE] Backend returned:`, result);
-      if (!enabled) {
-        // Fire ROM deletion in background — don't block the UI refresh on it
-        deleteCollectionRoms(collectionName).catch((e: any) =>
-          console.error('[TOGGLE] ROM deletion failed:', e)
-        );
-      }
-      console.log(`[TOGGLE] Forcing immediate refresh after backend call`);
-      await refreshStatus();
-    } catch (error) {
-      console.error('[TOGGLE] Failed to toggle collection sync:', error);
-      optimisticOverrides.current.delete(collectionName);
-      refreshStatus();
-    } finally {
-      setTogglingCollection(null);
-    }
-  };
-
-  const handleToggleSteamSync = async (collectionName: string, enabled: boolean) => {
-    setSteamSyncingCollection(collectionName);
-    try {
-      const result = await toggleCollectionSteamSync(collectionName, enabled);
-      if (result?.success) {
-        toaster.toast({
-          title: enabled ? "Added to Steam" : "Removed from Steam",
-          body: result.message + (enabled ? "\nRestart Steam to see changes" : ""),
-          duration: 4000,
-        });
-      } else {
-        toaster.toast({
-          title: "Steam Sync Error",
-          body: result?.message || "Unknown error",
-          duration: 4000,
-        });
-      }
-      await refreshStatus();
-    } catch (error) {
-      console.error('Failed to toggle Steam sync:', error);
-    } finally {
-      setSteamSyncingCollection(null);
-    }
-  };
 
   if (configured === null) {
     return (
@@ -3671,16 +3570,13 @@ function Content() {
       <PanelSection title="RomM Sync">
         <PanelSectionRow>
           <div style={{ fontSize: '0.85em', color: '#d1d5db', lineHeight: '1.5' }}>
-            Connect your SteamOS device to your RomM server to automatically sync ROMs and save files.
+            Connect your SteamOS device to your RomM server to sync ROMs and saves.
           </div>
         </PanelSectionRow>
         <PanelSectionRow>
           <ButtonItem
             layout="below"
-            onClick={() => {
-              Navigation.Navigate("/romm-sync-config");
-              Navigation.CloseSideMenus();
-            }}
+            onClick={() => { Navigation.Navigate("/romm-sync-setup"); Navigation.CloseSideMenus(); }}
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
               <FaCog size={14} />
@@ -3694,18 +3590,12 @@ function Content() {
 
   return (
     <PanelSection>
-      <div style={{ paddingLeft: 0, paddingTop: '8px', paddingBottom: '8px', fontSize: '0.9em', color: '#b0b0b0' }}>
-        Status:
-      </div>
-      <div style={{ paddingLeft: 0, paddingTop: '8px', paddingBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85em' }}>
-        <div style={{
-          width: '8px',
-          height: '8px',
-          borderRadius: '50%',
-          backgroundColor: getStatusColor()
-        }} />
-        <span>{status.message.replace(', ', ' - ')}</span>
-      </div>
+      <PanelSectionRow>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.85em', padding: '4px 0' }}>
+          <div style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: getStatusColor(), flexShrink: 0 }} />
+          <span>{(status.message || '').replace(', ', ' - ')}</span>
+        </div>
+      </PanelSectionRow>
 
       <PanelSectionRow>
         <ButtonItem
@@ -3714,232 +3604,28 @@ function Content() {
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
             <FaGamepad size={14} />
-            <span>Browse Library</span>
+            <span>Open RomM</span>
           </div>
         </ButtonItem>
       </PanelSectionRow>
 
-      {status.status === 'running' && status.details?.last_update && (
-        <>
-          <PanelSectionRow>
-            <div style={{ fontSize: '0.82em', color: '#fbbf24', lineHeight: '1.4' }}>
-              Not connected to RomM. Check your connection settings or retry.
-            </div>
-          </PanelSectionRow>
-          <PanelSectionRow>
-            <ButtonItem layout="below" onClick={handleReconnect} disabled={loading}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <FaSync size={12} />
-                <span>Retry Connection</span>
-              </div>
-            </ButtonItem>
-          </PanelSectionRow>
-          <PanelSectionRow>
-            <ButtonItem
-              layout="below"
-              onClick={() => { Navigation.Navigate("/romm-sync-config"); Navigation.CloseSideMenus(); }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <FaCog size={12} />
-                <span>Connection Settings</span>
-              </div>
-            </ButtonItem>
-          </PanelSectionRow>
-        </>
-      )}
-
-      {/* BIOS Status Section - always show when there are platforms with BIOS requirements */}
-      {status.bios_status && status.bios_status.total_platforms > 0 && (
-        status.bios_status.downloading_count > 0 ||
-        status.bios_status.failed_count > 0 ||
-        status.bios_status.platforms_ready < status.bios_status.total_platforms
-      ) && (
-          <>
-            {/* BIOS Container - includes both summary and expanded list */}
-            <div
-              style={{
-                margin: '4px 0',
-                padding: '8px 12px',
-                background: status.bios_status.platforms_ready === status.bios_status.total_platforms
-                  ? 'rgba(74, 222, 128, 0.12)'
-                  : 'rgba(251, 191, 36, 0.12)',
-                border: status.bios_status.platforms_ready === status.bios_status.total_platforms
-                  ? '1px solid rgba(74, 222, 128, 0.4)'
-                  : '1px solid rgba(251, 191, 36, 0.4)',
-                borderRadius: '6px',
-                fontSize: '13px',
-                color: status.bios_status.platforms_ready === status.bios_status.total_platforms
-                  ? '#4ade80'
-                  : '#fbbf24',
-                lineHeight: '1.5',
-              }}
-            >
-              {/* Summary header - clickable */}
-              <div
-                onClick={() => setBiosExpanded(!biosExpanded)}
-                style={{
-                  cursor: 'pointer',
-                }}
-              >
-                {status.bios_status.platforms_ready === status.bios_status.total_platforms ? '✅' : '⚠️'} {status.bios_status.platforms_ready}/{status.bios_status.total_platforms} platforms ready
-                <div style={{ fontSize: '11px', marginTop: '4px', opacity: 0.8 }}>
-                  {biosExpanded ? '▼ Click to collapse' : '▶ Click to expand'}
-                </div>
-              </div>
-
-              {/* Expanded platform list - inside container */}
-              {biosExpanded && status.bios_status.platforms && (
-                <div style={{ marginTop: '12px', paddingTop: '8px', borderTop: '1px solid rgba(255, 255, 255, 0.1)' }}>
-                  {Object.entries(status.bios_status.platforms).map(([slug, platform]: [string, any]) => {
-                    const isDownloading = status.bios_status.downloading?.includes(slug);
-                    const hasFailed = status.bios_status.failures?.[slug];
-                    let icon = '✅';
-                    let color = '#4ade80';
-                    let statusText = 'Ready';
-
-                    if (isDownloading) {
-                      icon = '📥';
-                      color = '#60a5fa';
-                      statusText = 'Downloading...';
-                    } else if (hasFailed && hasFailed !== 'unavailable_on_server') {
-                      icon = '❌';
-                      color = '#f87171';
-                      statusText = 'Failed';
-                    } else if (hasFailed === 'unavailable_on_server' || platform.present === 0) {
-                      // Zero BIOS files - needs attention (lenient logic)
-                      icon = '⚠️';
-                      color = '#fbbf24';
-                      statusText = 'Missing';
-                    } else if (platform.present > 0) {
-                      // Has at least one BIOS - functional (lenient logic)
-                      icon = '✅';
-                      color = '#4ade80';
-                      // Show detail: "Ready (2/3)" if partial, "Ready" if complete
-                      if (platform.missing > 0) {
-                        statusText = `Ready (${platform.present}/${platform.total_required})`;
-                      } else {
-                        statusText = `Ready (${platform.present})`;
-                      }
-                    }
-
-                    return (
-                      <div
-                        key={slug}
-                        style={{
-                          padding: '6px 10px',
-                          margin: '4px 0',
-                          background: 'rgba(0, 0, 0, 0.2)',
-                          borderRadius: '4px',
-                          fontSize: '12px',
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          alignItems: 'center',
-                        }}
-                      >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                          <span>{icon}</span>
-                          <span>{platform.name}</span>
-                        </div>
-                        <span style={{ color, fontSize: '11px' }}>{statusText}</span>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-          </>
-        )}
-
-      {status.collections && status.collections.length > 0 && (
-        <>
-          <div style={{ paddingLeft: 0, paddingTop: '8px', paddingBottom: '8px', fontSize: '0.9em', color: '#b0b0b0' }}>
-            Collections:
+      <PanelSectionRow>
+        <ButtonItem
+          layout="below"
+          onClick={() => { Navigation.Navigate("/romm-sync-settings"); Navigation.CloseSideMenus(); }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <FaCog size={14} />
+            <span>Settings</span>
           </div>
-          {status.collections.map((collection: any, index: number) => {
-            // Determine dot color based on sync state
-            const getDotColor = () => {
-              if (!collection.auto_sync) return '#6b7280'; // gray - not syncing
-              switch (collection.sync_state) {
-                case 'synced': return '#4ade80';    // green - fully synced
-                case 'syncing': return '#fb923c';   // orange - currently syncing
-                case 'not_synced': return '#f87171'; // red - not synced
-                default: return '#6b7280';           // gray - unknown
-              }
-            };
+        </ButtonItem>
+      </PanelSectionRow>
 
-            const isSyncing = collection.auto_sync && collection.sync_state === 'syncing';
-            const hasCount = collection.downloaded !== undefined && collection.total !== undefined && collection.total > 0;
-            // Use downloaded_pct (0–100) when available — it's computed on the backend with full
-            // float precision and doesn't lose significant digits for large files in large collections.
-            // Fall back to the ratio for the rare case where it's missing.
-            const pct = isSyncing && collection.downloaded_pct !== undefined
-              ? Math.round(collection.downloaded_pct)
-              : (hasCount ? Math.round((collection.downloaded / collection.total) * 100) : 0);
-
-            return (
-              <div key={index}>
-                <PanelSectionRow>
-                  <ToggleField
-                    label={
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <div style={{
-                            width: '6px',
-                            height: '6px',
-                            borderRadius: '50%',
-                            backgroundColor: getDotColor()
-                          }} />
-                          <span>{collection.name}</span>
-                        </div>
-                        {status.steam_available && collection.auto_sync && hasCount && (
-                          <div
-                            onClick={(e: React.MouseEvent<HTMLDivElement>) => { e.stopPropagation(); if (steamSyncingCollection !== collection.name && !collection.is_syncing_steam) handleToggleSteamSync(collection.name, !collection.steam_sync); }}
-                            title={steamSyncingCollection === collection.name || collection.is_syncing_steam
-                              ? 'Syncing Steam shortcuts...'
-                              : (collection.steam_sync
-                                ? (collection.steam_shortcut_count > 0 ? `${collection.steam_shortcut_count} Steam shortcuts` : 'Remove from Steam')
-                                : 'Add to Steam')}
-                            style={{ display: 'flex', alignItems: 'center', padding: '2px 4px', borderRadius: '4px', cursor: steamSyncingCollection === collection.name || collection.is_syncing_steam ? 'default' : 'pointer' }}
-                          >
-                            {steamSyncingCollection === collection.name || collection.is_syncing_steam
-                              ? <FaSync size={14} color="#66c0f4" style={{ animation: 'spin 1s linear infinite' }} />
-                              : <FaSteam size={16} color={collection.steam_sync ? '#66c0f4' : '#6b7280'} />
-                            }
-                          </div>
-                        )}
-                      </div>
-                    }
-                    description={(() => {
-                      const countText = collection.auto_sync
-                        ? (hasCount ? `${Math.floor(collection.downloaded)} / ${collection.total} ROMs` : "Fetching...")
-                        : (hasCount ? `${Math.floor(collection.downloaded)} / ${collection.total} ROMs locally` : "Fetching...");
-                      if (isSyncing && hasCount) {
-                        return (
-                          <div>
-                            <div>{countText}</div>
-                            <div style={{ width: '100%', height: '4px', background: 'rgba(255,255,255,0.12)', borderRadius: '2px', overflow: 'hidden', margin: '5px 0' }}>
-                              <div style={{ width: `${pct}%`, height: '100%', background: '#fb923c', borderRadius: '2px', transition: 'width 0.4s ease' }} />
-                            </div>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#9ca3af' }}>
-                              <span>{pct}%</span>
-                              {collection.speed > 0 && <span>{formatSpeed(collection.speed)}</span>}
-                            </div>
-                          </div>
-                        );
-                      }
-                      return countText;
-                    })()}
-                    checked={collection.auto_sync}
-                    onChange={(value: boolean) => handleToggleCollection(collection.name, value)}
-                    disabled={togglingCollection === collection.name}
-                  />
-                </PanelSectionRow>
-              </div>
-            );
-          })}
-        </>
-      )}
+      <PanelSectionRow>
+        <div style={{ fontSize: '11px', color: '#9ca3af', padding: '4px 2px 0', lineHeight: 1.4 }}>
+          Tip: press Select in the browser to open Settings.
+        </div>
+      </PanelSectionRow>
     </PanelSection>
   );
 }
@@ -4296,36 +3982,123 @@ function SetupWizard() {
 // feature-detected and wrapped — failures degrade to a toast, never a crash.
 const ROMM_SHORTCUT_NAME = "RomM";
 const ROMM_SHORTCUT_EXE = "/bin/true"; // no-op: the tile only triggers navigation
+// Stamped into the shortcut's launch options so we can re-identify our tile
+// even when Steam hasn't persisted its name (the root cause of duplicates and
+// the toggle flipping off after an update).
+const ROMM_TILE_SENTINEL = "romm-sync-monitor-tile";
 let _rommAppId: number | null = null;
+let _rommNavTimer: any = null;
 let _rommActionReg: { unregister: () => void } | null = null;
 // Guards the startup setup-wizard auto-open so it fires at most once per session.
 let _setupAutoOpened = false;
 
 const _sc = (): any => (typeof window !== 'undefined' ? (window as any).SteamClient : undefined);
 
+// Enumerate all non-Steam shortcut overviews. This build does NOT expose
+// SteamClient.Apps.GetAllShortcuts, so we read the app stores Steam keeps in
+// memory and keep only entries that report themselves as shortcuts.
+// AppIds of all non-Steam shortcuts. deckDesktopApps.apps is a Map keyed by
+// appid on this build; the map values are not overviews, so we resolve each
+// overview separately via appStore.GetAppOverviewByAppID.
+function _shortcutAppIds(): number[] {
+  const m = (window as any).collectionStore?.deckDesktopApps?.apps;
+  try { if (m?.keys) return Array.from(m.keys()).map((k: any) => Number(k)); } catch { /* ignore */ }
+  return [];
+}
+
+function _appName(appid: number): string {
+  try { return String((window as any).appStore?.GetAppOverviewByAppID?.(appid)?.display_name ?? ''); } catch { return ''; }
+}
+
+// All our tiles carry the name "RomM"; also accept the exe-derived fallback
+// names Steam uses when a name didn't persist. Real games carry their own names.
+function _isRommName(nm: string): boolean {
+  return nm === ROMM_SHORTCUT_NAME || nm === 'true' || nm === '/bin/true';
+}
+
+function _rommAppIds(): number[] {
+  return _shortcutAppIds().filter((aid) => _isRommName(_appName(aid)));
+}
+
 async function findRommShortcut(): Promise<number | null> {
+  if (_rommAppId != null) return _rommAppId;
   try {
-    const apps = _sc()?.Apps;
-    if (!apps?.GetAllShortcuts) return null;
-    const all = await apps.GetAllShortcuts();
-    for (const s of (all || [])) {
-      const nm = s?.data?.strAppName || s?.data?.appname || s?.strAppName || s?.appname;
-      const aid = s?.appid ?? s?.unAppID ?? s?.data?.appid;
-      if (nm === ROMM_SHORTCUT_NAME && aid != null) return Number(aid);
-    }
+    const ids = _rommAppIds();
+    if (ids.length) return ids[0];
   } catch (e) { console.error('[RomM] findRommShortcut', e); }
   return null;
+}
+
+// Remove duplicate RomM tiles left behind by earlier sessions, keeping one.
+// Returns the surviving appId (or null if none).
+async function cleanupRommShortcuts(): Promise<number | null> {
+  try {
+    const apps = _sc()?.Apps;
+    const mine = _rommAppIds();
+    if (mine.length === 0) return null;
+    const keep = mine[0];
+    for (const aid of mine.slice(1)) {
+      try { await apps?.RemoveShortcut?.(aid); } catch (e) { console.error('[RomM] dedup remove', e); }
+    }
+    return keep;
+  } catch (e) { console.error('[RomM] cleanupRommShortcuts', e); return null; }
+}
+
+// Bring the RomM tile into a known-good state: collapse duplicates to one,
+// repair the survivor's name + sentinel, repaint art, and bind the launch
+// intercept. Safe to call repeatedly. Returns the surviving appId (or null).
+// Run this when the shortcut store is ready (e.g. on Settings open), not only
+// at plugin load, where GetAllShortcuts can still be empty.
+async function reconcileRommTile(): Promise<number | null> {
+  const appId = (await cleanupRommShortcuts()) ?? (await findRommShortcut());
+  if (appId == null) return null;
+  _rommAppId = appId;
+  const apps = _sc()?.Apps;
+  try { await apps?.SetShortcutName?.(appId, ROMM_SHORTCUT_NAME); } catch { /* ignore */ }
+  try { await apps?.SetShortcutLaunchOptions?.(appId, ROMM_TILE_SENTINEL); } catch { /* ignore */ }
+  // Stamping name/launch-options can renumber the shortcut appid (it's a hash of
+  // exe+name+options). Re-resolve so the cache, intercept and artwork all target
+  // the live tile rather than the now-dead pre-stamp appid.
+  const liveId = (_rommAppIds()[0]) ?? appId;
+  _rommAppId = liveId;
+  registerRommLaunchIntercept();
+  ensureRommArtwork(liveId);
+  return liveId;
 }
 
 async function ensureRommArtwork(appId: number) {
   try {
     const apps = _sc()?.Apps;
     if (!apps?.SetCustomArtworkForApp) return;
+    // Steam asset types -> files this build writes:
+    //   0 -> {appid}p.png   (portrait capsule)  : grid
+    //   1 -> {appid}_hero   (hero background)    : hero
+    //   2 -> {appid}_logo   (transparent logo)   : logo
+    //   4 -> {appid}.png    (landscape capsule)  : THIS is the image Big
+    //        Picture's "Recent Games" featured banner uses, so it must get the
+    //        background-only landscape art, not the centered-mark icon.
+    // (Type 3 is a no-op on this build, so the landscape goes through type 4.)
+    const res = await getRommArtwork();
+    const art = res?.art as Record<string, string> | undefined;
+    if (art && Object.keys(art).length) {
+      const ext = res.ext || 'png';
+      // type -> source art key. Type 4 (the landscape {appid}.png) is fed the
+      // header (bg-only) art instead of the icon.
+      const plan: [number, string][] = [[0, '0'], [1, '1'], [2, '2'], [4, '3']];
+      for (const [n, key] of plan) {
+        if (!art[key]) continue;
+        // Clear first: Steam won't overwrite an existing custom asset, so a
+        // repaint over stale art would otherwise silently no-op.
+        try { await apps.ClearCustomArtworkForApp?.(appId, n); } catch { /* ignore */ }
+        try { await apps.SetCustomArtworkForApp(appId, art[key], ext, n); } catch { /* ignore */ }
+      }
+      return;
+    }
+    // Fallback to the flat logo if branded artwork is unavailable.
     const logo = await getPluginLogo();
     if (!logo?.b64) return;
-    // 0 = portrait capsule (grid), 3 = header/landscape. Paint both with the logo.
     try { await apps.SetCustomArtworkForApp(appId, logo.b64, logo.ext || 'png', 0); } catch { /* ignore */ }
-    try { await apps.SetCustomArtworkForApp(appId, logo.b64, logo.ext || 'png', 3); } catch { /* ignore */ }
+    try { await apps.SetCustomArtworkForApp(appId, logo.b64, logo.ext || 'png', 4); } catch { /* ignore */ }
   } catch (e) { console.error('[RomM] ensureRommArtwork', e); }
 }
 
@@ -4337,7 +4110,17 @@ async function addRommShortcut(): Promise<number | null> {
     let appId = await findRommShortcut();
     if (appId == null) {
       appId = Number(await apps.AddShortcut(ROMM_SHORTCUT_NAME, ROMM_SHORTCUT_EXE, "", ""));
-      try { await apps.SetShortcutName?.(appId, ROMM_SHORTCUT_NAME); } catch { /* ignore */ }
+    }
+    // Always (re)assert the display name. AddShortcut's name arg doesn't reliably
+    // persist to the shortcut's strAppName on all Steam builds, so the tile can
+    // show up blank/"true" without an explicit SetShortcutName.
+    if (apps.SetShortcutName) {
+      try { await apps.SetShortcutName(appId, ROMM_SHORTCUT_NAME); } catch (e) { console.error('[RomM] SetShortcutName', e); }
+    }
+    // Stamp the sentinel so we can always re-find this tile even if the name
+    // doesn't persist — this is what prevents duplicate tiles piling up.
+    if (apps.SetShortcutLaunchOptions) {
+      try { await apps.SetShortcutLaunchOptions(appId, ROMM_TILE_SENTINEL); } catch (e) { console.error('[RomM] SetShortcutLaunchOptions', e); }
     }
     _rommAppId = appId;
     await ensureRommArtwork(appId);
@@ -4368,8 +4151,32 @@ function registerRommLaunchIntercept() {
     const apps = _sc()?.Apps;
     if (!apps?.RegisterForGameActionStart) return;
     _rommActionReg = apps.RegisterForGameActionStart((_actionType: number, strAppId: string) => {
-      if (_rommAppId != null && Number(strAppId) === _rommAppId) {
-        try { Navigation.Navigate("/romm-sync-library"); Navigation.CloseSideMenus(); } catch (e) { console.error('[RomM] nav', e); }
+      const raw = Number(strAppId);
+      // GameActionStart may pass the full 64-bit gameID; the 32-bit appid is its
+      // high dword. Try both the raw value and the extracted appid.
+      const hi = Math.floor(raw / 4294967296);
+      const aid = hi > 0 ? hi : raw;
+      // Identify by name/overview, not numeric id: GameActionStart's appid
+      // representation (signed/unsigned/gameid) doesn't reliably equal the
+      // collectionStore key, and stamping renumbers the cached id. Name match
+      // sidesteps all of that.
+      let mine = aid === _rommAppId || raw === _rommAppId;
+      if (!mine) { try { mine = _isRommName(_appName(aid)) || _isRommName(_appName(raw)); } catch { /* ignore */ } }
+      if (!mine) { try { mine = _rommAppIds().includes(aid) || _rommAppIds().includes(raw); } catch { /* ignore */ } }
+      if (mine) {
+        _rommAppId = aid;
+        // The /bin/true tile fires this twice (launch start type=6, then exit
+        // type=7 ~1.5s later). Navigating immediately gets clobbered when Steam
+        // returns to the tile on exit. Debounce, and navigate on a short delay
+        // so our route lands AFTER Steam settles back from the no-op launch.
+        // End the no-op launch immediately so we don't have to wait for it to
+        // exit on its own (that wait is what made the browser slow to appear).
+        try { _sc()?.Apps?.TerminateApp?.(String(strAppId), false); } catch { /* ignore */ }
+        if (_rommNavTimer != null) { try { clearTimeout(_rommNavTimer); } catch { /* ignore */ } }
+        _rommNavTimer = setTimeout(() => {
+          _rommNavTimer = null;
+          try { Navigation.Navigate("/romm-sync-library"); Navigation.CloseSideMenus(); } catch (e) { console.error('[RomM] nav', e); }
+        }, 0);
       }
     });
   } catch (e) { console.error('[RomM] registerRommLaunchIntercept', e); }
@@ -4387,8 +4194,12 @@ export default definePlugin(() => {
   // and auto-open the setup wizard once when no connection is configured.
   (async () => {
     try {
-      const existing = await findRommShortcut();
-      if (existing != null) { _rommAppId = existing; registerRommLaunchIntercept(); }
+      // Best-effort at load; the shortcut store may not be ready this early, so
+      // Settings-open reconciles again. Retry shortly after to catch the store
+      // becoming ready without needing the user to open Settings.
+      if ((await reconcileRommTile()) == null) {
+        setTimeout(() => { reconcileRommTile().catch(() => { /* ignore */ }); }, 4000);
+      }
     } catch (e) { console.error('[RomM] shortcut rebind', e); }
     try {
       const cfg = await getConfig();

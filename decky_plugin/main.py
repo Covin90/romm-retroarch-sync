@@ -1096,6 +1096,21 @@ class Plugin:
             logging.error(f"test_connection error: {e}", exc_info=True)
             return {'success': False, 'message': f'Connection error: {str(e)[:150]}'}
 
+    async def get_account_username(self):
+        """Return the human-readable RomM account name for the connected user,
+        fetched live from /api/users/me. Used by the in-app Settings page so it
+        never displays a stored credential/token. Empty string when offline."""
+        try:
+            client = self._romm_client
+            if client is None or not getattr(client, 'authenticated', False):
+                return {'username': ''}
+            user = client.get_current_user() or {}
+            name = user.get('username') or user.get('display_name') or ''
+            return {'username': name}
+        except Exception as e:
+            logging.error(f"get_account_username error: {e}")
+            return {'username': ''}
+
     async def get_logging_enabled(self):
         try:
             return load_decky_settings().get('logging_enabled', True)
@@ -1213,6 +1228,46 @@ class Plugin:
 
         except Exception as e:
             logging.error(f"reset_all_settings error: {e}", exc_info=True)
+            return {'success': False, 'error': str(e)}
+
+    async def logout(self, wipe_data: bool = False):
+        """Log out of RomM. Always clears stored credentials and stops sync so
+        get_config() reports unconfigured and the setup wizard takes over.
+
+        When wipe_data is True, also deletes downloaded ROMs/BIOS and clears
+        sync state first (the old "reset to new user" behaviour). When False,
+        downloaded files are kept so logging back in is non-destructive.
+        """
+        try:
+            if not SYNC_CORE_AVAILABLE:
+                return {'success': False, 'error': 'sync_core not available'}
+
+            result = {'success': True, 'deleted_roms': 0, 'deleted_bios': 0}
+            if wipe_data:
+                # reset_all_settings deletes ROMs/BIOS, clears sync state, and
+                # sets needs_onboarding; it also stops sync.
+                result = await self.reset_all_settings()
+            else:
+                self._stop_sync()
+
+            # Clear credentials so configured == False. Keep url/username so the
+            # wizard can pre-fill the server for a quick log back in.
+            settings = SettingsManager()
+            settings.set('RomM', 'password', '')
+            settings.set('RomM', 'client_token', '')
+            settings.set('RomM', 'auto_connect', 'false')
+
+            self._romm_client = None
+
+            ds = load_decky_settings()
+            ds['needs_onboarding'] = True
+            save_decky_settings(ds)
+
+            logging.info(f"Logged out of RomM (wipe_data={wipe_data})")
+            result['success'] = True
+            return result
+        except Exception as e:
+            logging.error(f"logout error: {e}", exc_info=True)
             return {'success': False, 'error': str(e)}
 
     def _ensure_device_registered(self):
@@ -1714,6 +1769,30 @@ class Plugin:
         except Exception as e:
             logging.error(f"get_plugin_logo error: {e}", exc_info=True)
             return {'success': False, 'b64': None, 'data_uri': None}
+
+    async def get_romm_artwork(self):
+        """Return RomM-branded Steam artwork for every asset type as raw base64.
+
+        Keys are Steam's eAppArtworkAssetType values:
+            0 grid (portrait), 1 hero, 2 logo (transparent), 3 header, 4 icon.
+        The frontend paints these onto the optional 'RomM' library shortcut via
+        SetCustomArtworkForApp. PNGs are pre-rendered (scripts/gen_romm_artwork.py)
+        and bundled, so no SVG/PIL work happens at runtime.
+        """
+        try:
+            import base64
+            assets = Path(__file__).parent / "assets"
+            files = {0: "romm-grid.png", 1: "romm-hero.png", 2: "romm-logo.png",
+                     3: "romm-header.png", 4: "romm-icon.png"}
+            out = {}
+            for atype, fname in files.items():
+                p = assets / fname
+                if p.exists():
+                    out[str(atype)] = base64.b64encode(p.read_bytes()).decode('ascii')
+            return {'success': bool(out), 'art': out, 'ext': 'png'}
+        except Exception as e:
+            logging.error(f"get_romm_artwork error: {e}", exc_info=True)
+            return {'success': False, 'art': {}}
 
     async def get_romm_logo(self):
         """Return RomM's bundled isotipo (brand mark) as an SVG data URI.

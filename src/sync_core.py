@@ -1851,6 +1851,23 @@ class RomMClient:
             print(f"Error fetching platforms: {e}")
         return []
 
+    def get_current_user(self):
+        """Return the authenticated RomM account (/api/users/me) as a dict, or
+        None. Works for both password and Client API Token auth."""
+        if not self.ensure_authenticated():
+            return None
+        try:
+            response = self.session.get(
+                urljoin(self.base_url, '/api/users/me'),
+                timeout=10
+            )
+            if response.status_code == 200:
+                return response.json()
+            print(f"Failed to get current user: {response.status_code}")
+        except Exception as e:
+            print(f"Error fetching current user: {e}")
+        return None
+
     def get_collection_roms(self, collection_id):
         """Get ROMs in a specific collection"""
         if not self.ensure_authenticated():
@@ -4094,11 +4111,51 @@ class RetroArchInterface:
         
         return len(required_missing) == 0
 
+    def _host_subprocess_env(self):
+        """Environment for launching HOST binaries (flatpak, snap, native).
+
+        When this code runs from a PyInstaller/AppImage bundle, the loader
+        injects LD_LIBRARY_PATH (and friends) pointing at the bundle's own libs
+        (e.g. an older OpenSSL under /tmp/_MEI...). A host `flatpak` inheriting
+        those crashes with 'OPENSSL_3.4.0 not found'. Restore the pre-bundle
+        library env so host tools use the system libraries.
+        """
+        env = os.environ.copy()
+        for var in ('LD_LIBRARY_PATH', 'LD_PRELOAD'):
+            orig = env.get(var + '_ORIG')   # PyInstaller saves the original here
+            if orig is not None:
+                env[var] = orig
+            else:
+                env.pop(var, None)
+
+        # Backfill the graphical-session vars. The Decky daemon spawns us without
+        # DISPLAY/WAYLAND_DISPLAY/XDG_RUNTIME_DIR/DBUS_SESSION_BUS_ADDRESS, so a
+        # GUI emulator finds no display and exits immediately (code 1). Derive
+        # them from the runtime dir rather than hardcoding.
+        try:
+            uid = os.getuid()
+        except Exception:
+            uid = None
+        xrd = env.get('XDG_RUNTIME_DIR') or (f'/run/user/{uid}' if uid is not None else None)
+        if xrd and os.path.isdir(xrd):
+            env['XDG_RUNTIME_DIR'] = xrd
+            env.setdefault('DBUS_SESSION_BUS_ADDRESS', f'unix:path={xrd}/bus')
+            if not env.get('WAYLAND_DISPLAY'):
+                # Pick the first wayland-N socket present in the runtime dir.
+                try:
+                    socks = sorted(f for f in os.listdir(xrd) if f.startswith('wayland-') and not f.endswith('.lock'))
+                    if socks:
+                        env['WAYLAND_DISPLAY'] = socks[0]
+                except Exception:
+                    pass
+        env.setdefault('DISPLAY', ':0')
+        return env
+
     def launch_game_retrodeck(self, rom_path):
         """Launch game through RetroDECK (which handles core selection automatically)"""
         try:
             import subprocess
-            
+
             # RetroDECK methods to try (in order of preference)
             commands_to_try = [
                 ['flatpak', 'run', 'net.retrodeck.retrodeck', str(rom_path)],
@@ -4112,7 +4169,8 @@ class RetroArchInterface:
                 result = subprocess.Popen(cmd,
                                         stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE,
-                                        text=True)
+                                        text=True,
+                                        env=self._host_subprocess_env())
 
                 time.sleep(3)  # Wait to see if it fails immediately
 
@@ -4141,24 +4199,35 @@ class RetroArchInterface:
         
         retroarch_candidates = []
 
-        # Method 1: Flatpak - REPLACE THE RETRODECK PART
-        try:
-            result = subprocess.run(['flatpak', 'list'], capture_output=True, text=True)
-            # Check for RetroDECK first
-            if 'net.retrodeck.retrodeck' in result.stdout:
-                retroarch_candidates.append({
-                    'type': 'retrodeck',
-                    'command': 'flatpak run net.retrodeck.retrodeck',  # Remove 'retroarch'
-                    'priority': 2
-                })
-            elif 'org.libretro.RetroArch' in result.stdout:
-                retroarch_candidates.append({
-                    'type': 'flatpak',
-                    'command': 'flatpak run org.libretro.RetroArch', 
-                    'priority': 3
-                })
-        except:
-            pass
+        # Method 1: Flatpak. Detect by filesystem presence (a per-app dir under
+        # ~/.var/app or the system flatpak tree) rather than parsing
+        # `flatpak list` — the latter's subprocess is unreliable in sandboxed /
+        # containerized environments (e.g. the Decky plugin host, or a distrobox
+        # where `flatpak` is proxied via distrobox-host-exec), so it would
+        # silently find nothing and report "RetroArch not found" even when it's
+        # installed. We still use `flatpak run <id>` to launch.
+        def _flatpak_installed(app_id):
+            candidates = [
+                Path.home() / '.var' / 'app' / app_id,
+                Path('/var/lib/flatpak/app') / app_id,
+                Path.home() / '.local/share/flatpak/app' / app_id,
+            ]
+            return any(p.exists() for p in candidates)
+
+        # Prefer RetroDECK only when it's actually installed as a flatpak; a bare
+        # ~/retrodeck folder is not enough (it can linger after uninstall).
+        if _flatpak_installed('net.retrodeck.retrodeck'):
+            retroarch_candidates.append({
+                'type': 'retrodeck',
+                'command': 'flatpak run net.retrodeck.retrodeck',
+                'priority': 2
+            })
+        if _flatpak_installed('org.libretro.RetroArch'):
+            retroarch_candidates.append({
+                'type': 'flatpak',
+                'command': 'flatpak run org.libretro.RetroArch',
+                'priority': 3
+            })
         
         # Method 2: Steam installation
         steam_paths = [
@@ -4382,7 +4451,8 @@ class RetroArchInterface:
             result = subprocess.Popen(cmd,
                                     stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE,
-                                    text=True)
+                                    text=True,
+                                    env=self._host_subprocess_env())
 
             # Wait a moment to see if it fails immediately
             import time
