@@ -10,10 +10,13 @@ import {
   GamepadButton,
   showModal,
   ModalRoot,
+  showContextMenu,
+  Menu,
+  MenuItem,
 } from "@decky/ui";
 import { callable, definePlugin, toaster, routerHook, openFilePicker, FileSelectionType } from "@decky/api";
-import { useState, useEffect, useRef, ChangeEvent } from "react";
-import { FaSync, FaTrash, FaCog, FaSteam, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight, FaCheckCircle, FaUsers, FaExternalLinkAlt, FaPuzzlePiece, FaBoxOpen, FaClone, FaRedo, FaClock } from "react-icons/fa";
+import { useState, useEffect, useLayoutEffect, useRef, ChangeEvent } from "react";
+import { FaSync, FaTrash, FaCog, FaSteam, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight, FaCheckCircle, FaUsers, FaExternalLinkAlt, FaPuzzlePiece, FaBoxOpen, FaClone, FaRedo, FaClock, FaCheck, FaEllipsisH } from "react-icons/fa";
 import { BsGearFill } from "react-icons/bs";
 import { MdVerified } from "react-icons/md";
 
@@ -36,11 +39,16 @@ const getLibraryGroups = callable<[string], any>("get_library_groups");
 const getLibraryGames = callable<[string, string], any>("get_library_games");
 const getGameCover = callable<[number, boolean], any>("get_game_cover");
 const getImage = callable<[string], any>("get_image");
+const clearCoverCache = callable<[], any>("clear_cover_cache");
 const searchGames = callable<[string], any>("search_games");
 const getGameDetail = callable<[number], any>("get_game_detail");
 const downloadGame = callable<[number], any>("download_game");
+const toggleCollectionSync = callable<[string, boolean], any>("toggle_collection_sync");
+const deleteCollectionRoms = callable<[string], any>("delete_collection_roms");
+const getDownloadProgress = callable<[number], any>("get_download_progress");
 const deleteGame = callable<[number], any>("delete_game");
-const launchGame = callable<[number], any>("launch_game");
+const launchGame = callable<[number, (string | null)?], any>("launch_game");
+const getLocalDiscs = callable<[number], any>("get_local_discs");
 const getHomeData = callable<[], any>("get_home_data");
 const getPluginLogo = callable<[], any>("get_plugin_logo");
 const getRommArtwork = callable<[], any>("get_romm_artwork");
@@ -74,6 +82,28 @@ function makeImageQueue(concurrency: number) {
 const imageQueue = makeImageQueue(3);
 const qGetImage = (path: string) => imageQueue(() => getImage(path));
 const qGetGameCover = (romId: number, large: boolean) => imageQueue(() => getGameCover(romId, large));
+
+// Decoded-art cache (data URIs) so covers persist across tile remounts and can be
+// prefetched for neighbouring groups — the grid then slides in fully painted
+// instead of popping each cover in as its base64 fetch lands.
+// Keys: `cover:${romId}:${large}` for ROM covers, `img:${path}` for screenshots.
+const _coverCache = new Map<string, string | null>();   // resolved results only
+const _coverInflight = new Map<string, Promise<string | null>>(); // dedup in-flight
+// Sync peek: resolved URI (string | null) or undefined if not yet loaded.
+const peekCover = (key: string): string | null | undefined =>
+  _coverCache.has(key) ? _coverCache.get(key) : undefined;
+// Deduped fetch into the cache; safe to call from many tiles / prefetch at once.
+function awaitCover(key: string, fetcher: () => Promise<{ data_uri?: string } | null>): Promise<string | null> {
+  if (_coverCache.has(key)) return Promise.resolve(_coverCache.get(key)!);
+  let p = _coverInflight.get(key);
+  if (!p) {
+    p = fetcher()
+      .then((r) => { const u = r?.data_uri || null; _coverCache.set(key, u); _coverInflight.delete(key); return u; })
+      .catch(() => { _coverInflight.delete(key); return null; });
+    _coverInflight.set(key, p);
+  }
+  return p;
+}
 
 // ---------------------------------------------------------------------------
 // RomM v2 visual language (from rommapp/romm frontend/src/v2/styles/tokens.css).
@@ -129,6 +159,7 @@ interface LibGroup {
   key: string; label: string; count: number; downloaded: number | null;
   kind?: 'favorite' | 'smart' | 'virtual' | 'collection'; covers?: string[];
   slug?: string | null; fs_slug?: string | null;
+  synced?: boolean; virtual?: boolean;
 }
 interface LibGame { rom_id: number; name: string; platform: string | null; is_downloaded: boolean; has_cover: boolean; screenshot?: string | null; platform_slug?: string | null; }
 
@@ -195,18 +226,18 @@ function V2Bg({ uri }: { uri: string | null }) {
 // `onLoaded` bubbles the URI up so a tile can feed the blurred background art.
 function GameCover({ romId, hasCover, large = false, radius = V2.radiusArt, onLoaded }:
   { romId: number; hasCover: boolean; large?: boolean; radius?: string; onLoaded?: (uri: string | null) => void }) {
-  const [uri, setUri] = useState<string | null>(null);
-  const [done, setDone] = useState(false);
+  const ck = `cover:${romId}:${large}`;
+  const peek = peekCover(ck);
+  const [uri, setUri] = useState<string | null>(peek ?? null);
+  const [done, setDone] = useState(peek !== undefined);
   useEffect(() => {
     let alive = true;
     if (!hasCover) { setDone(true); onLoaded?.(null); return; }
+    const p = peekCover(ck);
+    if (p !== undefined) { setUri(p); setDone(true); onLoaded?.(p); return; }
     (async () => {
-      try {
-        const r = await qGetGameCover(romId, large);
-        if (alive) { setUri(r?.data_uri || null); onLoaded?.(r?.data_uri || null); }
-      }
-      catch { /* ignore */ }
-      finally { if (alive) setDone(true); }
+      const u = await awaitCover(ck, () => qGetGameCover(romId, large));
+      if (alive) { setUri(u); onLoaded?.(u); setDone(true); }
     })();
     return () => { alive = false; };
   }, [romId, large]);
@@ -230,12 +261,13 @@ function GameCover({ romId, hasCover, large = false, radius = V2.radiusArt, onLo
 // `onLoaded` bubbles the URI so the card can feed it to the background art.
 function ScreenshotArt({ path, onLoaded, onRatio }:
   { path: string; onLoaded?: (uri: string | null) => void; onRatio?: (ratio: number) => void }) {
-  const [uri, setUri] = useState<string | null>(null);
+  const ik = `img:${path}`;
+  const [uri, setUri] = useState<string | null>(peekCover(ik) ?? null);
   useEffect(() => {
     let alive = true;
     (async () => {
-      try { const r = await qGetImage(path); if (alive) { setUri(r?.data_uri || null); onLoaded?.(r?.data_uri || null); } }
-      catch { /* ignore */ }
+      const u = await awaitCover(ik, () => qGetImage(path));
+      if (alive) { setUri(u); onLoaded?.(u); }
     })();
     return () => { alive = false; };
   }, [path]);
@@ -289,8 +321,192 @@ function CoverPip({ romId, hasCover, hidden }:
 // to the page's background art. When `game.screenshot` is set (continue-playing
 // rail), the art is a landscape screenshot with the box-art floated as a PIP,
 // matching RomM's Home — otherwise it's the portrait cover.
-function GameTile({ game, onOpen, onActiveCover }:
-  { game: LibGame; onOpen: (g: LibGame) => void; onActiveCover: (uri: string | null) => void }) {
+// Polls get_download_progress until the background download reaches a terminal
+// state, resolving with the outcome. The download itself is kicked off by
+// download_game (which returns immediately); this drives completion + the toast.
+async function awaitDownload(romId: number): Promise<{ ok: boolean; message?: string }> {
+  for (; ;) {
+    let p: any;
+    try { p = await getDownloadProgress(romId); }
+    catch { await new Promise((r) => setTimeout(r, 500)); continue; }
+    if (p?.state === 'done') return { ok: true };
+    if (p?.state === 'error') return { ok: false, message: p.message };
+    if (p?.state === 'idle') return { ok: false, message: 'Download did not start' };
+    await new Promise((r) => setTimeout(r, 400));
+  }
+}
+
+// Global registry of in-flight downloads (by rom_id) so EVERY surface showing a
+// game (its cover tile + its details page) reflects the download — not just the
+// one whose button was clicked. doDownload toggles membership; surfaces subscribe.
+const _dlActive = new Set<number>();
+const _dlListeners = new Set<() => void>();
+function _setDlActive(romId: number, on: boolean) {
+  if (on) _dlActive.add(romId); else _dlActive.delete(romId);
+  _dlListeners.forEach((l) => { try { l(); } catch { } });
+}
+// Downloads one game through the same path as the tile button: registers it in
+// the global registry (so its cover tile shows the ring), kicks off the backend
+// download, then polls to completion. Returns whether it succeeded.
+async function downloadOne(romId: number): Promise<boolean> {
+  if (_dlActive.has(romId)) { // already downloading elsewhere — just wait it out
+    return (await awaitDownload(romId)).ok;
+  }
+  _setDlActive(romId, true);
+  try {
+    const start = await downloadGame(romId);
+    if (!start?.success) return false;
+    return (await awaitDownload(romId)).ok;
+  } catch { return false; }
+  finally { _setDlActive(romId, false); }
+}
+
+// Runs a batch of downloads with bounded concurrency, reporting progress after
+// each one finishes. Returns the count that succeeded.
+async function downloadBatch(
+  romIds: number[], concurrency: number, onProgress: (done: number, ok: number) => void,
+): Promise<number> {
+  let done = 0, ok = 0, i = 0;
+  const worker = async () => {
+    while (i < romIds.length) {
+      const id = romIds[i++];
+      if (await downloadOne(id)) ok++;
+      done++;
+      onProgress(done, ok);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, romIds.length) }, worker));
+  return ok;
+}
+
+function useIsDownloading(romId: number): boolean {
+  const [v, setV] = useState(_dlActive.has(romId));
+  useEffect(() => {
+    const l = () => setV(_dlActive.has(romId));
+    _dlListeners.add(l); l();
+    return () => { _dlListeners.delete(l); };
+  }, [romId]);
+  return v;
+}
+
+// Polls the backend for a game's live download progress (0..100) while a download
+// is in flight, returning null when idle. Drives the cover download-ring and the
+// GameDetails button fill. Activates on either the local `active` flag or the
+// global registry, so progress is shared across the cover tile and details page.
+interface DlProgress { percent: number; speed: number; eta: number; }
+function useDownloadProgress(romId: number, active: boolean): DlProgress | null {
+  const globalActive = useIsDownloading(romId);
+  const on = active || globalActive;
+  const [prog, setProg] = useState<DlProgress | null>(null);
+  useEffect(() => {
+    if (!on) { setProg(null); return; }
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const p = await getDownloadProgress(romId);
+        if (!cancelled && p && typeof p.percent === 'number') {
+          setProg({ percent: p.percent, speed: p.speed || 0, eta: p.eta || 0 });
+        }
+      } catch { /* transient */ }
+    };
+    tick();
+    const id = setInterval(tick, 400);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [romId, on]);
+  return prog;
+}
+
+// Eases a displayed integer toward a target so a stepwise percentage (updated
+// every poll) counts up smoothly. Resets to 0 when inactive.
+function useSmoothNumber(target: number | null, active: boolean): number {
+  const [val, setVal] = useState(0);
+  const cur = useRef(0);
+  const raf = useRef<any>(null);
+  useEffect(() => {
+    if (!active) { cur.current = 0; setVal(0); return; }
+    const t = target ?? 0;
+    const step = () => {
+      const diff = t - cur.current;
+      if (Math.abs(diff) < 0.5) { cur.current = t; setVal(t); return; }
+      cur.current += diff * 0.18;
+      setVal(cur.current);
+      raf.current = requestAnimationFrame(step);
+    };
+    cancelAnimationFrame(raf.current);
+    raf.current = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf.current);
+  }, [target, active]);
+  return Math.round(val);
+}
+
+// Estimates remaining seconds from the velocity of a 0..100 percentage: anchors
+// at the start of a run and divides the remaining percent by the average rate.
+// Generic enough to drive a collection ETA whether the bytes come from the
+// one-shot batch or the background sync worker. Returns 0 until it has a rate.
+function useEtaFromPct(pct: number, active: boolean): number {
+  const anchor = useRef<{ t: number; p: number } | null>(null);
+  const [eta, setEta] = useState(0);
+  useEffect(() => {
+    if (!active) { anchor.current = null; setEta(0); return; }
+    const now = Date.now();
+    // (Re)anchor at run start or if progress resets (a new run).
+    if (!anchor.current || pct < anchor.current.p) anchor.current = { t: now, p: pct };
+    const dt = (now - anchor.current.t) / 1000;
+    const dp = pct - anchor.current.p;
+    if (dt > 2 && dp > 0.5) setEta(Math.max(0, ((100 - pct) / (dp / dt))));
+  }, [pct, active]);
+  return eta;
+}
+
+// "1m 23s" / "45s" — compact ETA from a seconds count (0 / unknown → '').
+const formatEta = (secs: number): string => {
+  if (!secs || secs <= 0 || !isFinite(secs)) return '';
+  const s = Math.round(secs);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m ${s % 60}s`;
+};
+
+// Circular progress ring drawn around a centered glyph (used on the cover's
+// download button). `pct` null renders an empty track.
+function ProgressRing({ pct, size = 40, stroke = 3, glow = false, children }:
+  { pct: number | null; size?: number; stroke?: number; glow?: boolean; children?: any }) {
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const p = Math.max(0, Math.min(100, pct ?? 0));
+  return (
+    <div style={{ position: 'relative', width: size, height: size, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <svg width={size} height={size} style={{ position: 'absolute', top: 0, left: 0, transform: 'rotate(-90deg)', overflow: 'visible' }}>
+        {/* `glow` mode draws only the blurred arc — it's rendered behind the
+            opaque button so the inner half is masked and only the outer halo shows. */}
+        {!glow && <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgba(0,0,0,0.22)" strokeWidth={stroke} />}
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={V2.brand} strokeWidth={stroke}
+          strokeDasharray={c} strokeDashoffset={c * (1 - p / 100)} strokeLinecap="round"
+          style={{ transition: 'stroke-dashoffset 0.3s ease',
+            ...(glow ? { filter: `drop-shadow(0 0 5px ${V2.brand}) drop-shadow(0 0 3px ${V2.brand})` } : {}) }} />
+      </svg>
+      {children}
+    </div>
+  );
+}
+
+// Returns a ref to attach to the FIRST selectable item on a screen; once `ready`
+// flips true (content loaded), it drops gamepad focus onto that item with a few
+// retries to beat Steam's default focus-acquisition — so a direction press moves
+// straight into the grid instead of needing a DOWN press out of the header.
+function useAutoFocus(ready: boolean, dep?: any) {
+  const ref = useRef<any>(null);
+  useEffect(() => {
+    if (!ready) return;
+    const timers = [0, 60, 160, 320].map((d) =>
+      setTimeout(() => { try { ref.current?.focus(); } catch { } }, d));
+    return () => timers.forEach(clearTimeout);
+  }, [ready, dep]);
+  return ref;
+}
+
+function GameTile({ game, onOpen, onActiveCover, focusRef }:
+  { game: LibGame; onOpen: (g: LibGame) => void; onActiveCover: (uri: string | null) => void; focusRef?: React.MutableRefObject<any> }) {
   const wide = !!game.screenshot;
   // Wide cards adopt the screenshot's NATURAL aspect ratio (RomM derives the
   // card width from the cover's true shape at a fixed height); 16:9 until loaded.
@@ -299,19 +515,65 @@ function GameTile({ game, onOpen, onActiveCover }:
   const [focused, setFocused] = useState(false);
   const [dl, setDl] = useState(!!game.is_downloaded);
   const [busy, setBusy] = useState<null | 'download' | 'delete' | 'launch'>(null);
+  const dlPct = useDownloadProgress(game.rom_id, busy === 'download')?.percent ?? null;
+  const globalDownloading = useIsDownloading(game.rom_id);
+  const downloading = busy === 'download' || globalDownloading;
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const confirmTimer = useRef<any>(null);
   const activate = () => { onActiveCover(uriRef.current); };
+
+  // Multi-disc support on the cover: lazily fetch the on-disk disc list the
+  // first time a downloaded tile is focused (only the focused tile fetches).
+  const [discs, setDiscs] = useState<LocalDisc[]>([]);
+  const [discLast, setDiscLast] = useState<string>('');
+  const discsTried = useRef(false);
+  const pickableDiscs = discs.filter((d) => !d.is_m3u);
+  const isMultiDisc = pickableDiscs.length > 1;
+  const ensureDiscs = async (force?: boolean) => {
+    if ((discsTried.current && !force) || !dl) return;
+    discsTried.current = true;
+    try {
+      const r = await getLocalDiscs(game.rom_id);
+      setDiscs(r?.success ? (r.discs || []) : []);
+      setDiscLast(r?.last || '');
+    } catch { /* leave empty */ }
+  };
+  // Hold A to open the disc picker; a quick press still launches. We arm a
+  // timer on A-down and, if it elapses while held, open the menu and flag the
+  // press so the subsequent onActivate is suppressed.
+  const longFired = useRef(false);
+  const pressTimer = useRef<any>(null);
+  const onBtnDown = (e: any) => {
+    if (e?.detail?.button === GamepadButton.OK && isMultiDisc) {
+      longFired.current = false;
+      if (pressTimer.current) clearTimeout(pressTimer.current);
+      pressTimer.current = setTimeout(() => {
+        longFired.current = true;
+        openDiscPicker(game.rom_id, game.name, discs, discLast, setBusy,
+          () => ensureDiscs(true));
+      }, 500);
+    }
+  };
+  const onBtnUp = (e: any) => {
+    if (e?.detail?.button === GamepadButton.OK && pressTimer.current) {
+      clearTimeout(pressTimer.current); pressTimer.current = null;
+    }
+  };
 
   // Button scheme (RomM GameActions): A = download (if absent) / launch (if
   // present); X = details; Y = delete. Mouse: overlay buttons mirror these.
   const doDownload = async () => {
     if (busy) return;
     setBusy('download');
+    _setDlActive(game.rom_id, true);
     try {
-      const r = await downloadGame(game.rom_id);
-      if (r?.success) { setDl(true); toaster.toast({ title: 'Downloaded', body: game.name }); }
-      else toaster.toast({ title: 'Download failed', body: r?.message || 'Error' });
+      const start = await downloadGame(game.rom_id);
+      if (!start?.success) { toaster.toast({ title: 'Download failed', body: start?.message || 'Error' }); return; }
+      const res = await awaitDownload(game.rom_id);
+      if (res.ok) { setDl(true); toaster.toast({ title: 'Downloaded', body: game.name }); }
+      else toaster.toast({ title: 'Download failed', body: res.message || 'Error' });
     } catch (e) { toaster.toast({ title: 'Download failed', body: String(e) }); }
-    finally { setBusy(null); }
+    finally { _setDlActive(game.rom_id, false); setBusy(null); }
   };
   const doLaunch = async () => {
     if (busy) return;
@@ -331,22 +593,34 @@ function GameTile({ game, onOpen, onActiveCover }:
       if (r?.success) { setDl(false); toaster.toast({ title: 'Deleted', body: game.name }); }
       else toaster.toast({ title: 'Delete failed', body: r?.message || 'Error' });
     } catch (e) { toaster.toast({ title: 'Delete failed', body: String(e) }); }
-    finally { setBusy(null); }
+    finally { setConfirmDelete(false); setBusy(null); }
+  };
+  // Two-step confirm on the cover (matching the details page): the first delete
+  // press arms it (button turns into a check), the second within 3s commits.
+  const requestDelete = () => {
+    if (busy) return;
+    if (confirmDelete) { doDelete(); return; }
+    setConfirmDelete(true);
+    if (confirmTimer.current) clearTimeout(confirmTimer.current);
+    confirmTimer.current = setTimeout(() => setConfirmDelete(false), 3000);
   };
   const primary = () => { if (dl) doLaunch(); else doDownload(); };
 
   return (
     <Focusable noFocusRing
-      onActivate={primary}
+      ref={focusRef}
+      onActivate={() => { if (longFired.current) { longFired.current = false; return; } primary(); }}
       onClick={primary}
+      onButtonDown={onBtnDown}
+      onButtonUp={onBtnUp}
       onSecondaryButton={() => onOpen(game)}
       onSecondaryActionDescription="Details"
-      onOptionsButton={() => { if (dl) doDelete(); }}
-      onOptionsActionDescription={dl ? 'Delete' : undefined}
-      onOKActionDescription={dl ? 'Launch' : 'Download'}
-      onFocus={() => { setFocused(true); activate(); }}
+      onOptionsButton={() => { if (dl) requestDelete(); }}
+      onOptionsActionDescription={dl ? (confirmDelete ? 'Confirm delete' : 'Delete') : undefined}
+      onOKActionDescription={dl ? (isMultiDisc ? 'Launch (hold: discs)' : 'Launch') : 'Download'}
+      onFocus={() => { setFocused(true); activate(); ensureDiscs(); }}
       onBlur={() => setFocused(false)}
-      onMouseEnter={() => { setFocused(true); activate(); }}
+      onMouseEnter={() => { setFocused(true); activate(); ensureDiscs(); }}
       onMouseLeave={() => setFocused(false)}
       style={{ cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: '7px' }}
     >
@@ -399,6 +673,21 @@ function GameTile({ game, onOpen, onActiveCover }:
           }} />
         )}
 
+        {/* Multi-disc badge — a small disc-count pill (RomM-style scrim chip)
+            shown for downloaded multi-disc games so the hold-A picker is
+            discoverable. */}
+        {dl && isMultiDisc && (
+          <div style={{
+            position: 'absolute', left: '7px', bottom: '7px', zIndex: 2,
+            display: 'inline-flex', alignItems: 'center', gap: '4px',
+            padding: '2px 6px', borderRadius: V2.radiusPill, fontSize: '10px', fontWeight: 600,
+            background: 'rgba(0,0,0,0.78)', border: '1px solid rgba(255,255,255,0.12)', color: V2.fg,
+            opacity: focused ? 0 : 1, transition: 'opacity 0.18s ease',
+          }}>
+            <FaClone size={9} />{pickableDiscs.length}
+          </div>
+        )}
+
         {/* GameActions overlay — gradient scrim, center primary (download/play),
             bottom Details + Delete; revealed on hover/focus. */}
         <div style={{
@@ -406,17 +695,43 @@ function GameTile({ game, onOpen, onActiveCover }:
           background: 'linear-gradient(to top, rgba(0,0,0,0.78) 0%, rgba(0,0,0,0) 55%)',
           opacity: focused ? 1 : 0, transition: 'opacity 0.18s ease',
         }} />
+        {/* Outer-only download glow — a blurred copy of the arc painted BEHIND
+            the opaque white button, so the button masks the inner half and only
+            the outward halo escapes. */}
+        {downloading && (
+          <div style={{
+            position: 'absolute', top: '50%', left: '50%',
+            transform: 'translate(-50%,-50%)', pointerEvents: 'none',
+          }}>
+            <ProgressRing pct={dlPct} size={48} stroke={4} glow />
+          </div>
+        )}
         {/* Center primary (A) — emphasized white round button (RomM Play). */}
         <div
           onClick={(e: any) => { e.stopPropagation(); primary(); }}
           style={{
             position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
             ...roundBtn(44, 'emphasized'), boxShadow: '0 2px 10px rgba(0,0,0,0.55)',
-            opacity: focused ? 1 : 0, transition: 'opacity 0.18s ease',
+            // Stay visible while downloading so the fill ring is always shown,
+            // even if focus moves away mid-download.
+            opacity: (focused || downloading) ? 1 : 0, transition: 'opacity 0.18s ease',
           }}>
-          {busy === 'download' || busy === 'launch'
-            ? <FaSync size={16} style={{ animation: 'spin 1s linear infinite' }} />
-            : dl ? <FaPlay size={15} style={{ marginLeft: '2px' }} /> : <FaDownload size={15} />}
+          {/* While downloading, the progress ring rides ON the button's border:
+              the 44px button has radius 22, so a 48px ring with a 4px stroke has
+              its circle radius at exactly (48-4)/2 = 22, centered on the rim. */}
+          {downloading && (
+            <div style={{
+              position: 'absolute', top: '50%', left: '50%',
+              transform: 'translate(-50%,-50%)', pointerEvents: 'none',
+            }}>
+              <ProgressRing pct={dlPct} size={48} stroke={4} />
+            </div>
+          )}
+          {downloading
+            ? <FaDownload size={15} />
+            : busy === 'launch'
+              ? <FaSync size={16} style={{ animation: 'spin 1s linear infinite' }} />
+              : dl ? <FaPlay size={15} style={{ marginLeft: '2px' }} /> : <FaDownload size={15} />}
         </div>
         {/* Bottom row: Details (X) + Delete (Y, when downloaded) — glass buttons. */}
         <div style={{
@@ -429,8 +744,14 @@ function GameTile({ game, onOpen, onActiveCover }:
             <FaInfoCircle size={13} />
           </div>
           {dl && (
-            <div onClick={(e: any) => { e.stopPropagation(); doDelete(); }} style={roundBtn(30, 'danger')}>
-              {busy === 'delete' ? <FaSync size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <FaTrash size={12} />}
+            <div onClick={(e: any) => { e.stopPropagation(); requestDelete(); }}
+              style={{ ...roundBtn(30, 'danger'),
+                // Armed state: solid red fill + check glyph, so it's clear the
+                // next press commits the delete.
+                ...(confirmDelete ? { background: V2.danger, borderColor: V2.danger, color: '#fff' } : {}) }}>
+              {busy === 'delete'
+                ? <FaSync size={12} style={{ animation: 'spin 1s linear infinite' }} />
+                : confirmDelete ? <FaCheck size={12} /> : <FaTrash size={12} />}
             </div>
           )}
         </div>
@@ -489,17 +810,139 @@ function CollectionMosaic({ covers }: { covers: string[] }) {
   );
 }
 
+// Shared per-collection sync state, polled ONCE for the whole grid (not one poll
+// per tile) from get_service_status, broadcast to every CollectionTile. Lets the
+// tiles show the same download ring as game covers while a collection syncs.
+interface ColSyncState { state: string; pct: number | null; downloaded?: number; total?: number; }
+const _colSync = new Map<string, ColSyncState>();
+const _colSyncListeners = new Set<() => void>();
+let _colSyncTimer: any = null;
+let _colSyncRefs = 0;
+async function _colSyncTick() {
+  try {
+    const st = await getServiceStatus();
+    _colSync.clear();
+    for (const c of (st?.collections || [])) {
+      _colSync.set(c.name, {
+        state: c.sync_state,
+        pct: typeof c.downloaded_pct === 'number' ? c.downloaded_pct : null,
+        downloaded: c.downloaded, total: c.total,
+      });
+    }
+    _colSyncListeners.forEach((l) => { try { l(); } catch { } });
+  } catch { /* transient */ }
+}
+function useCollectionSync(name: string): ColSyncState | undefined {
+  const [, force] = useState(0);
+  useEffect(() => {
+    const l = () => force((n) => n + 1);
+    _colSyncListeners.add(l);
+    _colSyncRefs++;
+    if (!_colSyncTimer) { _colSyncTick(); _colSyncTimer = setInterval(_colSyncTick, 1500); }
+    return () => {
+      _colSyncListeners.delete(l);
+      _colSyncRefs--;
+      if (_colSyncRefs <= 0 && _colSyncTimer) { clearInterval(_colSyncTimer); _colSyncTimer = null; }
+    };
+  }, []);
+  return _colSync.get(name);
+}
+
 // Collection tile — mosaic cover + kind badge + name/count below, with the
 // focus scale + brand glow (RomM CollectionTile).
-function CollectionTile({ group, onOpen }: { group: LibGroup; onOpen: (g: LibGroup) => void }) {
+function CollectionTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: (g: LibGroup) => void; focusRef?: React.MutableRefObject<any> }) {
   const [focused, setFocused] = useState(false);
+  // Virtual (autogenerated) collections are browse/download only: no persistent
+  // auto-sync, no local-delete (they aren't tracked by CollectionSyncManager).
+  const isVirtual = !!group.virtual;
+  // Per-tile auto-sync state (optimistic), so Y toggles sync straight from the
+  // collections grid/rail and the green dot reflects it instantly.
+  const [synced, setSynced] = useState(!!group.synced);
+  // Live sync state from the shared poll — drives the download ring (same as
+  // game covers) while this collection is actively downloading.
+  const live = useCollectionSync(group.key);
+  const syncing = live?.state === 'syncing';
+  const syncPct = live?.pct != null ? live.pct
+    : (live && live.total ? Math.round(((live.downloaded || 0) / live.total) * 100) : 0);
+  const toggleSync = async () => {
+    const next = !synced;
+    setSynced(next);
+    try {
+      const ok = await toggleCollectionSync(group.key, next);
+      if (ok === false) throw new Error('backend declined');
+      toaster.toast({ title: next ? 'Auto-sync on' : 'Auto-sync off', body: group.label });
+    } catch (e) {
+      setSynced(!next); // revert
+      toaster.toast({ title: 'Sync toggle failed', body: String(e) });
+    }
+  };
+  // Collection actions menu (same as the in-collection header menu): one-shot
+  // "Sync missing" + destructive "Remove downloaded" (arm→confirm). Reached by
+  // HOLDING A on the tile (or right-click / the ⋯ chip for mouse).
+  const removeArmed = useRef(false);
+  const doTileRemove = async () => {
+    try {
+      if (synced) { await toggleCollectionSync(group.key, false); setSynced(false); }
+      const ok = await deleteCollectionRoms(group.key);
+      if (ok === false) throw new Error('backend declined');
+      toaster.toast({ title: 'Removed downloads', body: group.label });
+    } catch (e) { toaster.toast({ title: 'Remove failed', body: String(e) }); }
+  };
+  const openMenu = () => {
+    const armed = removeArmed.current;
+    showContextMenu(
+      <Menu label={group.label} onCancel={() => { removeArmed.current = false; }}>
+        <MenuItem onSelected={async () => {
+          const res = await getLibraryGames('collection', group.key).catch(() => null);
+          const missing = res?.success ? (res.games || []).filter((g: LibGame) => !g.is_downloaded).map((g: LibGame) => g.rom_id) : [];
+          if (!missing.length) { toaster.toast({ title: 'Nothing to sync', body: 'All games are already downloaded' }); return; }
+          toaster.toast({ title: 'Syncing collection', body: `Downloading ${missing.length} game${missing.length === 1 ? '' : 's'}` });
+          const ok = await downloadBatch(missing, 3, () => { });
+          toaster.toast({ title: 'Sync complete', body: `${ok} of ${missing.length} downloaded` });
+        }}>{isVirtual ? 'Download missing' : 'Sync missing'}</MenuItem>
+        {!isVirtual && (
+          <MenuItem tone="destructive" onSelected={() => {
+            if (!armed) {
+              removeArmed.current = true;
+              setTimeout(() => { removeArmed.current = false; }, 4000);
+              requestAnimationFrame(openMenu);
+            } else { removeArmed.current = false; doTileRemove(); }
+          }}>{armed ? 'Confirm remove' : 'Remove downloaded'}</MenuItem>
+        )}
+      </Menu>,
+    );
+  };
+
+  // Distinguish tap (open) from hold (actions menu) on the A button. onButtonDown
+  // starts the hold timer; onActivate (fires on release) opens only if the hold
+  // didn't already trigger the menu. Repeats are ignored so the timer fires once.
+  const holdTimer = useRef<any>(null);
+  const held = useRef(false);
+  const onBtnDown = (e: any) => {
+    if (e?.detail?.button !== GamepadButton.OK || e?.detail?.is_repeat) return;
+    held.current = false;
+    clearTimeout(holdTimer.current);
+    holdTimer.current = setTimeout(() => { held.current = true; openMenu(); }, 500);
+  };
+  const onActivate = () => {
+    clearTimeout(holdTimer.current);
+    if (held.current) { held.current = false; return; } // hold opened the menu
+    onOpen(group);
+  };
+
   const badge = group.kind === 'smart' ? { label: 'SMART', bg: V2.brandHover }
     : group.kind === 'virtual' ? { label: 'VIRTUAL', bg: V2.brandHover }
     : group.kind === 'favorite' ? { label: '★', bg: '#ff4f6b' }
     : null;
   return (
     <Focusable noFocusRing
-      onActivate={() => onOpen(group)} onClick={() => onOpen(group)}
+      ref={focusRef}
+      onClick={() => onOpen(group)}
+      onActivate={onActivate}
+      onButtonDown={onBtnDown}
+      onOKActionDescription="Open   ·   Hold: Actions"
+      onOptionsButton={isVirtual ? undefined : toggleSync}
+      onOptionsActionDescription={isVirtual ? undefined : (synced ? 'Stop syncing' : 'Sync collection')}
       onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
       onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
       style={{ cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: '8px' }}
@@ -512,6 +955,38 @@ function CollectionTile({ group, onOpen }: { group: LibGroup; onOpen: (g: LibGro
           : '0 2px 8px rgba(0,0,0,0.35)',
       }}>
         <CollectionMosaic covers={group.covers || []} />
+        {/* Download ring + glyph while syncing — mirrors the game-cover affordance
+            so a downloading collection reads the same as a downloading game. */}
+        {syncing && (
+          <>
+            <div style={{
+              position: 'absolute', inset: 0, borderRadius: V2.radiusLg,
+              background: 'rgba(0,0,0,0.45)', pointerEvents: 'none', zIndex: 1,
+            }} />
+            <div style={{
+              position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
+              zIndex: 2, ...roundBtn(44, 'emphasized'), boxShadow: '0 2px 10px rgba(0,0,0,0.55)',
+            }}>
+              <div style={{
+                position: 'absolute', top: '50%', left: '50%',
+                transform: 'translate(-50%,-50%)', pointerEvents: 'none',
+              }}>
+                <ProgressRing pct={syncPct} size={48} stroke={4} />
+              </div>
+              <FaDownload size={15} />
+            </div>
+          </>
+        )}
+        {/* Synced status dot — same green dot as downloaded games, placed
+            top-right so it never collides with the kind badge (top-left).
+            Hidden while the ring is showing. */}
+        {synced && !syncing && (
+          <div style={{
+            position: 'absolute', top: '7px', right: '7px', zIndex: 2,
+            width: '10px', height: '10px', borderRadius: '50%',
+            background: V2.success, boxShadow: '0 0 0 2px rgba(0,0,0,0.45)',
+          }} />
+        )}
         {badge && (
           <span style={{
             position: 'absolute', top: '6px', left: '6px',
@@ -519,6 +994,22 @@ function CollectionTile({ group, onOpen }: { group: LibGroup; onOpen: (g: LibGro
             padding: '2px 7px', borderRadius: V2.radiusChip, color: '#fff',
             background: badge.bg, boxShadow: '0 1px 3px rgba(0,0,0,0.5)',
           }}>{badge.label}</span>
+        )}
+        {/* Actions hint — a ⋯ chip on focus/hover signals the long-press (hold A)
+            / right-click actions menu exists; also clickable for mouse users. */}
+        {focused && !syncing && (
+          <div
+            onClick={(e: any) => { e.stopPropagation(); openMenu(); }}
+            style={{
+              position: 'absolute', bottom: '6px', right: '6px', zIndex: 3,
+              display: 'flex', alignItems: 'center', gap: '4px',
+              padding: '2px 6px', borderRadius: V2.radiusChip,
+              background: 'rgba(0,0,0,0.62)', color: V2.fg,
+              fontSize: '9px', fontWeight: 700, letterSpacing: '0.02em',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.5)', pointerEvents: 'auto',
+            }}>
+            <FaEllipsisH size={9} /><span>HOLD</span>
+          </div>
         )}
       </div>
       <div>
@@ -569,10 +1060,11 @@ function PlatformIcon({ slug, fsSlug, size }: { slug?: string | null; fsSlug?: s
 
 // Platform tile — centered icon-led card (RomM PlatformTile): bg-elevated
 // card, large icon on top, name + count, focus brand glow.
-function PlatformTile({ group, onOpen }: { group: LibGroup; onOpen: (g: LibGroup) => void }) {
+function PlatformTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: (g: LibGroup) => void; focusRef?: React.MutableRefObject<any> }) {
   const [focused, setFocused] = useState(false);
   return (
     <Focusable noFocusRing
+      ref={focusRef}
       onActivate={() => onOpen(group)} onClick={() => onOpen(group)}
       onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
       onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
@@ -614,7 +1106,7 @@ function PlatformTile({ group, onOpen }: { group: LibGroup; onOpen: (g: LibGroup
 // radius, and the ACTIVE tab is a solid white (--r-color-fg) pill with dark
 // (--r-color-bg) text.
 type NavId = 'home' | 'platforms' | 'collections' | 'search';
-function V2NavBar({ active, onTab }: { active: NavId; onTab: (id: NavId) => void }) {
+function V2NavBar({ active, onTab, activeRef }: { active: NavId; onTab: (id: NavId) => void; activeRef?: React.MutableRefObject<any> }) {
   const [iso, setIso] = useState<string | null>(null);
   const [word, setWord] = useState<string | null>(null);
   useEffect(() => {
@@ -681,7 +1173,7 @@ function V2NavBar({ active, onTab }: { active: NavId; onTab: (id: NavId) => void
         {tabs.map(({ id, label, Icon }, i) => {
           const on = active === id;
           return (
-            <Focusable noFocusRing key={id} onActivate={() => onTab(id)} onClick={() => onTab(id)}>
+            <Focusable noFocusRing key={id} ref={on && activeRef ? activeRef : undefined} onActivate={() => onTab(id)} onClick={() => onTab(id)}>
               <div ref={(el) => { btnRefs.current[i] = el; }}
                 style={{
                   position: 'relative', zIndex: 1,
@@ -708,6 +1200,7 @@ function V2NavBar({ active, onTab }: { active: NavId; onTab: (id: NavId) => void
 function Bumper({ label }: { label: string }) {
   return (
     <span style={{
+      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
       fontSize: '10px', fontWeight: 700, letterSpacing: '0.03em', color: V2.fg2,
       padding: '3px 8px', borderRadius: V2.radiusChip, background: V2.surface,
       border: `1px solid ${V2.borderStrong}`, boxShadow: '0 1px 2px rgba(0,0,0,0.4)',
@@ -798,18 +1291,38 @@ function V2Button({ children, onClick, variant = 'tonal', color, disabled }:
 //     page background (RTag tokens); used for Delete / secondary actions.
 // `danger` is a filled-danger pill for the delete-confirm step. Pill radius
 // throughout; controller focus paints a brand ring + slight scale.
-function GameActionButton({ icon, label, onClick, variant = 'surface', accent, disabled }:
+function GameActionButton({ icon, label, onClick, variant = 'surface', accent, disabled, progress,
+  onOptionsButton, optionsHint }:
   { icon: any; label?: string; onClick: () => void;
-    variant?: 'emphasized' | 'surface' | 'danger'; accent?: 'danger'; disabled?: boolean }) {
+    variant?: 'emphasized' | 'surface' | 'danger'; accent?: 'danger'; disabled?: boolean;
+    progress?: number | null; onOptionsButton?: () => void; optionsHint?: boolean }) {
   const [active, setActive] = useState(false);
   const labelled = !!label;
+  const hasProgress = typeof progress === 'number';
+  const pct = hasProgress ? Math.max(0, Math.min(100, progress as number)) : 0;
+  // One-shot width "pop" when a download begins: as the label grows from
+  // "Download" to "Downloading… 0%", the button overshoots wider then settles.
+  const [pop, setPop] = useState(false);
+  const wasProg = useRef(false);
+  useEffect(() => {
+    if (hasProgress && !wasProg.current) {
+      wasProg.current = true;
+      setPop(true);
+      const t = setTimeout(() => setPop(false), 480);
+      return () => clearTimeout(t);
+    }
+    if (!hasProgress) wasProg.current = false;
+  }, [hasProgress]);
   const base: any = {
+    position: 'relative', overflow: 'hidden',
     display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
     height: '44px', borderRadius: V2.radiusPill, fontSize: '14px', fontWeight: 600,
     whiteSpace: 'nowrap', border: '1px solid transparent',
     cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.5 : 1,
     ...(labelled ? { padding: '0 24px' } : { width: '44px' }),
     transition: 'background 0.15s, color 0.15s, transform 0.15s, box-shadow 0.15s, border-color 0.15s',
+    // Grow rightward from the left edge as the label widens — no overshoot.
+    ...(pop ? { animation: 'dlGrow 0.4s ease', transformOrigin: 'left center' } : {}),
   };
   // Danger-accented surface (Delete): red icon + red-tinted surface/border that
   // intensifies on focus, so it reads as destructive without being a filled CTA.
@@ -830,12 +1343,41 @@ function GameActionButton({ icon, label, onClick, variant = 'surface', accent, d
     <Focusable noFocusRing
       onActivate={() => !disabled && onClick()}
       onClick={() => !disabled && onClick()}
+      onOptionsButton={onOptionsButton ? () => !disabled && onOptionsButton() : undefined}
+      onOptionsActionDescription={onOptionsButton ? 'Select disc' : undefined}
       onFocus={() => setActive(true)} onBlur={() => setActive(false)}
       onMouseEnter={() => setActive(true)} onMouseLeave={() => setActive(false)}
       style={{ ...base, ...tone, ...glow }}
     >
-      {icon}
-      {label && <span>{label}</span>}
+      {/* Download fill — a brand-tinted bar sweeping left→right behind the
+          label, tracking the live download percentage. */}
+      {hasProgress && (
+        <div style={{
+          position: 'absolute', left: 0, top: 0, bottom: 0, width: `${pct}%`,
+          background: variant === 'emphasized' ? 'rgba(139,116,232,0.30)' : 'rgba(139,116,232,0.45)',
+          // Smoothly sweep the semi-transparent fill across the white button, and
+          // fade it in on the first frame so the colour change is animated too.
+          transition: 'width 0.45s cubic-bezier(0.22,1,0.36,1), background 0.3s ease',
+          animation: 'dlFillIn 0.3s ease', pointerEvents: 'none',
+        }} />
+      )}
+      <span style={{ position: 'relative', zIndex: 1, display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+        {icon}
+        {label && <span>{label}</span>}
+        {optionsHint && (
+          <span style={{
+            marginLeft: '2px', fontSize: '11px', fontWeight: 700, lineHeight: 1,
+            padding: '2px 5px', borderRadius: '6px',
+            background: variant === 'emphasized' ? 'rgba(17,17,23,0.12)' : V2.surfaceHover,
+            color: variant === 'emphasized' ? '#111117' : V2.fgMuted,
+          }}>Y</span>
+        )}
+      </span>
+      <style>{`
+        @keyframes dlGrow { from { transform: scaleX(0.72); } to { transform: scaleX(1); } }
+        @keyframes dlValIn { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: translateX(0); } }
+        @keyframes dlFillIn { from { opacity: 0; } to { opacity: 1; } }
+      `}</style>
     </Focusable>
   );
 }
@@ -1143,6 +1685,17 @@ let _libGroupHolder: { mode: string; group: LibGroup } | null = null;
 // Sibling groups (same mode) so the game grid can page prev/next with L1/R1.
 let _libGroupsHolder: { mode: string; groups: LibGroup[] } | null = null;
 let _libGameHolder: LibGame | null = null;
+// Per-group games cache (key: `${mode}:${groupKey}`) so paging to an already
+// prefetched neighbour shows its covers instantly — the grid slides in with real
+// content instead of popping in after an async fetch.
+const _libGamesCache = new Map<string, LibGame[]>();
+
+// Home tab data cache — survives tab-switch remounts so returning to Home paints
+// instantly (then refreshes silently) instead of flashing "Loading…".
+let _homeCache: {
+  recent: LibGame[]; continuePlaying: LibGame[];
+  platforms: LibGroup[]; collections: LibGroup[];
+} | null = null;
 
 const formatSpeed = (bytesPerSec: number): string => {
   if (bytesPerSec >= 1024 * 1024) return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`;
@@ -1509,6 +2062,17 @@ function ConfigPage() {
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
+          <ButtonItem layout="below" onClick={async () => {
+            try {
+              const r = await clearCoverCache();
+              _coverCache.clear(); _coverInflight.clear(); // drop the frontend hot layer too
+              toaster.toast({ title: 'Cover cache cleared', body: r?.success ? `${r.removed ?? 0} files removed` : (r?.message || 'Error') });
+            } catch (e) { toaster.toast({ title: 'Clear failed', body: String(e) }); }
+          }}>
+            Clear cover cache
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
           <ButtonItem layout="below" onClick={() => Navigation.NavigateBack()}>
             Cancel
           </ButtonItem>
@@ -1761,17 +2325,19 @@ function PairCodeField({ label, value, onChange }:
 function SearchPanel({ onOpen, onBg }: { onOpen: (g: LibGame) => void; onBg: (uri: string | null) => void }) {
   const [q, setQ] = useState('');
   const [results, setResults] = useState<LibGame[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   useEffect(() => {
-    if (!q.trim()) { setResults([]); setLoading(false); return; }
     // Enter the loading state synchronously so the debounce window shows
     // "Searching…" rather than briefly flashing the "no match" empty state.
     setLoading(true);
+    // Empty query browses the whole library (mirrors RomM's Search default),
+    // so it resolves instantly with no debounce; typed queries debounce.
+    const delay = q.trim() ? 250 : 0;
     const t = setTimeout(async () => {
       try { const r = await searchGames(q); setResults(r?.success ? (r.games || []) : []); }
       catch { setResults([]); }
       finally { setLoading(false); }
-    }, 250);
+    }, delay);
     return () => clearTimeout(t);
   }, [q]);
   return (
@@ -1780,14 +2346,12 @@ function SearchPanel({ onOpen, onBg }: { onOpen: (g: LibGame) => void; onBg: (ur
         <V2SearchField value={q} onChange={setQ} />
       </div>
       {loading ? (
-        <div style={{ padding: '16px', color: V2.fgMuted, fontSize: '13px', textAlign: 'center' }}>Searching…</div>
-      ) : !q.trim() ? (
-        <div style={{ padding: '24px', color: V2.fgMuted, fontSize: '13px', textAlign: 'center' }}>
-          Type to search your library.
+        <div style={{ padding: '16px', color: V2.fgMuted, fontSize: '13px', textAlign: 'center' }}>
+          {q.trim() ? 'Searching…' : 'Loading library…'}
         </div>
       ) : results.length === 0 ? (
         <div style={{ padding: '24px', color: V2.fgMuted, fontSize: '13px', textAlign: 'center' }}>
-          No games match “{q.trim()}”.
+          {q.trim() ? `No games match “${q.trim()}”.` : 'No games in your library yet.'}
         </div>
       ) : (
         <Focusable noFocusRing style={{
@@ -1894,11 +2458,14 @@ function CardRow({ icon, title, count, children }:
 // (Continue playing / Recently added / Platforms / Collections).
 function HomePanel({ onOpen, onOpenGroup, onBg }:
   { onOpen: (g: LibGame) => void; onOpenGroup: (mode: string, g: LibGroup, gs: LibGroup[]) => void; onBg: (uri: string | null) => void }) {
-  const [recent, setRecent] = useState<LibGame[]>([]);
-  const [continuePlaying, setContinuePlaying] = useState<LibGame[]>([]);
-  const [platforms, setPlatforms] = useState<LibGroup[]>([]);
-  const [collections, setCollections] = useState<LibGroup[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Seed from the module-level cache so re-mounting (tab switch back to Home)
+  // paints instantly instead of flashing "Loading…" and refetching.
+  const c0 = _homeCache;
+  const [recent, setRecent] = useState<LibGame[]>(c0?.recent || []);
+  const [continuePlaying, setContinuePlaying] = useState<LibGame[]>(c0?.continuePlaying || []);
+  const [platforms, setPlatforms] = useState<LibGroup[]>(c0?.platforms || []);
+  const [collections, setCollections] = useState<LibGroup[]>(c0?.collections || []);
+  const [loading, setLoading] = useState(!c0);
 
   useEffect(() => {
     let alive = true;
@@ -1908,28 +2475,42 @@ function HomePanel({ onOpen, onOpenGroup, onBg }:
           getHomeData(), getLibraryGroups('platform'), getLibraryGroups('collection'),
         ]);
         if (!alive) return;
-        if (h?.success) { setRecent(h.recent || []); setContinuePlaying(h.continue_playing || []); }
-        if (p?.success) setPlatforms(p.groups || []);
-        if (c?.success) setCollections(c.groups || []);
+        const next = { ..._homeCache } as NonNullable<typeof _homeCache>;
+        if (h?.success) { setRecent(h.recent || []); setContinuePlaying(h.continue_playing || []); next.recent = h.recent || []; next.continuePlaying = h.continue_playing || []; }
+        if (p?.success) { setPlatforms(p.groups || []); next.platforms = p.groups || []; }
+        if (c?.success) { setCollections(c.groups || []); next.collections = c.groups || []; }
+        _homeCache = next;
       } catch (e) { console.error('home load failed', e); }
       finally { if (alive) setLoading(false); }
     })();
     return () => { alive = false; };
   }, []);
 
+  // Land focus on the first card of whichever row renders first, so the user can
+  // navigate straight in (no DOWN press needed off the nav bar).
+  const firstList = continuePlaying.length ? 'cp' : recent.length ? 'rc'
+    : platforms.length ? 'pf' : collections.length ? 'cl' : null;
+  const firstRef = useAutoFocus(!loading && firstList !== null, firstList);
+
   if (loading) {
-    return <div style={{ padding: '16px', color: V2.fgMuted, fontSize: '13px' }}>Loading…</div>;
+    return (
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        minHeight: '60vh', color: V2.fgMuted, fontSize: '13px',
+      }}>Loading…</div>
+    );
   }
   return (
     <div>
       {/* Continue playing — per-user last_played from RomM (cross-device). */}
       {continuePlaying.length > 0 && (
         <CardRow icon={<FaPlay size={14} />} title="Continue playing" count={continuePlaying.length}>
-          {continuePlaying.map((g) => (
+          {continuePlaying.map((g, i) => (
             // Screenshot cards size to their natural (landscape) width; games
             // with no screenshot fall back to the portrait 132px cover.
             <div key={g.rom_id} style={{ flexShrink: 0, ...(g.screenshot ? {} : { width: '132px' }) }}>
-              <GameTile game={g} onOpen={onOpen} onActiveCover={onBg} />
+              <GameTile game={g} onOpen={onOpen} onActiveCover={onBg}
+                focusRef={firstList === 'cp' && i === 0 ? firstRef : undefined} />
             </div>
           ))}
         </CardRow>
@@ -1938,9 +2519,10 @@ function HomePanel({ onOpen, onOpenGroup, onBg }:
       {/* Recently added */}
       {recent.length > 0 && (
         <CardRow icon={<FaRegClock size={16} />} title="Recently added" count={recent.length}>
-          {recent.map((g) => (
+          {recent.map((g, i) => (
             <div key={g.rom_id} style={{ width: '132px', flexShrink: 0 }}>
-              <GameTile game={g} onOpen={onOpen} onActiveCover={onBg} />
+              <GameTile game={g} onOpen={onOpen} onActiveCover={onBg}
+                focusRef={firstList === 'rc' && i === 0 ? firstRef : undefined} />
             </div>
           ))}
         </CardRow>
@@ -1949,9 +2531,10 @@ function HomePanel({ onOpen, onOpenGroup, onBg }:
       {/* Platforms */}
       {platforms.length > 0 && (
         <CardRow icon={<FaGamepad size={16} />} title="Platforms" count={platforms.length}>
-          {platforms.map((g) => (
+          {platforms.map((g, i) => (
             <div key={g.key} style={{ width: '150px', flexShrink: 0 }}>
-              <PlatformTile group={g} onOpen={(grp) => onOpenGroup('platform', grp, platforms)} />
+              <PlatformTile group={g} onOpen={(grp) => onOpenGroup('platform', grp, platforms)}
+                focusRef={firstList === 'pf' && i === 0 ? firstRef : undefined} />
             </div>
           ))}
         </CardRow>
@@ -1960,9 +2543,10 @@ function HomePanel({ onOpen, onOpenGroup, onBg }:
       {/* Collections */}
       {collections.length > 0 && (
         <CardRow icon={<FaLayerGroup size={15} />} title="Collections" count={collections.length}>
-          {collections.map((g) => (
+          {collections.map((g, i) => (
             <div key={g.key} style={{ width: '132px', flexShrink: 0 }}>
-              <CollectionTile group={g} onOpen={(grp) => onOpenGroup('collection', grp, collections)} />
+              <CollectionTile group={g} onOpen={(grp) => onOpenGroup('collection', grp, collections)}
+                focusRef={firstList === 'cl' && i === 0 ? firstRef : undefined} />
             </div>
           ))}
         </CardRow>
@@ -2000,6 +2584,10 @@ function LibraryGroupsPage() {
     if (active === 'platforms' || active === 'collections') load(mode);
   }, [active]);
 
+  // Focus the first platform/collection tile once the index grid loads.
+  const isGroupTab = active === 'platforms' || active === 'collections';
+  const firstGroupRef = useAutoFocus(isGroupTab && !loading && groups.length > 0, active);
+
   const openGroup = (g: LibGroup) => {
     _libGroupHolder = { mode, group: g };
     _libGroupsHolder = { mode, groups };
@@ -2021,9 +2609,14 @@ function LibraryGroupsPage() {
   const onTab = (id: NavId) => setActive(id);
 
   // L1 / R1 page through the nav tabs (BackgroundArt cleared on home/search).
+  // After switching, the active panel remounts and drops gamepad focus, so we
+  // re-anchor focus on the persistent active nav pill — otherwise Steam eats the
+  // next bumper press to re-acquire focus (the "press twice to switch" bug).
+  const navPillRef = useRef<any>(null);
   const cycle = (dir: -1 | 1) => {
     const i = NAV_ORDER.indexOf(active);
     setActive(NAV_ORDER[(i + dir + NAV_ORDER.length) % NAV_ORDER.length]);
+    requestAnimationFrame(() => { try { navPillRef.current?.focus(); } catch { } });
   };
   const onButtonDown = (evt: any) => {
     const b = evt?.detail?.button;
@@ -2034,7 +2627,7 @@ function LibraryGroupsPage() {
 
   return v2Page(
     <Focusable noFocusRing onButtonDown={onButtonDown}>
-      <V2NavBar active={active} onTab={onTab} />
+      <V2NavBar active={active} onTab={onTab} activeRef={navPillRef} />
 
       <div style={{ height: '8px' }} />
 
@@ -2055,7 +2648,7 @@ function LibraryGroupsPage() {
             gap: '14px', padding: '0 16px',
           }}
         >
-          {groups.map((g) => <PlatformTile key={g.key} group={g} onOpen={openGroup} />)}
+          {groups.map((g, i) => <PlatformTile key={g.key} group={g} onOpen={openGroup} focusRef={i === 0 ? firstGroupRef : undefined} />)}
         </Focusable>
       ) : (
         // Collections, grouped into sections (Collections / Smart / Virtual) like
@@ -2066,6 +2659,12 @@ function LibraryGroupsPage() {
             { title: 'Smart', kinds: ['smart'] },
             { title: 'Virtual', kinds: ['virtual'] },
           ];
+          // Key of the very first rendered tile across all sections (gets focus).
+          let firstKey: string | null = null;
+          for (const s of sections) {
+            const it = groups.find((g) => s.kinds.includes(g.kind || 'collection'));
+            if (it) { firstKey = it.key; break; }
+          }
           return sections.map((s) => {
             const items = groups.filter((g) => s.kinds.includes(g.kind || 'collection'));
             if (items.length === 0) return null;
@@ -2084,7 +2683,7 @@ function LibraryGroupsPage() {
                     gap: '18px 16px', padding: '0 16px 8px',
                   }}
                 >
-                  {items.map((g) => <CollectionTile key={g.key} group={g} onOpen={openGroup} />)}
+                  {items.map((g) => <CollectionTile key={g.key} group={g} onOpen={openGroup} focusRef={g.key === firstKey ? firstGroupRef : undefined} />)}
                 </Focusable>
               </div>
             );
@@ -2100,27 +2699,76 @@ function LibraryGamesPage() {
   const holder = _libGroupHolder;
   const mode = holder?.mode || 'platform';
   const [group, setGroup] = useState<LibGroup | null>(holder?.group || null);
-  const [games, setGames] = useState<LibGame[]>([]);
-  const [loading, setLoading] = useState(true);
+  const cacheKey = (k: string) => `${mode}:${k}`;
+  const cached0 = group ? _libGamesCache.get(cacheKey(group.key)) : undefined;
+  const [games, setGames] = useState<LibGame[]>(cached0 || []);
+  const [loading, setLoading] = useState(!cached0);
   const [bgUri, setBgUri] = useState<string | null>(null);
+
+  // Sibling groups (same mode) so the game grid can page prev/next with L1/R1.
+  const siblings = (_libGroupsHolder && _libGroupsHolder.mode === mode) ? _libGroupsHolder.groups : [];
+
+  // Warm the cover art for a list of games (capped — just the first screenful is
+  // enough to make the slide land painted; the rest stream in as usual).
+  const warmCovers = (gs: LibGame[]) => {
+    for (const g of gs.slice(0, 18)) {
+      if (g.screenshot) awaitCover(`img:${g.screenshot}`, () => qGetImage(g.screenshot!));
+      else if (g.has_cover) awaitCover(`cover:${g.rom_id}:false`, () => qGetGameCover(g.rom_id, false));
+    }
+  };
+
+  // Fetch one group's games (and warm their covers) into the cache.
+  const prefetch = async (key: string) => {
+    const ck = cacheKey(key);
+    let gs = _libGamesCache.get(ck);
+    if (!gs) {
+      try {
+        const res = await getLibraryGames(mode, key);
+        const list: LibGame[] | null = res?.success ? (res.games || []) : null;
+        if (list) { gs = list; _libGamesCache.set(ck, list); }
+      } catch { /* best-effort prefetch */ }
+    }
+    if (gs) warmCovers(gs);
+  };
 
   useEffect(() => {
     let alive = true;
     (async () => {
       if (!group) { setLoading(false); return; }
-      setLoading(true); setBgUri(null);
-      try {
-        const res = await getLibraryGames(mode, group.key);
-        if (alive) setGames(res?.success ? (res.games || []) : []);
-      } catch (e) {
-        console.error('get_library_games failed', e);
-        if (alive) setGames([]);
-      } finally {
-        if (alive) setLoading(false);
+      setBgUri(null);
+      const ck = cacheKey(group.key);
+      const hit = _libGamesCache.get(ck);
+      if (hit) {
+        // Instant: real covers slide in with the carousel, no pop-in.
+        setGames(hit); setLoading(false);
+      } else {
+        setLoading(true);
+        try {
+          const res = await getLibraryGames(mode, group.key);
+          if (res?.success) _libGamesCache.set(ck, res.games || []);
+          if (alive) setGames(res?.success ? (res.games || []) : []);
+        } catch (e) {
+          console.error('get_library_games failed', e);
+          if (alive) setGames([]);
+        } finally {
+          if (alive) setLoading(false);
+        }
+      }
+      // Warm the immediate neighbours so the next L1/R1 is instant.
+      const i = siblings.findIndex((s) => s.key === group.key);
+      if (i >= 0) {
+        const nbrs = [siblings[i - 1], siblings[i + 1],
+          siblings[(i + 1) % siblings.length], siblings[(i - 1 + siblings.length) % siblings.length]];
+        for (const n of nbrs) if (n) prefetch(n.key);
       }
     })();
     return () => { alive = false; };
   }, [group?.key]);
+
+  // Once games load (initial entry or after L1/R1 paging), drop focus onto the
+  // first tile so the user can navigate straight into the grid — no extra DOWN
+  // press to leave the header carousel.
+  const firstTileRef = useAutoFocus(!loading && games.length > 0, group?.key);
 
   const openGame = (g: LibGame) => {
     _libGameHolder = g;
@@ -2128,65 +2776,334 @@ function LibraryGamesPage() {
   };
 
   // L1 / R1 page through sibling groups (same mode) without backing out.
-  const siblings = (_libGroupsHolder && _libGroupsHolder.mode === mode) ? _libGroupsHolder.groups : [];
+  // (`siblings` is declared above for the prefetch logic.)
+  // Re-anchor focus on the persistent header row after paging — the games grid
+  // remounts on group change and drops gamepad focus, which would otherwise make
+  // Steam eat the next bumper press ("press twice to switch").
+  const headerRef = useRef<any>(null);
+  // The selected slot grows to fit its full label (no truncation); measure its
+  // real width so the track translate keeps it perfectly centred.
+  const selSlotRef = useRef<HTMLDivElement | null>(null);
+  const [selW, setSelW] = useState(120);
+  // Direction of the last group change, so the games grid slides in from the same
+  // side as the carousel — making the header + covers read as one moving surface.
+  const [slideDir, setSlideDir] = useState<1 | -1>(1);
   const cycle = (dir: -1 | 1) => {
     if (!group || siblings.length < 2) return;
     const i = siblings.findIndex((s) => s.key === group.key);
     if (i < 0) return;
     const next = siblings[(i + dir + siblings.length) % siblings.length];
+    setSlideDir(dir);
     _libGroupHolder = { mode, group: next };
     setGroup(next);
+    requestAnimationFrame(() => { try { headerRef.current?.focus(); } catch { } });
   };
+  // Collection auto-sync toggle (Y). Keyed by collection name (== group.key).
+  // Optimistic local override layered over the backend's `synced` flag so the
+  // header reflects the change instantly; backend persists it to settings.ini.
+  const isCollection = mode === 'collection';
+  // Virtual collections are browse/download only (no auto-sync, no local-delete).
+  const isVirtual = !!group?.virtual;
+  const [syncOverrides, setSyncOverrides] = useState<Record<string, boolean>>({});
+  const isSynced = isCollection && !isVirtual && group
+    ? (syncOverrides[group.key] ?? !!group.synced) : false;
+  const toggleSync = async () => {
+    if (!isCollection || isVirtual || !group) return;
+    const name = group.key;
+    const next = !(syncOverrides[name] ?? !!group.synced);
+    setSyncOverrides((m) => ({ ...m, [name]: next }));
+    try {
+      const ok = await toggleCollectionSync(name, next);
+      if (ok === false) throw new Error('backend declined');
+      toaster.toast({ title: next ? 'Auto-sync on' : 'Auto-sync off', body: name });
+    } catch (e) {
+      setSyncOverrides((m) => ({ ...m, [name]: !next })); // revert
+      toaster.toast({ title: 'Sync toggle failed', body: String(e) });
+    }
+  };
+
+  // One-shot "Sync missing": download every game in this collection that isn't
+  // already local, through the per-game download path (covers light up as they go).
+  const [syncJob, setSyncJob] = useState<{ done: number; total: number } | null>(null);
+  const syncIdsRef = useRef<number[]>([]); // rom_ids of the running one-shot batch
+  const syncMissing = async () => {
+    if (syncJob) return; // already running for this page
+    const missing = games.filter((g) => !g.is_downloaded).map((g) => g.rom_id);
+    if (missing.length === 0) { toaster.toast({ title: 'Nothing to sync', body: 'All games are already downloaded' }); return; }
+    syncIdsRef.current = missing;
+    setSyncJob({ done: 0, total: missing.length });
+    toaster.toast({ title: 'Syncing collection', body: `Downloading ${missing.length} game${missing.length === 1 ? '' : 's'}` });
+    const ok = await downloadBatch(missing, 3, (done) => setSyncJob({ done, total: missing.length }));
+    setSyncJob(null);
+    toaster.toast({ title: 'Sync complete', body: `${ok} of ${missing.length} downloaded` });
+  };
+
+  // Background auto-sync progress for THIS collection, polled from the backend so
+  // the header reflects the CollectionSyncManager's downloads — not only the
+  // frontend one-shot batch. build_sync_status emits sync_state/downloaded/total.
+  // pct (when present) is the backend's fine-grained byte-level percent for the
+  // collection, so the bar moves continuously rather than stepping per game.
+  const [autoProg, setAutoProg] = useState<{ done: number; total: number; speed: number; pct: number | null } | null>(null);
+  useEffect(() => {
+    if (!isCollection || isVirtual || !group) { setAutoProg(null); return; }
+    let alive = true;
+    const tick = async () => {
+      try {
+        const st = await getServiceStatus();
+        const col = (st?.collections || []).find((c: any) => c.name === group.key);
+        if (!alive) return;
+        if (col && col.sync_state === 'syncing' && typeof col.total === 'number') {
+          setAutoProg({
+            done: col.downloaded || 0, total: col.total, speed: col.speed || 0,
+            pct: typeof col.downloaded_pct === 'number' ? col.downloaded_pct : null,
+          });
+        } else {
+          setAutoProg(null);
+        }
+      } catch { /* transient */ }
+    };
+    tick();
+    const id = setInterval(tick, 1500);
+    return () => { alive = false; clearInterval(id); };
+  }, [isCollection, group?.key]);
+
+  // Fine-grained fill for the one-shot batch: poll the in-flight downloads (≤
+  // concurrency) and sum their percentages AND speeds, so the bar advances
+  // smoothly within each game and we get a live aggregate transfer rate.
+  const [syncStats, setSyncStats] = useState<{ frac: number; speed: number }>({ frac: 0, speed: 0 });
+  useEffect(() => {
+    if (!syncJob) { setSyncStats({ frac: 0, speed: 0 }); return; }
+    let alive = true;
+    const tick = async () => {
+      const active = syncIdsRef.current.filter((id) => _dlActive.has(id));
+      let frac = 0, speed = 0;
+      await Promise.all(active.map(async (id) => {
+        try {
+          const p = await getDownloadProgress(id);
+          if (p) {
+            if (typeof p.percent === 'number') frac += p.percent / 100;
+            if (typeof p.speed === 'number') speed += p.speed;
+          }
+        } catch { /* transient */ }
+      }));
+      if (alive) setSyncStats({ frac, speed });
+    };
+    tick();
+    const id = setInterval(tick, 350);
+    return () => { alive = false; clearInterval(id); };
+  }, [syncJob]);
+
+  // Unified progress: the one-shot "Sync missing" batch takes precedence (it's
+  // the user's explicit action), otherwise fall back to background auto-sync.
+  const prog = syncJob
+    ? { done: syncJob.done, total: syncJob.total, speed: syncStats.speed }
+    : autoProg;
+  // Fine-grained percent (0..100): one-shot uses completed + in-flight fraction;
+  // auto-sync prefers the backend's byte-level pct, falling back to the ratio.
+  const progPct = !prog || !prog.total ? 0 : Math.min(100, Math.round(
+    syncJob
+      ? ((syncJob.done + syncStats.frac) / syncJob.total) * 100
+      : (autoProg?.pct != null ? autoProg.pct : (prog.done / prog.total) * 100),
+  ));
+  // Remaining-time estimate from the percentage velocity (works for both paths).
+  const progEta = useEtaFromPct(progPct, !!prog);
+
+  // Remove this collection's downloaded ROMs. Per the chosen UX: turn auto-sync
+  // OFF first (so the worker doesn't immediately re-download), then delete the
+  // local files. Bumps reloadTick to remount the grid so download dots clear.
+  const [reloadTick, setReloadTick] = useState(0);
+  const doRemove = async () => {
+    if (!group) return;
+    const name = group.key;
+    try {
+      if (isSynced) {
+        await toggleCollectionSync(name, false);
+        setSyncOverrides((m) => ({ ...m, [name]: false }));
+      }
+      const ok = await deleteCollectionRoms(name);
+      if (ok === false) throw new Error('backend declined');
+      setGames((gs) => gs.map((g) => ({ ...g, is_downloaded: false })));
+      _libGamesCache.delete(cacheKey(name));
+      setReloadTick((n) => n + 1);
+      toaster.toast({ title: 'Removed downloads', body: name });
+    } catch (e) {
+      toaster.toast({ title: 'Remove failed', body: String(e) });
+    }
+  };
+
+  // Press A / activate on the games-count opens the collection action menu.
+  // The destructive "Remove downloaded" arms on first select (re-opening the
+  // menu as "Confirm remove") and commits on the second — matching the game-tile
+  // delete affordance. Disarms after 4s.
+  const removeArmedRef = useRef(false);
+  const openActions = () => {
+    const missing = games.filter((g) => !g.is_downloaded).length;
+    const downloaded = games.filter((g) => g.is_downloaded).length;
+    const armed = removeArmedRef.current;
+    showContextMenu(
+      <Menu label={group?.label || 'Library'} onCancel={() => { removeArmedRef.current = false; }}>
+        <MenuItem disabled={!!syncJob || missing === 0} onSelected={syncMissing}>
+          {`${isVirtual ? 'Download' : 'Sync'} missing${missing ? ` (${missing})` : ''}`}
+        </MenuItem>
+        {!isVirtual && (
+          <MenuItem tone="destructive" disabled={downloaded === 0}
+            onSelected={() => {
+              if (!armed) {
+                removeArmedRef.current = true;
+                setTimeout(() => { removeArmedRef.current = false; }, 4000);
+                requestAnimationFrame(openActions); // reopen showing the confirm label
+              } else {
+                removeArmedRef.current = false;
+                doRemove();
+              }
+            }}>
+            {armed ? 'Confirm remove' : `Remove downloaded${downloaded ? ` (${downloaded})` : ''}`}
+          </MenuItem>
+        )}
+      </Menu>,
+    );
+  };
+
   const onButtonDown = (evt: any) => {
     const b = evt?.detail?.button;
     if (b === GamepadButton.BUMPER_LEFT) cycle(-1);
     else if (b === GamepadButton.BUMPER_RIGHT) cycle(1);
+    else if (b === GamepadButton.OPTIONS) toggleSync(); // Y
     else if (b === GamepadButton.SELECT) Navigation.Navigate("/romm-sync-settings");
   };
 
-  const jumpTo = (g: LibGroup) => { _libGroupHolder = { mode, group: g }; setGroup(g); };
+  const jumpTo = (g: LibGroup) => {
+    const from = siblings.findIndex((s) => s.key === group?.key);
+    const to = siblings.findIndex((s) => s.key === g.key);
+    if (from >= 0 && to >= 0) setSlideDir(to >= from ? 1 : -1);
+    _libGroupHolder = { mode, group: g };
+    setGroup(g);
+  };
 
   if (!group) {
     return v2Page(<div style={{ padding: '16px', color: V2.fgMuted }}>No group selected.</div>);
   }
 
   const canPage = siblings.length > 1;
-  // Context around the current group: 1 previous + up to 3 next, dimmed and
-  // dot-separated beside the big current title (no wrap — clearer than a strip).
   const ci = siblings.findIndex((s) => s.key === group.key);
-  const prev = ci > 0 ? siblings[ci - 1] : null;
-  const nexts: LibGroup[] = [];
-  for (let k = 1; k <= 3 && ci + k < siblings.length; k++) nexts.push(siblings[ci + k]);
+  // Sliding-track carousel: every sibling is a content-sized slot on a track
+  // anchored at left:50%. We measure the selected slot's real centre offset and
+  // translate the track by -that, so the selected name sits dead-centre no matter
+  // its width. All slots show their full label (no truncation). Bumpers live
+  // outside the clipped viewport so the edge fade never hides them.
+  const DOTGAP = 16; // px gap on each side of a separator dot
+  // Re-measure the selected slot's centre whenever the group/list changes.
+  useLayoutEffect(() => {
+    const el = selSlotRef.current;
+    if (el) setSelW(el.offsetLeft + el.offsetWidth / 2);
+  }, [group?.key, siblings.length]);
 
-  const dot = (key: string) => <span key={key} style={{ color: V2.fgMuted, opacity: 0.6, fontSize: '13px' }}>·</span>;
-  const sideName = (g: LibGroup) => (
-    <Focusable noFocusRing key={g.key} onActivate={() => jumpTo(g)} onClick={() => jumpTo(g)}
-      style={{
-        cursor: 'pointer', color: V2.fgMuted, fontSize: '13px', maxWidth: '120px',
-        flexShrink: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-      }}>
-      {g.label}
-    </Focusable>
-  );
+  // Width reserved for the right-hand status column (and mirrored by the left
+  // spacer so the carousel stays screen-centred). Fixed while syncing so the
+  // per-second speed/ETA text fills a constant box instead of resizing it.
+  const railW = prog ? 188 : 64;
 
   return v2Page(
-    <Focusable noFocusRing onButtonDown={onButtonDown}>
-      <div style={{ padding: '16px 16px 12px' }}>
-        <div style={{ fontSize: '12px', color: V2.fgMuted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-          {mode === 'collection' ? 'Collection' : 'Platform'}
-        </div>
-        <Focusable noFocusRing flow-children="horizontal" style={{ display: 'flex', alignItems: 'baseline', gap: '8px', marginTop: '2px' }}>
-          {canPage && <Bumper label="L1" />}
-          {prev && <span style={{ opacity: 0.7, color: V2.fgMuted }}>‹</span>}
-          {prev && sideName(prev)}
-          {prev && dot('d-prev')}
-          <div style={{ fontSize: '24px', fontWeight: 800, letterSpacing: '-0.01em', flexShrink: 0 }}>{group.label}</div>
-          {nexts.map((g, i) => [dot(`d-${i}`), sideName(g)])}
-          {nexts.length > 0 && <span style={{ opacity: 0.7, color: V2.fgMuted }}>›</span>}
-          {ci + nexts.length < siblings.length - 1 && <span style={{ color: V2.fgMuted }}>…</span>}
-          {canPage && <Bumper label="R1" />}
+    <Focusable noFocusRing onButtonDown={onButtonDown}
+      onOptionsActionDescription={isCollection && !isVirtual ? (isSynced ? 'Stop syncing' : 'Sync collection') : undefined}>
+      <div style={{
+        position: 'sticky', top: 0, zIndex: 50,
+        background: 'rgba(7,7,15,0.78)',
+        backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)',
+        borderBottom: `1px solid ${V2.border}`,
+        padding: '6px 0',
+      }}>
+        <Focusable noFocusRing ref={headerRef} style={{
+          display: 'flex', alignItems: 'center', height: '46px',
+        }}>
+          {/* Spacer mirrors the games-count column on the right so the carousel
+              stays centred on the screen, not just within the flex row. */}
+          <div style={{ flexShrink: 0, width: `${railW}px`, padding: '0 4px 0 12px', boxSizing: 'border-box', transition: 'width 0.2s ease' }} />
+          {canPage && <div style={{ flexShrink: 0, padding: '0 4px', zIndex: 2, display: 'flex', alignItems: 'center' }}><Bumper label="L1" /></div>}
+          <div style={{
+            position: 'relative', overflow: 'hidden', height: '100%', flex: 1,
+            // Soft fade only at the inner edges, between bumpers and names.
+            maskImage: 'linear-gradient(to right, transparent, #000 8%, #000 92%, transparent)',
+            WebkitMaskImage: 'linear-gradient(to right, transparent, #000 8%, #000 92%, transparent)',
+          }}>
+            <div style={{
+              position: 'absolute', top: 0, left: '50%', height: '100%',
+              display: 'flex', alignItems: 'center',
+              transform: `translateX(${-selW}px)`,
+              transition: 'transform 0.32s cubic-bezier(0.22, 1, 0.36, 1)',
+            }}>
+              {siblings.map((g, idx) => {
+                const sel = idx === ci;
+                return [
+                  idx > 0 && (
+                    <span key={`dot-${g.key}`} style={{
+                      flexShrink: 0, padding: `0 ${DOTGAP}px`,
+                      color: V2.fgMuted, opacity: 0.5, fontSize: '13px',
+                    }}>·</span>
+                  ),
+                  <Focusable noFocusRing key={g.key} ref={sel ? selSlotRef : undefined}
+                    onActivate={() => jumpTo(g)} onClick={() => jumpTo(g)}
+                    style={{
+                      flexShrink: 0, height: '100%',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      cursor: 'pointer', boxSizing: 'border-box',
+                      fontSize: sel ? '22px' : '14px',
+                      fontWeight: sel ? 800 : 500,
+                      letterSpacing: sel ? '-0.01em' : '0',
+                      color: sel ? V2.fg : V2.fgMuted,
+                      opacity: sel ? 1 : 0.5,
+                      whiteSpace: 'nowrap',
+                      transition: 'opacity 0.32s, color 0.32s',
+                    }}>
+                    {g.label}
+                  </Focusable>,
+                ];
+              })}
+            </div>
+          </div>
+          {canPage && <div style={{ flexShrink: 0, padding: '0 4px', zIndex: 2, display: 'flex', alignItems: 'center' }}><Bumper label="R1" /></div>}
+          {/* Games count doubles as the collection action trigger: focus it and
+              press A to open the actions menu (Sync missing). While a sync job is
+              running it shows live progress instead of the static count. */}
+          <Focusable noFocusRing onActivate={openActions} onClick={openActions}
+            style={{
+              flexShrink: 0, width: `${railW}px`, boxSizing: 'border-box',
+              padding: '0 12px 0 4px', overflow: 'hidden',
+              textAlign: 'right', fontSize: '11px', whiteSpace: 'nowrap',
+              cursor: 'pointer', transition: 'width 0.2s ease',
+              color: V2.fgMuted,
+              display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '5px',
+            }}>
+            {/* Synced indicator — same green dot as downloaded games/tiles. */}
+            {isSynced && !prog && (
+              <span style={{
+                width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0,
+                background: V2.success, boxShadow: '0 0 0 2px rgba(0,0,0,0.45)',
+              }} />
+            )}
+            {!loading && (prog
+              ? `${progPct}%${prog.speed ? `   ·   ${formatSpeed(prog.speed)}` : ''}${formatEta(progEta) ? `   ·   ${formatEta(progEta)} left` : ''}`
+              : `${games.length} ${games.length === 1 ? 'game' : 'games'}`)}
+          </Focusable>
         </Focusable>
-        {!loading && <div style={{ fontSize: '12px', color: V2.fgMuted, marginTop: '4px' }}>{games.length} {games.length === 1 ? 'game' : 'games'}</div>}
+        {/* Determinate sync bar — pinned to the header's bottom border, like
+            Steam's achievement bar. The gradient is painted across the FULL
+            width and revealed up to progPct (so the colour transition is visible
+            at any fill level, not just the left stop). Fed by the unified,
+            fine-grained model (one-shot batch + background auto-sync). */}
+        {prog && prog.total > 0 && (
+          <div style={{
+            position: 'absolute', left: 0, right: 0, bottom: '-1px', height: '3px',
+            overflow: 'hidden', background: 'rgba(255,255,255,0.12)',
+          }}>
+            {/* Gradient fill, clipped to progPct so it actually reflects progress. */}
+            <div style={{
+              height: '100%', width: `${progPct}%`,
+              background: 'linear-gradient(90deg, #7c5cff 0%, #a18fff 45%, #5ce0ff 100%)',
+              transition: 'width 0.3s ease',
+            }} />
+          </div>
+        )}
       </div>
 
       {loading ? (
@@ -2195,16 +3112,26 @@ function LibraryGamesPage() {
         <div style={{ padding: '16px', color: V2.fgMuted, fontSize: '13px' }}>No games in this group.</div>
       ) : (
         <Focusable noFocusRing
+          key={`${group.key}:${reloadTick}`}
+          className={slideDir === 1 ? 'lib-slide-r' : 'lib-slide-l'}
           style={{
             display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(132px, 1fr))',
             gap: '18px 16px', padding: '6px 16px',
           }}
         >
-          {games.map((g) => (
-            <GameTile key={g.rom_id} game={g} onOpen={openGame} onActiveCover={setBgUri} />
+          {games.map((g, i) => (
+            <GameTile key={g.rom_id} game={g} onOpen={openGame} onActiveCover={setBgUri}
+              focusRef={i === 0 ? firstTileRef : undefined} />
           ))}
         </Focusable>
       )}
+      <style>{`
+        @keyframes libSlideR { from { transform: translateX(7%); } to { transform: translateX(0); } }
+        @keyframes libSlideL { from { transform: translateX(-7%); } to { transform: translateX(0); } }
+        @keyframes libFade { from { opacity: 0.55; } to { opacity: 1; } }
+        .lib-slide-r { animation: libSlideR 0.34s cubic-bezier(0.22, 1, 0.36, 1) both, libFade 0.16s ease-out both; }
+        .lib-slide-l { animation: libSlideL 0.34s cubic-bezier(0.22, 1, 0.36, 1) both, libFade 0.16s ease-out both; }
+      `}</style>
     </Focusable>,
     bgUri,
   );
@@ -2928,6 +3855,67 @@ function SaveDataTab({ romId }: { romId: number }) {
   );
 }
 
+// ── Multi-disc helpers (shared by the cover tile, the Play button and the
+// Files tab) ────────────────────────────────────────────────────────────────
+type LocalDisc = { name: string; path: string; is_m3u: boolean };
+
+// Friendly label for a disc file: keep the "(Disc N)" tail when present, else
+// fall back to the bare filename (sans extension).
+function discDisplayLabel(fname: string): string {
+  const base = fname.replace(/\.[^.]+$/, '');
+  const m = base.match(/\(dis[ck]\s*\d+[^)]*\)/i);
+  return m ? m[0].replace(/[()]/g, '') : base;
+}
+
+async function runLaunch(romId: number, gameName: string, disc: string | null,
+  label?: string, setBusy?: (b: any) => void, onDone?: () => void) {
+  if (setBusy) setBusy('launch');
+  try {
+    const r = await launchGame(romId, disc);
+    if (r?.success) toaster.toast({ title: 'Launching', body: label || gameName });
+    else toaster.toast({ title: 'Launch failed', body: r?.message || 'Error' });
+  } catch (e) {
+    toaster.toast({ title: 'Launch failed', body: String(e) });
+  } finally {
+    if (setBusy) setBusy(null);
+    if (onDone) onDone();
+  }
+}
+
+// A check glyph marking the disc a plain Play will currently boot.
+function discMark(active: boolean) {
+  return active
+    ? <FaCheck size={11} style={{ marginRight: '8px', color: V2.brand }} />
+    : <span style={{ display: 'inline-block', width: '11px', marginRight: '8px' }} />;
+}
+
+// Native context menu listing the bootable discs. The first item launches the
+// .m3u playlist (in-game disc swap) when present, else disc 1. `last` is the
+// remembered disc (what a plain Play resumes) and is checkmarked. Choosing the
+// playlist persists the .m3u name so a later plain Play resumes the playlist.
+function openDiscPicker(romId: number, gameName: string, discs: LocalDisc[],
+  last?: string, setBusy?: (b: any) => void, onLaunched?: () => void) {
+  const m3u = discs.find((d) => d.is_m3u);
+  const pickable = discs.filter((d) => !d.is_m3u);
+  // The playlist is the active default when it is the remembered choice, or when
+  // nothing is remembered yet (the implicit first-launch default).
+  const m3uActive = !!m3u && (last === m3u.name || !last);
+  showContextMenu(
+    <Menu label="Select disc">
+      <MenuItem onSelected={() => runLaunch(romId, gameName, m3u ? m3u.name : null,
+        m3u ? 'All discs' : undefined, setBusy, onLaunched)}>
+        {discMark(m3uActive)}{m3u ? 'Play (all discs, in-game swap)' : 'Play (disc 1)'}
+      </MenuItem>
+      {pickable.map((d) => (
+        <MenuItem key={d.name} onSelected={() =>
+          runLaunch(romId, gameName, d.name, discDisplayLabel(d.name), setBusy, onLaunched)}>
+          {discMark(last === d.name)}{discDisplayLabel(d.name)}
+        </MenuItem>
+      ))}
+    </Menu>
+  );
+}
+
 function GameDetailPage() {
   const game = _libGameHolder;
   const [detail, setDetail] = useState<any>(null);
@@ -2935,8 +3923,15 @@ function GameDetailPage() {
   const [busy, setBusy] = useState<null | 'download' | 'delete' | 'launch'>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [isDownloaded, setIsDownloaded] = useState<boolean>(!!game?.is_downloaded);
+  const [discs, setDiscs] = useState<LocalDisc[]>([]);
+  const [discLast, setDiscLast] = useState<string>('');
   const [bgUri, setBgUri] = useState<string | null>(null);
   const [tab, setTab] = useState('overview');
+  const dlProg = useDownloadProgress(game?.rom_id ?? -1, busy === 'download');
+  const dlPct = dlProg?.percent ?? null;
+  const globalDownloading = useIsDownloading(game?.rom_id ?? -1);
+  const downloading = busy === 'download' || globalDownloading;
+  const smoothPct = useSmoothNumber(dlPct, downloading);
 
   const load = async () => {
     if (!game) { setLoading(false); return; }
@@ -2956,36 +3951,71 @@ function GameDetailPage() {
 
   useEffect(() => { load(); }, []);
 
+  // If a download for this game finishes on another surface (e.g. its cover
+  // tile), refresh so the CTA flips Download → Play here too.
+  const prevDownloading = useRef(false);
+  useEffect(() => {
+    if (prevDownloading.current && !downloading) load();
+    prevDownloading.current = downloading;
+  }, [downloading]);
+
+  // Resolve the on-disk disc files once the game is downloaded. A multi-disc
+  // game exposes >1 entry (plus an .m3u); a single-disc game returns [].
+  // `discReload` bumps after a disc launch so the remembered-disc checkmark and
+  // the resume target stay current without leaving the page.
+  const [discReload, setDiscReload] = useState(0);
+  useEffect(() => {
+    if (!game || !isDownloaded) { setDiscs([]); setDiscLast(''); return; }
+    let alive = true;
+    (async () => {
+      try {
+        const r = await getLocalDiscs(game.rom_id);
+        if (alive) { setDiscs(r?.success ? (r.discs || []) : []); setDiscLast(r?.last || ''); }
+      } catch { if (alive) { setDiscs([]); setDiscLast(''); } }
+    })();
+    return () => { alive = false; };
+  }, [isDownloaded, game?.rom_id, discReload]);
+
+  // A game is "multi-disc" for picker purposes when more than one bootable
+  // disc exists (the .m3u playlist alone does not count as a choice).
+  const pickableDiscs = discs.filter((d) => !d.is_m3u);
+  const isMultiDisc = pickableDiscs.length > 1;
+
   const doDownload = async () => {
     if (!game) return;
     setBusy('download');
+    _setDlActive(game.rom_id, true);
     try {
-      const res = await downloadGame(game.rom_id);
-      if (res?.success) {
+      const start = await downloadGame(game.rom_id);
+      if (!start?.success) {
+        toaster.toast({ title: 'Download failed', body: start?.message || 'Unknown error' });
+        return;
+      }
+      const res = await awaitDownload(game.rom_id);
+      if (res.ok) {
         toaster.toast({ title: 'Downloaded', body: detail?.name || game.name });
         setIsDownloaded(true);
       } else {
-        toaster.toast({ title: 'Download failed', body: res?.message || 'Unknown error' });
+        toaster.toast({ title: 'Download failed', body: res.message || 'Unknown error' });
       }
     } catch (e) {
       toaster.toast({ title: 'Download failed', body: String(e) });
     } finally {
+      _setDlActive(game.rom_id, false);
       setBusy(null);
     }
   };
 
-  const doLaunch = async () => {
+  const doLaunch = async (disc?: string | null, label?: string) => {
     if (!game) return;
-    setBusy('launch');
-    try {
-      const res = await launchGame(game.rom_id);
-      if (res?.success) toaster.toast({ title: 'Launching', body: detail?.name || game.name });
-      else toaster.toast({ title: 'Launch failed', body: res?.message || 'Unknown error' });
-    } catch (e) {
-      toaster.toast({ title: 'Launch failed', body: String(e) });
-    } finally {
-      setBusy(null);
-    }
+    await runLaunch(game.rom_id, detail?.name || game.name, disc ?? null, label, setBusy);
+    if (disc) setDiscReload((n) => n + 1);  // refresh remembered-disc marker
+  };
+
+  // Y / Options on the Play button: pick which disc to boot.
+  const openDiscMenu = () => {
+    if (game) openDiscPicker(game.rom_id, detail?.name || game.name, discs, discLast,
+      setBusy, () => setDiscReload((n) => n + 1));
   };
 
   const doDelete = async () => {
@@ -3127,14 +4157,20 @@ function GameDetailPage() {
               surface icon buttons for the secondary actions (Delete). */}
           <Focusable noFocusRing flow-children="horizontal" style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
             {!isDownloaded ? (
-              <GameActionButton variant="emphasized" disabled={!!busy} onClick={doDownload}
-                label={busy === 'download' ? 'Downloading…' : 'Download'}
-                icon={busy === 'download'
+              <GameActionButton variant="emphasized" disabled={!!busy || downloading} onClick={doDownload}
+                progress={downloading ? (dlPct ?? 0) : undefined}
+                label={downloading
+                  ? (dlPct != null ? `Downloading… ${smoothPct}%` : 'Downloading…')
+                  : 'Download'}
+                icon={downloading
                   ? <FaSync size={15} style={{ animation: 'spin 1s linear infinite' }} />
                   : <FaDownload size={15} />} />
             ) : !confirmDelete ? (
               <>
-                <GameActionButton variant="emphasized" disabled={!!busy} onClick={doLaunch}
+                <GameActionButton variant="emphasized" disabled={!!busy}
+                  onClick={() => doLaunch()}
+                  onOptionsButton={isMultiDisc ? openDiscMenu : undefined}
+                  optionsHint={isMultiDisc}
                   label={busy === 'launch' ? 'Launching…' : 'Play'}
                   icon={busy === 'launch'
                     ? <FaSync size={15} style={{ animation: 'spin 1s linear infinite' }} />
@@ -3152,6 +4188,17 @@ function GameDetailPage() {
                 <GameActionButton variant="surface" onClick={() => setConfirmDelete(false)}
                   icon={<FaTimes size={16} />} />
               </>
+            )}
+            {/* Live transfer readout — speed · ETA, shown beside the button only
+                while a download is in flight (kept off the cover tiles by design). */}
+            {downloading && dlProg && (dlProg.speed > 0 || dlProg.eta > 0) && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: V2.fg2,
+                animation: 'dlValIn 0.35s ease' }}>
+                <span style={{ opacity: 0.3 }}>·</span>
+                {dlProg.speed > 0 && <span>{formatSpeed(dlProg.speed)}</span>}
+                {dlProg.speed > 0 && formatEta(dlProg.eta) && <span style={{ opacity: 0.3 }}>·</span>}
+                {formatEta(dlProg.eta) && <span>{formatEta(dlProg.eta)} left</span>}
+              </span>
             )}
           </Focusable>
 
@@ -3233,18 +4280,41 @@ function GameDetailPage() {
                 )}
               </div>
             ) : tab === 'files' ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                {(detail?.files || []).length === 0 ? (
-                  <div style={{ color: V2.fgMuted, fontSize: '12px' }}>No file information.</div>
-                ) : (detail.files).map((f: any, i: number) => (
-                  <div key={i} style={{
-                    display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px',
-                    padding: '9px 12px', borderRadius: V2.radiusMd, background: V2.surface, fontSize: '12px',
-                  }}>
-                    <span style={{ color: V2.fg2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</span>
-                    <span style={{ color: V2.fgMuted, flexShrink: 0 }}>{fmtBytes(f.size)}</span>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+                {/* Discs — bootable entries on disk (downloaded multi-disc games).
+                    Each row launches that disc; the playlist row boots all discs
+                    with in-game swapping. */}
+                {isMultiDisc && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    <SectionHeading icon={<FaLayerGroup size={12} />}>Discs</SectionHeading>
+                    {discs.some((d) => d.is_m3u) && (
+                      <V2SettingsRow icon={<FaLayerGroup size={14} />}
+                        title="All discs" subtitle="In-game disc swapping"
+                        onClick={() => doLaunch(null, 'All discs')}
+                        right={<FaPlay size={12} style={{ color: V2.fgMuted }} />} />
+                    )}
+                    {pickableDiscs.map((d) => (
+                      <V2SettingsRow key={d.name} icon={<FaClone size={14} />}
+                        title={discDisplayLabel(d.name)} subtitle={d.name}
+                        onClick={() => doLaunch(d.name, discDisplayLabel(d.name))}
+                        right={<FaPlay size={12} style={{ color: V2.fgMuted }} />} />
+                    ))}
                   </div>
-                ))}
+                )}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {isMultiDisc && <SectionHeading icon={<FaBoxOpen size={12} />}>Files</SectionHeading>}
+                  {(detail?.files || []).length === 0 ? (
+                    <div style={{ color: V2.fgMuted, fontSize: '12px' }}>No file information.</div>
+                  ) : (detail.files).map((f: any, i: number) => (
+                    <div key={i} style={{
+                      display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px',
+                      padding: '9px 12px', borderRadius: V2.radiusMd, background: V2.surface, fontSize: '12px',
+                    }}>
+                      <span style={{ color: V2.fg2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</span>
+                      <span style={{ color: V2.fgMuted, flexShrink: 0 }}>{fmtBytes(f.size)}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
             ) : tab === 'screenshots' ? (
               <ScreenshotGrid paths={detail?.screenshots || []} />
