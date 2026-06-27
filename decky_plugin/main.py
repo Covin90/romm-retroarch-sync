@@ -100,6 +100,24 @@ if logging_enabled:
 logging.getLogger('watchdog').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
 
+# File extensions considered launchable discs — must match Plugin._LAUNCHABLE_DISC_EXTS.
+_LAUNCHABLE_DISC_EXTS = ('.m3u', '.chd', '.cue', '.iso', '.pbp',
+                          '.ccd', '.gdi', '.cdi', '.nrg')
+
+
+def _detect_multi_disc(local_path, is_downloaded):
+    """Return (is_multi_disc, disc_count) for the downloaded game."""
+    if not is_downloaded:
+        return False, 0
+    p = Path(local_path)
+    if not p.exists():
+        return False, 0
+    if p.is_dir():
+        launchable = [f for f in p.rglob('*')
+                      if f.is_file() and f.suffix.lower() in _LAUNCHABLE_DISC_EXTS]
+        return len(launchable) > 1, len(launchable)
+    return False, 0
+
 
 # ---------------------------------------------------------------------------
 # Plugin
@@ -327,6 +345,7 @@ class Plugin:
                                              for f in local_path.rglob('*') if f.is_file())
                         else:
                             local_size = local_path.stat().st_size
+                    is_md = _detect_multi_disc(local_path, is_downloaded)
                     self._available_games.append({
                         'name':            Path(file_name).stem if file_name else rom.get('name', 'Unknown'),
                         'rom_id':          rom.get('id'),
@@ -334,12 +353,15 @@ class Plugin:
                         'platform_slug':   platform_slug,
                         'file_name':       file_name,
                         'is_downloaded':   is_downloaded,
+                        'is_multi_disc':   is_md[0],
+                        'disc_count':      is_md[1],
                         'local_path':      str(local_path) if is_downloaded else None,
                         'local_size':      local_size,
                         'cover_path': rom.get('path_cover_small'),
                         'cover_path_large': rom.get('path_cover_large'),
                         'created_at':      rom.get('created_at'),
                         '_sibling_files':  rom.get('_sibling_files', []),
+                        'sibling_roms':    rom.get('sibling_roms', []),
                         'romm_data': {
                             'fs_name':         rom.get('fs_name'),
                             'fs_name_no_ext':  rom.get('fs_name_no_ext'),
@@ -753,6 +775,8 @@ class Plugin:
                             else:
                                 local_size = local_path.stat().st_size
 
+                        is_md = _detect_multi_disc(local_path, is_downloaded)
+
                         self._available_games.append({
                             'name':            Path(file_name).stem if file_name else rom.get('name', 'Unknown'),
                             'rom_id':          rom.get('id'),
@@ -760,11 +784,14 @@ class Plugin:
                             'platform_slug':   platform_slug,
                             'file_name':       file_name,
                             'is_downloaded':   is_downloaded,
+                            'is_multi_disc':   is_md[0],
+                            'disc_count':      is_md[1],
                             'local_path':      str(local_path) if is_downloaded else None,
                             'local_size':      local_size,
                             'cover_path': rom.get('path_cover_small'),
                             'cover_path_large': rom.get('path_cover_large'),
                             '_sibling_files':  rom.get('_sibling_files', []),
+                            'sibling_roms':    rom.get('sibling_roms', []),
                             'romm_data': {
                                 'fs_name': rom.get('fs_name'),
                                 'fs_name_no_ext': rom.get('fs_name_no_ext'),
@@ -1653,6 +1680,42 @@ class Plugin:
             logging.error(f"get_local_discs error: {e}", exc_info=True)
             return {'success': False, 'discs': [], 'last': '', 'message': str(e)}
 
+    async def get_sibling_roms(self, rom_id: int):
+        """Return regional variants for a ROM."""
+        try:
+            if not (self._romm_client and self._romm_client.authenticated):
+                return {'success': False, 'siblings': [], 'message': 'Not connected to RomM'}
+            r = self._romm_client.session.get(
+                urljoin(self._romm_client.base_url, f'/api/roms/{rom_id}'), timeout=15)
+            if r.status_code != 200:
+                return {'success': False, 'siblings': [], 'message': f'HTTP {r.status_code}'}
+            d = r.json()
+            raw = d.get('sibling_roms') or []
+            siblings = [
+                {'rom_id': s.get('id'), 'name': s.get('name') or s.get('fs_name_no_ext') or 'Variant',
+                 'fs_name': s.get('fs_name'), 'regions': s.get('regions', [])}
+                for s in raw
+            ]
+            return {'success': True, 'siblings': siblings}
+        except Exception as e:
+            logging.error(f"get_sibling_roms error: {e}", exc_info=True)
+            return {'success': False, 'siblings': [], 'message': str(e)}
+
+    async def get_local_siblings(self, rom_id: int):
+        """Return which siblings of a ROM are downloaded locally."""
+        try:
+            idx = self._games_index()
+            g = idx.get(rom_id)
+            if not g:
+                return {'success': True, 'downloaded_ids': []}
+            sibling_roms = g.get('sibling_roms', [])
+            ids = [rom_id] + [s.get('id') for s in sibling_roms if s.get('id')]
+            downloaded = [rid for rid in ids if idx.get(rid, {}).get('is_downloaded')]
+            return {'success': True, 'downloaded_ids': downloaded}
+        except Exception as e:
+            logging.error(f"get_local_siblings error: {e}", exc_info=True)
+            return {'success': False, 'downloaded_ids': [], 'message': str(e)}
+
     def _platform_name_for(self, g):
         p = g.get('platform')
         if p and p != 'Unknown':
@@ -1742,14 +1805,25 @@ class Plugin:
 
     @staticmethod
     def _serialize_game(g, is_downloaded=None):
-        return {
+        dl = g.get('is_downloaded') if is_downloaded is None else is_downloaded
+        s = {
             'rom_id':        g.get('rom_id') or g.get('id'),
             'name':          g.get('name') or g.get('fs_name_no_ext') or g.get('fs_name') or 'Unknown',
             'platform':      g.get('platform'),
-            'is_downloaded': g.get('is_downloaded') if is_downloaded is None else is_downloaded,
+            'is_downloaded': dl,
             'has_cover':     bool(g.get('cover_path') or g.get('path_cover_small')),
             'platform_slug': g.get('platform_slug') or (g.get('romm_data') or {}).get('platform_slug'),
         }
+        if g.get('is_multi_disc'):
+            s['is_multi_disc'] = True
+            s['disc_count'] = g.get('disc_count', 0)
+        if g.get('sibling_roms'):
+            s['sibling_roms'] = [
+                {'rom_id': sib.get('id'), 'name': sib.get('name') or sib.get('fs_name_no_ext') or 'Variant'}
+                for sib in g['sibling_roms']
+            ]
+            s['region_count'] = len(g['sibling_roms']) + 1
+        return s
 
     async def get_library_games(self, mode: str, key: str):
         """Return the games for a group (platform name or collection name)."""
@@ -1773,15 +1847,26 @@ class Plugin:
                 for r in roms:
                     rid = r.get('id')
                     local = idx.get(rid)
-                    games.append({
+                    entry = {
                         'rom_id': rid,
                         'name': (local or {}).get('name') or r.get('fs_name_no_ext') or r.get('name') or 'Unknown',
                         'platform': (local or {}).get('platform') or r.get('platform_name'),
                         'is_downloaded': bool(local and local.get('is_downloaded')),
                         'has_cover': bool(r.get('path_cover_small') or (local or {}).get('cover_path')),
                         'platform_slug': (local or {}).get('platform_slug') or r.get('platform_slug'),
-                    })
-                    # stash cover path so get_game_cover can use it without a detail call
+                    }
+                    if local and local.get('is_downloaded') and local.get('local_path'):
+                        is_md, dc = _detect_multi_disc(local['local_path'], True)
+                        entry['is_multi_disc'] = is_md
+                        entry['disc_count'] = dc
+                    sibs = r.get('sibling_roms') or (local or {}).get('sibling_roms') or []
+                    if sibs:
+                        entry['sibling_roms'] = [
+                            {'rom_id': s.get('id'), 'name': s.get('name') or 'Variant'}
+                            for s in sibs
+                        ]
+                        entry['region_count'] = len(sibs) + 1
+                    games.append(entry)
                     if rid and rid not in idx and r.get('path_cover_small'):
                         self._cover_paths[rid] = r.get('path_cover_small')
                 games.sort(key=lambda x: (x.get('name') or '').lower())
@@ -1836,14 +1921,26 @@ class Plugin:
                 for r in roms:
                     rid = r.get('id')
                     local = idx.get(rid)
-                    out.append({
+                    entry = {
                         'rom_id': rid,
                         'name': (local or {}).get('name') or r.get('fs_name_no_ext') or r.get('name') or 'Unknown',
                         'platform': (local or {}).get('platform') or r.get('platform_name'),
                         'is_downloaded': bool(local and local.get('is_downloaded')),
                         'has_cover': bool(r.get('path_cover_small') or (local or {}).get('cover_path')),
                         'platform_slug': (local or {}).get('platform_slug') or r.get('platform_slug'),
-                    })
+                    }
+                    if local and local.get('is_downloaded') and local.get('local_path'):
+                        is_md, dc = _detect_multi_disc(local['local_path'], True)
+                        entry['is_multi_disc'] = is_md
+                        entry['disc_count'] = dc
+                    sibs = r.get('sibling_roms') or (local or {}).get('sibling_roms') or []
+                    if sibs:
+                        entry['sibling_roms'] = [
+                            {'rom_id': s.get('id'), 'name': s.get('name') or 'Variant'}
+                            for s in sibs
+                        ]
+                        entry['region_count'] = len(sibs) + 1
+                    out.append(entry)
                     if rid and rid not in idx and r.get('path_cover_small'):
                         self._cover_paths[rid] = r.get('path_cover_small')
                 out.sort(key=lambda x: (x.get('name') or '').lower())
@@ -2324,6 +2421,36 @@ class Plugin:
                     if ok and g:
                         g['is_downloaded'] = True
                         g['local_path'] = str(dest)
+                        is_md, dc = _detect_multi_disc(str(dest), True)
+                        g['is_multi_disc'] = is_md
+                        g['disc_count'] = dc
+                    elif ok and not g:
+                        # Sibling ROM downloaded — add to the in-memory index so
+                        # launch_game can find it. Safe under CPython's GIL (same
+                        # assumption as the g[] mutations above).
+                        is_md, dc = _detect_multi_disc(str(dest), True)
+                        self._available_games.append({
+                            'name': name or 'Unknown',
+                            'rom_id': rom_id,
+                            'platform': platform_slug,
+                            'platform_slug': platform_slug,
+                            'file_name': file_name,
+                            'is_downloaded': True,
+                            'is_multi_disc': is_md,
+                            'disc_count': dc,
+                            'local_path': str(dest),
+                            'local_size': dest.stat().st_size if dest.exists() else 0,
+                            'cover_path': None,
+                            'cover_path_large': None,
+                            '_sibling_files': [],
+                            'sibling_roms': [],
+                            'romm_data': {
+                                'fs_name': file_name,
+                                'fs_name_no_ext': Path(file_name).stem if file_name else None,
+                                'fs_size_bytes': 0,
+                                'platform_slug': platform_slug,
+                            },
+                        })
                     self._download_progress[rom_id] = {
                         'percent': 100 if ok else 0, 'downloaded': 0, 'total': 0,
                         'speed': 0, 'eta': 0, 'state': 'done' if ok else 'error',
@@ -2488,23 +2615,57 @@ class Plugin:
             logging.error(f"get_home_data error: {e}", exc_info=True)
             return {'success': False, 'stats': {}, 'recent': [], 'continue_playing': [], 'message': str(e)}
 
-    async def launch_game(self, rom_id: int, disc: str = None):
+    async def launch_game(self, rom_id: int, disc: str = None, sibling_rom_id: int = None):
         """Launch a downloaded game in RetroArch (A button on a downloaded card).
 
         `disc` optionally names a specific disc file inside a multi-disc folder
         (from get_local_discs). When omitted, the last disc the user launched is
         resumed; absent that, the .m3u playlist is preferred (in-game swap),
         falling back to the first disc.
+        `sibling_rom_id` optionally overrides the ROM to launch — used when the
+        user picks a regional variant from the region picker.
         """
         try:
             idx = self._games_index()
-            g = idx.get(rom_id)
+            effective_rom_id = sibling_rom_id or rom_id
+            g = idx.get(effective_rom_id)
+            if not g or not g.get('is_downloaded') or not g.get('local_path'):
+                # Fallback: sibling ROM may be on disk but not in the index (e.g.,
+                # downloaded in a previous session). Try resolving from the API.
+                download_dir = Path(self._settings.get('Download', 'rom_directory',
+                                                        '~/RomMSync/roms')).expanduser()
+                try:
+                    r = self._romm_client.session.get(
+                        urljoin(self._romm_client.base_url, f'/api/roms/{effective_rom_id}'),
+                        timeout=15)
+                    if r.status_code == 200:
+                        d = r.json()
+                        slug = d.get('platform_slug', 'Unknown')
+                        fn = d.get('fs_name') or f"{d.get('name', 'rom')}.rom"
+                        candidate = download_dir / slug / fn
+                        if is_path_validly_downloaded(candidate):
+                            is_md, dc = _detect_multi_disc(str(candidate), True)
+                            g = {
+                                'rom_id': effective_rom_id,
+                                'name': d.get('name') or 'Unknown',
+                                'platform_slug': slug,
+                                'file_name': fn,
+                                'is_downloaded': True,
+                                'local_path': str(candidate),
+                                'is_multi_disc': is_md,
+                                'disc_count': dc,
+                                '_sibling_files': [],
+                                'sibling_roms': [],
+                            }
+                            self._available_games.append(g)
+                except Exception:
+                    pass
             if not g or not g.get('is_downloaded') or not g.get('local_path'):
                 return {'success': False, 'message': 'Game not downloaded'}
             if not self._retroarch:
                 return {'success': False, 'message': 'RetroArch not available'}
             # A bare Play resumes the remembered disc; an explicit pick overrides.
-            effective_disc = disc or self._get_last_disc(rom_id) or None
+            effective_disc = disc or self._get_last_disc(effective_rom_id) or None
             launch_path = self._resolve_launch_path(g['local_path'], effective_disc)
             if not launch_path and effective_disc:
                 # Remembered disc vanished — fall back to the default resolution.
@@ -2524,7 +2685,7 @@ class Plugin:
             # Remember an explicit disc choice so the next plain Play resumes it.
             if ok and disc:
                 try:
-                    self._settings.set('LastDisc', str(rom_id), disc)
+                    self._settings.set('LastDisc', str(effective_rom_id), disc)
                 except Exception as e:
                     logging.warning(f"could not persist last disc: {e}")
             return {'success': bool(ok), 'message': msg or ('Launched' if ok else 'Launch failed')}

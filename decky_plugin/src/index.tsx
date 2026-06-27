@@ -15,8 +15,8 @@ import {
   MenuItem,
 } from "@decky/ui";
 import { callable, definePlugin, toaster, routerHook, openFilePicker, FileSelectionType } from "@decky/api";
-import { useState, useEffect, useLayoutEffect, useRef, ChangeEvent } from "react";
-import { FaSync, FaTrash, FaCog, FaSteam, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight, FaCheckCircle, FaUsers, FaExternalLinkAlt, FaPuzzlePiece, FaBoxOpen, FaClone, FaRedo, FaClock, FaCheck, FaEllipsisH } from "react-icons/fa";
+import { useState, useEffect, useLayoutEffect, useRef, forwardRef, type Ref, type ChangeEvent } from "react";
+import { FaSync, FaTrash, FaCog, FaSteam, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight, FaCheckCircle, FaUsers, FaExternalLinkAlt, FaPuzzlePiece, FaBoxOpen, FaClone, FaRedo, FaClock, FaCheck, FaEllipsisH, FaGlobe } from "react-icons/fa";
 import { BsGearFill } from "react-icons/bs";
 import { MdVerified } from "react-icons/md";
 
@@ -47,8 +47,9 @@ const toggleCollectionSync = callable<[string, boolean], any>("toggle_collection
 const deleteCollectionRoms = callable<[string], any>("delete_collection_roms");
 const getDownloadProgress = callable<[number], any>("get_download_progress");
 const deleteGame = callable<[number], any>("delete_game");
-const launchGame = callable<[number, (string | null)?], any>("launch_game");
+const launchGame = callable<[number, (string | null)?, (number | null)?], any>("launch_game");
 const getLocalDiscs = callable<[number], any>("get_local_discs");
+const getLocalSiblings = callable<[number], any>("get_local_siblings");
 const getHomeData = callable<[], any>("get_home_data");
 const getPluginLogo = callable<[], any>("get_plugin_logo");
 const getRommArtwork = callable<[], any>("get_romm_artwork");
@@ -161,7 +162,7 @@ interface LibGroup {
   slug?: string | null; fs_slug?: string | null;
   synced?: boolean; virtual?: boolean;
 }
-interface LibGame { rom_id: number; name: string; platform: string | null; is_downloaded: boolean; has_cover: boolean; screenshot?: string | null; platform_slug?: string | null; }
+interface LibGame { rom_id: number; name: string; platform: string | null; is_downloaded: boolean; has_cover: boolean; screenshot?: string | null; platform_slug?: string | null; is_multi_disc?: boolean; disc_count?: number; sibling_roms?: { rom_id: number; name: string }[]; region_count?: number; }
 
 function fmtBytes(n: number | null | undefined): string {
   if (!n || isNaN(n as any)) return '';
@@ -515,20 +516,26 @@ function GameTile({ game, onOpen, onActiveCover, focusRef }:
   const [focused, setFocused] = useState(false);
   const [dl, setDl] = useState(!!game.is_downloaded);
   const [busy, setBusy] = useState<null | 'download' | 'delete' | 'launch'>(null);
-  const dlPct = useDownloadProgress(game.rom_id, busy === 'download')?.percent ?? null;
-  const globalDownloading = useIsDownloading(game.rom_id);
+  const [activeDlRomId, setActiveDlRomId] = useState<number>(game.rom_id);
+  const dlPct = useDownloadProgress(activeDlRomId, busy === 'download')?.percent ?? null;
+  const globalDownloading = useIsDownloading(activeDlRomId);
   const downloading = busy === 'download' || globalDownloading;
   const [confirmDelete, setConfirmDelete] = useState(false);
   const confirmTimer = useRef<any>(null);
   const activate = () => { onActiveCover(uriRef.current); };
 
-  // Multi-disc support on the cover: lazily fetch the on-disk disc list the
-  // first time a downloaded tile is focused (only the focused tile fetches).
+  // Multi-disc support on the cover: fetch the on-disk disc list when the tile
+  // is first focused (for the disc-picker menu). The badge visibility is driven
+  // by the backend is_multi_disc flag so it appears immediately.
   const [discs, setDiscs] = useState<LocalDisc[]>([]);
   const [discLast, setDiscLast] = useState<string>('');
   const discsTried = useRef(false);
   const pickableDiscs = discs.filter((d) => !d.is_m3u);
-  const isMultiDisc = pickableDiscs.length > 1;
+  const isMultiDisc = !!game.is_multi_disc && dl;
+  const isMultiRegion = !!game.region_count && game.region_count > 1;
+  const [activeRegionId, setActiveRegionId] = useState<number>(game.rom_id);
+  const [downloadedRegionIds, setDownloadedRegionIds] = useState<Set<number>>(new Set());
+  const siblingFetchTried = useRef(false);
   const ensureDiscs = async (force?: boolean) => {
     if ((discsTried.current && !force) || !dl) return;
     discsTried.current = true;
@@ -538,19 +545,33 @@ function GameTile({ game, onOpen, onActiveCover, focusRef }:
       setDiscLast(r?.last || '');
     } catch { /* leave empty */ }
   };
+  const ensureSiblings = async (force?: boolean) => {
+    if ((siblingFetchTried.current && !force) || !isMultiRegion) return;
+    siblingFetchTried.current = true;
+    try {
+      const r = await getLocalSiblings(game.rom_id);
+      if (r?.success) setDownloadedRegionIds(new Set(r.downloaded_ids || []));
+    } catch { /* leave empty */ }
+  };
   // Hold A to open the disc picker; a quick press still launches. We arm a
   // timer on A-down and, if it elapses while held, open the menu and flag the
   // press so the subsequent onActivate is suppressed.
   const longFired = useRef(false);
   const pressTimer = useRef<any>(null);
   const onBtnDown = (e: any) => {
-    if (e?.detail?.button === GamepadButton.OK && isMultiDisc) {
+    if (e?.detail?.button === GamepadButton.OK && (isMultiRegion || isMultiDisc)) {
       longFired.current = false;
       if (pressTimer.current) clearTimeout(pressTimer.current);
       pressTimer.current = setTimeout(() => {
         longFired.current = true;
-        openDiscPicker(game.rom_id, game.name, discs, discLast, setBusy,
-          () => ensureDiscs(true));
+        if (isMultiRegion) {
+          const allSiblings = game.sibling_roms || [];
+          openRegionPicker(game.rom_id, game.name, allSiblings, downloadedRegionIds,
+            activeRegionId, handleRegionSelected);
+        } else {
+          openDiscPicker(game.rom_id, game.name, discs, discLast, setBusy,
+            () => ensureDiscs(true));
+        }
       }, 500);
     }
   };
@@ -565,6 +586,7 @@ function GameTile({ game, onOpen, onActiveCover, focusRef }:
   const doDownload = async () => {
     if (busy) return;
     setBusy('download');
+    setActiveDlRomId(game.rom_id);
     _setDlActive(game.rom_id, true);
     try {
       const start = await downloadGame(game.rom_id);
@@ -585,6 +607,44 @@ function GameTile({ game, onOpen, onActiveCover, focusRef }:
     } catch (e) { toaster.toast({ title: 'Launch failed', body: String(e) }); }
     finally { setBusy(null); }
   };
+  const handleRegionSelected = async (selectedRomId: number) => {
+    setActiveRegionId(selectedRomId);
+    const isMainRom = selectedRomId === game.rom_id;
+    const isAlreadyDownloaded = isMainRom ? dl : downloadedRegionIds.has(selectedRomId);
+    if (!isAlreadyDownloaded) {
+      if (busy) { toaster.toast({ title: 'Busy', body: 'Please wait for the current operation' }); return; }
+      setBusy('download');
+      setActiveDlRomId(selectedRomId);
+      _setDlActive(selectedRomId, true);
+      try {
+        const start = await downloadGame(selectedRomId);
+        if (!start?.success) { toaster.toast({ title: 'Download failed', body: start?.message || 'Error' }); return; }
+        const res = await awaitDownload(selectedRomId);
+        if (res.ok) {
+          setDownloadedRegionIds(prev => new Set([...prev, selectedRomId]));
+          if (isMainRom) setDl(true);
+          toaster.toast({ title: 'Downloaded', body: game.name });
+        } else {
+          toaster.toast({ title: 'Download failed', body: res.message || 'Error' });
+          return;
+        }
+      } catch (e) { toaster.toast({ title: 'Download failed', body: String(e) }); return; }
+      finally { _setDlActive(selectedRomId, false); setBusy(null); }
+    }
+    // After download (or if already downloaded): check if this region is multi-disc
+    try {
+      const localDiscs = await getLocalDiscs(selectedRomId);
+      const discList: LocalDisc[] = localDiscs?.success ? (localDiscs.discs || []) : [];
+      const pickable = discList.filter((d: LocalDisc) => !d.is_m3u);
+      if (discList.length > 1 || pickable.length > 1) {
+        openDiscPicker(selectedRomId, game.name, discList, localDiscs?.last || '', setBusy);
+      } else {
+        await runLaunch(selectedRomId, game.name, null, game.name, setBusy);
+      }
+    } catch {
+      await runLaunch(selectedRomId, game.name, null, game.name, setBusy);
+    }
+  };
   const doDelete = async () => {
     if (busy) return;
     setBusy('delete');
@@ -604,7 +664,10 @@ function GameTile({ game, onOpen, onActiveCover, focusRef }:
     if (confirmTimer.current) clearTimeout(confirmTimer.current);
     confirmTimer.current = setTimeout(() => setConfirmDelete(false), 3000);
   };
-  const primary = () => { if (dl) doLaunch(); else doDownload(); };
+  const primary = () => {
+    if (dl) doLaunch();
+    else doDownload();
+  };
 
   return (
     <Focusable noFocusRing
@@ -617,10 +680,10 @@ function GameTile({ game, onOpen, onActiveCover, focusRef }:
       onSecondaryActionDescription="Details"
       onOptionsButton={() => { if (dl) requestDelete(); }}
       onOptionsActionDescription={dl ? (confirmDelete ? 'Confirm delete' : 'Delete') : undefined}
-      onOKActionDescription={dl ? (isMultiDisc ? 'Launch (hold: discs)' : 'Launch') : 'Download'}
-      onFocus={() => { setFocused(true); activate(); ensureDiscs(); }}
+      onOKActionDescription={dl ? (isMultiRegion ? 'Launch (hold: regions)' : isMultiDisc ? 'Launch (hold: discs)' : 'Launch') : 'Download'}
+      onFocus={() => { setFocused(true); activate(); ensureDiscs(); ensureSiblings(); }}
       onBlur={() => setFocused(false)}
-      onMouseEnter={() => { setFocused(true); activate(); ensureDiscs(); }}
+      onMouseEnter={() => { setFocused(true); activate(); ensureDiscs(); ensureSiblings(); }}
       onMouseLeave={() => setFocused(false)}
       style={{ cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: '7px' }}
     >
@@ -664,8 +727,9 @@ function GameTile({ game, onOpen, onActiveCover, focusRef }:
           </div>
         )}
         {/* Downloaded status dot — top-left corner, opposite the platform
-            icon so the two affordances don't collide. */}
-        {dl && (
+            icon so the two affordances don't collide. Hidden for multi-region
+            games (the region badge replaces it). */}
+        {dl && !isMultiRegion && (
           <div style={{
             position: 'absolute', top: '7px', left: '7px', zIndex: 2,
             width: '10px', height: '10px', borderRadius: '50%',
@@ -673,9 +737,24 @@ function GameTile({ game, onOpen, onActiveCover, focusRef }:
           }} />
         )}
 
+        {/* Region badge — globe icon + region count, top-left corner. Shown for
+            multi-region games so the region picker is discoverable. */}
+        {isMultiRegion && (
+          <div style={{
+            position: 'absolute', left: '7px', top: '7px', zIndex: 2,
+            display: 'inline-flex', alignItems: 'center', gap: '4px',
+            padding: '2px 6px', borderRadius: V2.radiusPill, fontSize: '10px', fontWeight: 600,
+            background: 'rgba(0,0,0,0.78)', border: '1px solid rgba(255,255,255,0.12)', color: V2.fg,
+            opacity: focused ? 0 : 1, transition: 'opacity 0.18s ease',
+          }}>
+            <FaGlobe size={9} />{game.region_count}
+          </div>
+        )}
+
         {/* Multi-disc badge — a small disc-count pill (RomM-style scrim chip)
             shown for downloaded multi-disc games so the hold-A picker is
-            discoverable. */}
+            discoverable. Shows the actual count once fetched, otherwise a
+            generic disc icon. */}
         {dl && isMultiDisc && (
           <div style={{
             position: 'absolute', left: '7px', bottom: '7px', zIndex: 2,
@@ -684,7 +763,7 @@ function GameTile({ game, onOpen, onActiveCover, focusRef }:
             background: 'rgba(0,0,0,0.78)', border: '1px solid rgba(255,255,255,0.12)', color: V2.fg,
             opacity: focused ? 0 : 1, transition: 'opacity 0.18s ease',
           }}>
-            <FaClone size={9} />{pickableDiscs.length}
+            <FaClone size={9} />{game.disc_count || pickableDiscs.length || ''}
           </div>
         )}
 
@@ -2179,15 +2258,39 @@ function v2Page(children: any, bgUri: string | null = null) {
 
 const NAV_ORDER: NavId[] = ['home', 'platforms', 'collections', 'search'];
 
-// RomM RTextField (filled) search field — rounded 8px box, bg-elevated fill,
-// magnify prefix, clear (×) suffix, brand border + halo on focus.
-function V2SearchField({ value, onChange }: { value: string; onChange: (v: string) => void }) {
-  const inputRef = useRef<HTMLInputElement | null>(null);
+// RomM RTextField (filled) search field — uses @decky/ui TextField for
+// Steam virtual keyboard support, with CSS overrides to strip the default
+// Steam DialogInput styling and apply the V2 theme. Wrapped in Focusable for
+// gamepad navigation; onActivate focuses the inner input to trigger keyboard.
+const V2SearchField = forwardRef(function V2SearchField(
+  { value, onChange }: { value: string; onChange: (v: string) => void },
+  fwdRef: Ref<any>,
+) {
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
   const [focused, setFocused] = useState(false);
+
   return (
-    <Focusable noFocusRing onActivate={() => inputRef.current?.focus()} style={{ borderRadius: V2.radiusMd }}>
-      <style>{`.v2-search-input::placeholder{color:rgba(255,255,255,0.45)}`}</style>
-      <div style={{
+    <Focusable
+      ref={(el: any) => {
+        wrapperRef.current = el;
+        if (typeof fwdRef === 'function') fwdRef(el);
+        else if (fwdRef) (fwdRef as any).current = el;
+      }}
+      noFocusRing
+      onActivate={() => {
+        const input = wrapperRef.current?.querySelector('input');
+        if (input) input.focus();
+      }}
+      style={{ borderRadius: V2.radiusMd }}
+    >
+      <style>{`
+        .romm-search-wrap label { display: none !important; }
+        .romm-search-wrap > div { background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important; margin: 0 !important; }
+        .romm-search-wrap > div > div { background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important; }
+        .romm-search-wrap input { background: transparent !important; border: none !important; outline: none !important; box-shadow: none !important; color: ${V2.fg} !important; font-size: 14px !important; font-family: inherit !important; padding: 0 !important; margin: 0 !important; height: auto !important; min-height: 0 !important; caret-color: ${V2.brand} !important; }
+        .romm-search-wrap input::placeholder { color: rgba(255,255,255,0.45) !important; }
+      `}</style>
+      <div className="romm-search-wrap" style={{
         display: 'flex', alignItems: 'center', gap: '10px', height: '40px', padding: '0 12px',
         borderRadius: V2.radiusMd,
         background: focused ? V2.surfaceHover : 'rgba(255,255,255,0.045)',
@@ -2196,21 +2299,17 @@ function V2SearchField({ value, onChange }: { value: string; onChange: (v: strin
         transition: 'background 0.2s, border-color 0.2s, box-shadow 0.2s',
       }}>
         <FaSearch size={14} color={focused ? V2.brandHover : V2.fgMuted} style={{ flexShrink: 0 }} />
-        <input
-          ref={inputRef}
-          className="v2-search-input"
-          value={value}
-          placeholder="Search games"
-          onChange={(e: ChangeEvent<HTMLInputElement>) => onChange(e.target.value)}
-          onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
-          style={{
-            flex: '1 1 auto', minWidth: 0, background: 'transparent', border: 'none', outline: 'none',
-            color: V2.fg, fontSize: '14px', fontFamily: 'inherit', padding: 0,
-          }}
-        />
+        <div style={{ flex: '1 1 auto', minWidth: 0 }}
+          onFocusCapture={() => setFocused(true)}
+          onBlurCapture={() => setFocused(false)}
+        >
+          <TextField
+            value={value}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => onChange(e.target.value)}
+          />
+        </div>
         {value && (
-          <div onClick={() => { onChange(''); inputRef.current?.focus(); }}
+          <div onClick={() => onChange('')}
             style={{
               flexShrink: 0, cursor: 'pointer', color: V2.fgMuted, display: 'flex', alignItems: 'center',
               padding: '2px', borderRadius: '50%',
@@ -2221,7 +2320,7 @@ function V2SearchField({ value, onChange }: { value: string; onChange: (v: strin
       </div>
     </Focusable>
   );
-}
+});
 
 // V2TextField — labeled text input sharing the V2SearchField look (RomM
 // RTextField filled variant): rounded surface box, brand focus border + halo.
@@ -2351,7 +2450,7 @@ function SearchPanel({ onOpen, onBg }: { onOpen: (g: LibGame) => void; onBg: (ur
         </div>
       ) : results.length === 0 ? (
         <div style={{ padding: '24px', color: V2.fgMuted, fontSize: '13px', textAlign: 'center' }}>
-          {q.trim() ? `No games match “${q.trim()}”.` : 'No games in your library yet.'}
+          {q.trim() ? `No games match "${q.trim()}".` : 'No games in your library yet.'}
         </div>
       ) : (
         <Focusable noFocusRing style={{
@@ -3868,10 +3967,10 @@ function discDisplayLabel(fname: string): string {
 }
 
 async function runLaunch(romId: number, gameName: string, disc: string | null,
-  label?: string, setBusy?: (b: any) => void, onDone?: () => void) {
+  label?: string, setBusy?: (b: any) => void, onDone?: () => void, siblingRomId?: number | null) {
   if (setBusy) setBusy('launch');
   try {
-    const r = await launchGame(romId, disc);
+    const r = await launchGame(romId, disc, siblingRomId ?? null);
     if (r?.success) toaster.toast({ title: 'Launching', body: label || gameName });
     else toaster.toast({ title: 'Launch failed', body: r?.message || 'Error' });
   } catch (e) {
@@ -3910,6 +4009,36 @@ function openDiscPicker(romId: number, gameName: string, discs: LocalDisc[],
         <MenuItem key={d.name} onSelected={() =>
           runLaunch(romId, gameName, d.name, discDisplayLabel(d.name), setBusy, onLaunched)}>
           {discMark(last === d.name)}{discDisplayLabel(d.name)}
+        </MenuItem>
+      ))}
+    </Menu>
+  );
+}
+
+function openRegionPicker(
+  romId: number, gameName: string,
+  siblings: { rom_id: number; name: string }[],
+  downloadedIds: Set<number>,
+  lastUsedId?: number,
+  onSelected?: (sibRomId: number) => void,
+) {
+  const mainEntry = { rom_id: romId, name: gameName };
+  const sorted = [...siblings].sort((a, b) => {
+    const aDl = downloadedIds.has(a.rom_id) ? 0 : 1;
+    const bDl = downloadedIds.has(b.rom_id) ? 0 : 1;
+    if (aDl !== bDl) return aDl - bDl;
+    return a.name.localeCompare(b.name);
+  });
+  const all = [mainEntry, ...sorted];
+
+  showContextMenu(
+    <Menu label="Select region">
+      {all.map((entry) => (
+        <MenuItem key={entry.rom_id} onSelected={() => onSelected?.(entry.rom_id)}>
+          {entry.rom_id === lastUsedId ? '✓ ' : ''}
+          {entry.name}
+          {entry.rom_id !== romId && !downloadedIds.has(entry.rom_id) ? ' (not downloaded)' : ''}
+          {downloadedIds.has(entry.rom_id) ? ' ✓' : ''}
         </MenuItem>
       ))}
     </Menu>
@@ -5260,16 +5389,28 @@ export default definePlugin(() => {
   routerHook.addRoute("/romm-sync-library/:key", () => <LibraryGamesPage />, { exact: true });
   routerHook.addRoute("/romm-sync-game/:romId", () => <GameDetailPage />, { exact: true });
 
+  // Register the launch intercept IMMEDIATELY — independent of tile
+  // reconciliation.  The intercept checks the appid/name at fire time, so it
+  // is safe to bind before the shortcut store is ready.  This fixes the bug
+  // where clicking the RomM tile in Big Picture did nothing until the user
+  // opened the Decky panel (which triggered reconcileRommTile → register…).
+  registerRommLaunchIntercept();
+
   // Re-bind the launch intercept if the RomM tile was added in a prior session,
   // and auto-open the setup wizard once when no connection is configured.
   (async () => {
     try {
       // Best-effort at load; the shortcut store may not be ready this early, so
-      // Settings-open reconciles again. Retry shortly after to catch the store
-      // becoming ready without needing the user to open Settings.
-      if ((await reconcileRommTile()) == null) {
-        setTimeout(() => { reconcileRommTile().catch(() => { /* ignore */ }); }, 4000);
-      }
+      // Settings-open reconciles again. Retry with exponential backoff to catch
+      // the store becoming ready without needing the user to open Settings.
+      const tryReconcile = async (attempt: number) => {
+        if ((await reconcileRommTile()) != null) return;
+        if (attempt < 5) {
+          const delay = Math.min(4000 * Math.pow(1.5, attempt), 15000);
+          setTimeout(() => { tryReconcile(attempt + 1); }, delay);
+        }
+      };
+      await tryReconcile(0);
     } catch (e) { console.error('[RomM] shortcut rebind', e); }
     try {
       const cfg = await getConfig();
