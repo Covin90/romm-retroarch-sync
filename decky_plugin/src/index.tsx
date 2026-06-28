@@ -298,12 +298,15 @@ function ScreenshotArt({ path, onLoaded, onRatio }:
 // CoverArtPip). Fades out on focus so it never collides with the action row.
 function CoverPip({ romId, hasCover, hidden }:
   { romId: number; hasCover: boolean; hidden: boolean }) {
-  const [uri, setUri] = useState<string | null>(null);
+  const ck = `cover:${romId}:false`;
+  const [uri, setUri] = useState<string | null>(peekCover(ck) ?? null);
   useEffect(() => {
     let alive = true;
     if (!hasCover) return;
+    const p = peekCover(ck);
+    if (p !== undefined) { setUri(p); return; }
     (async () => {
-      try { const r = await qGetGameCover(romId, false); if (alive) setUri(r?.data_uri || null); }
+      try { const u = await awaitCover(ck, () => qGetGameCover(romId, false)); if (alive) setUri(u); }
       catch { /* ignore */ }
     })();
     return () => { alive = false; };
@@ -883,11 +886,14 @@ function GameTile({ game, onOpen, onActiveCover, focusRef }:
 // One image fetched by RomM resource path (collection mosaic cells), base64
 // via the backend, cached. Renders nothing visible until loaded.
 function PathImage({ path }: { path: string }) {
-  const [uri, setUri] = useState<string | null>(null);
+  const ik = `img:${path}`;
+  const [uri, setUri] = useState<string | null>(peekCover(ik) ?? null);
   useEffect(() => {
     let alive = true;
+    const p = peekCover(ik);
+    if (p !== undefined) { setUri(p); return; }
     (async () => {
-      try { const r = await qGetImage(path); if (alive) setUri(r?.data_uri || null); }
+      try { const u = await awaitCover(ik, () => qGetImage(path)); if (alive) setUri(u); }
       catch { /* ignore */ }
     })();
     return () => { alive = false; };
