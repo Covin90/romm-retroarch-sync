@@ -101,6 +101,22 @@ function _traced<T>(label: string, job: () => Promise<T>): Promise<T> {
 const qGetImage = (path: string) => imageQueue(() => _traced(`img ${path}`, () => getImage(path)));
 const qGetGameCover = (romId: number, large: boolean) => imageQueue(() => _traced(`cover ${romId}`, () => getGameCover(romId, large)));
 
+// Resolved platform-icon cache: platformKey -> data URI (or null = no icon).
+// Persisted to localStorage because there are only ~dozens of tiny icons and
+// they're the same every session — so they paint instantly even after a reload
+// instead of compositing in one-by-one on the Platforms tab.
+const _platIconCache = new Map<string, string | null>();
+const _LS_PLATICON = 'romm:platicons:v1';
+function _platIconCacheSet(key: string, uri: string | null) {
+  _platIconCache.set(key, uri);
+  if (!_lsAvail) return;
+  try {
+    const obj: Record<string, string | null> = {};
+    _platIconCache.forEach((v, k) => { obj[k] = v; });
+    localStorage.setItem(_LS_PLATICON, JSON.stringify(obj));
+  } catch {}
+}
+
 // Decoded-art cache (data URIs) so covers persist across tile remounts and can be
 // prefetched for neighbouring groups — the grid then slides in fully painted
 // instead of popping each cover in as its base64 fetch lands.
@@ -1194,9 +1210,19 @@ function CollectionTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: 
 // fsSlug.svg → fsSlug.ico → slug.svg → slug.ico). Each candidate is fetched
 // via the backend get_image RPC; falls back to a gamepad glyph if none load.
 function PlatformIcon({ slug, fsSlug, size }: { slug?: string | null; fsSlug?: string | null; size: number }) {
-  const [uri, setUri] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
+  const key = `${(fsSlug || '').toLowerCase().trim()}|${(slug || '').toLowerCase().trim()}`;
+  // Resolved-icon cache: which candidate URL actually exists is unknown up
+  // front, so we cache the RESOLVED data URI (or null = none) per platform key.
+  // Seeding from it means a tab switch repaints icons synchronously instead of
+  // popping them in one-by-one as each async RPC lands.
+  const cached = _platIconCache.has(key) ? _platIconCache.get(key) : undefined;
+  const [uri, setUri] = useState<string | null>(cached ?? null);
+  const [failed, setFailed] = useState(cached === null);
   useEffect(() => {
+    if (_platIconCache.has(key)) {
+      const c = _platIconCache.get(key)!;
+      setUri(c ?? null); setFailed(c === null); return;
+    }
     let alive = true;
     const fs = (fsSlug || slug || '').toLowerCase().trim();
     const s = (slug || '').toLowerCase().trim();
@@ -1207,15 +1233,15 @@ function PlatformIcon({ slug, fsSlug, size }: { slug?: string | null; fsSlug?: s
     (async () => {
       for (const c of cands) {
         try {
-          const r = await qGetImage(c);
+          const r = await awaitCover(`img:${c}`, () => qGetImage(c));
           if (!alive) return;
-          if (r?.data_uri) { setUri(r.data_uri); return; }
+          if (r) { _platIconCacheSet(key, r); setUri(r); return; }
         } catch { /* try next */ }
       }
-      if (alive) setFailed(true);
+      if (alive) { _platIconCacheSet(key, null); setFailed(true); }
     })();
     return () => { alive = false; };
-  }, [slug, fsSlug]);
+  }, [key]);
   if (uri) return <img src={uri} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />;
   if (failed || (!slug && !fsSlug)) return <FaGamepad size={Math.round(size * 0.75)} />;
   return null; // loading
@@ -1916,6 +1942,11 @@ function persistHomeCache() {
     const o = JSON.parse(localStorage.getItem(_LS_HOME_KEY) || 'null');
     if (o && o.v && (now - (o.t || 0)) < _LS_TTL_MS) _homeCache = o.v;
     else if (o) localStorage.removeItem(_LS_HOME_KEY);
+  } catch {}
+  try {
+    const o = JSON.parse(localStorage.getItem(_LS_PLATICON) || 'null');
+    if (o && typeof o === 'object')
+      for (const k of Object.keys(o)) _platIconCache.set(k, o[k]);
   } catch {}
 })();
 
