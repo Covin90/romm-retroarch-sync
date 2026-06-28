@@ -2062,6 +2062,51 @@ class Plugin:
         except Exception:
             pass
 
+    # Grid covers render at ~150px; serving the full ~200KB RomM art means
+    # ~16MB of base64 hits the websocket + UI-thread JSON.parse in one burst
+    # when a platform opens (the freeze). Downscale to a small JPEG thumbnail
+    # (~15KB) before caching/serving. Width chosen for 2x retina of the cell.
+    _THUMB_W = 360
+    _THUMB_W_LARGE = 640  # detail-page hero uses a bigger cover
+
+    def _cover_cache_put(self, ck, uri):
+        """Insert into the in-memory cache, enforcing a bound on EVERY insert
+        (the old code only capped on the network path, so disk hits grew it
+        unbounded — 800+ thumbnails ≈ hundreds of MB resident)."""
+        if len(self._cover_cache) > 600:
+            self._cover_cache.clear()
+        self._cover_cache[ck] = uri
+
+    def _store_thumb(self, ck, thumb_key, raw, mime, large):
+        """Downscale raw bytes → thumbnail, persist under thumb_key, mem-cache
+        and return the data URI."""
+        tb, tmime = self._make_thumb(raw, large)
+        mime = tmime or mime or 'image/jpeg'
+        uri = f"data:{mime};base64,{base64.b64encode(tb).decode('ascii')}"
+        self._disk_cover_put(thumb_key, mime, tb)
+        self._cover_cache_put(ck, uri)
+        return uri
+
+    def _make_thumb(self, content: bytes, large: bool = False):
+        """Downscale raw image bytes to a compact JPEG. Returns (bytes, mime).
+        Falls back to the original bytes if PIL is missing or anything fails."""
+        if not PIL_AVAILABLE:
+            return content, None
+        try:
+            import io
+            max_w = self._THUMB_W_LARGE if large else self._THUMB_W
+            im = Image.open(io.BytesIO(content))
+            if im.width <= max_w:
+                return content, None  # already small enough; keep as-is
+            h = round(im.height * (max_w / im.width))
+            im = im.convert('RGB').resize((max_w, h), Image.LANCZOS)
+            out = io.BytesIO()
+            im.save(out, format='JPEG', quality=82, optimize=True)
+            return out.getvalue(), 'image/jpeg'
+        except Exception as e:
+            logging.debug(f"_make_thumb failed: {e}")
+            return content, None
+
     def _cover_dir(self):
         d = Path.home() / '.config' / 'romm-retroarch-sync' / 'cover_cache'
         try:
@@ -2088,6 +2133,19 @@ class Plugin:
         except Exception:
             pass
         return None
+
+    def _disk_cover_get_bytes(self, key: str):
+        """Return (raw_bytes, mime) from disk for `key`, or (None, None)."""
+        try:
+            stem = hashlib.sha1(key.encode()).hexdigest()
+            for f in self._cover_dir().glob(stem + '.*'):
+                data = f.read_bytes()
+                if not data:
+                    return None, None
+                return data, (mimetypes.guess_type(f.name)[0] or 'image/jpeg')
+        except Exception:
+            pass
+        return None, None
 
     def _disk_cover_put(self, key: str, mime: str, content: bytes):
         """Write raw cover bytes to disk for `key`; prune occasionally."""
@@ -2156,12 +2214,20 @@ class Plugin:
             ck = (rom_id, large)
             if ck in self._cover_cache:
                 return {'success': True, 'data_uri': self._cover_cache[ck]}
-            disk_key = f"cover:{rom_id}:{large}"
-            disk = self._disk_cover_get(disk_key)
+            # Thumbnail disk cache (v2). The compact downscaled art.
+            tkey = f"covt:{rom_id}:{large}"
+            disk = self._disk_cover_get(tkey)
             if disk:
-                self._cover_cache[ck] = disk
+                self._cover_cache_put(ck, disk)
                 self._trace_cover('cover', rom_id, 'disk', t0, len(disk))
                 return {'success': True, 'data_uri': disk}
+            # Reuse a full-size cover already on disk (legacy v1 cache) →
+            # downscale locally instead of re-downloading from RomM.
+            raw, mime = self._disk_cover_get_bytes(f"cover:{rom_id}:{large}")
+            if raw:
+                uri = self._store_thumb(ck, tkey, raw, mime, large)
+                self._trace_cover('cover', rom_id, 'disk-orig', t0, len(uri))
+                return {'success': True, 'data_uri': uri}
             if not (self._romm_client and self._romm_client.authenticated):
                 return {'success': False, 'data_uri': None}
             idx = self._games_index()
@@ -2183,11 +2249,7 @@ class Plugin:
             if resp.status_code != 200 or not resp.content:
                 return {'success': True, 'data_uri': None}
             mime = resp.headers.get('content-type') or mimetypes.guess_type(path)[0] or 'image/jpeg'
-            uri = f"data:{mime};base64,{base64.b64encode(resp.content).decode('ascii')}"
-            self._disk_cover_put(disk_key, mime, resp.content)
-            if len(self._cover_cache) > 400:
-                self._cover_cache.clear()
-            self._cover_cache[ck] = uri
+            uri = self._store_thumb(ck, tkey, resp.content, mime, large)
             self._trace_cover('cover', rom_id, 'net', t0, len(resp.content))
             return {'success': True, 'data_uri': uri}
         except Exception as e:
@@ -2215,12 +2277,18 @@ class Plugin:
             ck = ('img', path)
             if ck in self._cover_cache:
                 return {'success': True, 'data_uri': self._cover_cache[ck]}
-            disk_key = f"img:{path}"
-            disk = self._disk_cover_get(disk_key)
+            tkey = f"imgt:{path}"
+            disk = self._disk_cover_get(tkey)
             if disk:
-                self._cover_cache[ck] = disk
+                self._cover_cache_put(ck, disk)
                 self._trace_cover('img', path, 'disk', t0, len(disk))
                 return {'success': True, 'data_uri': disk}
+            # Downscale a full-size image already on disk (legacy v1) in place.
+            raw, mime = self._disk_cover_get_bytes(f"img:{path}")
+            if raw:
+                uri = self._store_thumb(ck, tkey, raw, mime, False)
+                self._trace_cover('img', path, 'disk-orig', t0, len(uri))
+                return {'success': True, 'data_uri': uri}
             if not (self._romm_client and self._romm_client.authenticated):
                 return {'success': False, 'data_uri': None}
             resp = self._romm_client.session.get(
@@ -2228,11 +2296,7 @@ class Plugin:
             if resp.status_code != 200 or not resp.content:
                 return {'success': True, 'data_uri': None}
             mime = resp.headers.get('content-type') or mimetypes.guess_type(path)[0] or 'image/png'
-            uri = f"data:{mime};base64,{base64.b64encode(resp.content).decode('ascii')}"
-            self._disk_cover_put(disk_key, mime, resp.content)
-            if len(self._cover_cache) > 400:
-                self._cover_cache.clear()
-            self._cover_cache[ck] = uri
+            uri = self._store_thumb(ck, tkey, resp.content, mime, False)
             self._trace_cover('img', path, 'net', t0, len(resp.content))
             return {'success': True, 'data_uri': uri}
         except Exception as e:
