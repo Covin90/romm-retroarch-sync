@@ -2122,7 +2122,18 @@ class Plugin:
             return {'success': False, 'message': str(e)}
 
     async def get_game_cover(self, rom_id: int, large: bool = False):
-        """Return a base64 data URI for a game's cover art (cached)."""
+        """Return a base64 data URI for a game's cover art (cached).
+
+        The in-memory hit is served inline; disk reads + RomM HTTP fetches are
+        blocking, so they run in a worker thread to avoid freezing the asyncio
+        event loop (which would stall every other plugin RPC and the whole UI).
+        """
+        ck = (rom_id, large)
+        if ck in self._cover_cache:
+            return {'success': True, 'data_uri': self._cover_cache[ck]}
+        return await asyncio.to_thread(self._get_game_cover_blocking, rom_id, large)
+
+    def _get_game_cover_blocking(self, rom_id: int, large: bool = False):
         try:
             ck = (rom_id, large)
             if ck in self._cover_cache:
@@ -2168,10 +2179,18 @@ class Plugin:
 
         Used by collection mosaic tiles, whose cover paths come from the
         collection object (path_covers_small) rather than a single rom_id.
+        In-memory hit served inline; blocking disk/HTTP offloaded to a thread
+        so the event loop (and the whole UI) never stalls on image I/O.
         """
+        if not path:
+            return {'success': True, 'data_uri': None}
+        ck = ('img', path)
+        if ck in self._cover_cache:
+            return {'success': True, 'data_uri': self._cover_cache[ck]}
+        return await asyncio.to_thread(self._get_image_blocking, path)
+
+    def _get_image_blocking(self, path: str):
         try:
-            if not path:
-                return {'success': True, 'data_uri': None}
             ck = ('img', path)
             if ck in self._cover_cache:
                 return {'success': True, 'data_uri': self._cover_cache[ck]}
