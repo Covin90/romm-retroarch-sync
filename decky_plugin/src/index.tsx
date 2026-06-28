@@ -294,23 +294,24 @@ function GameCover({ romId, hasCover, large = false, radius = V2.radiusArt, onLo
   const peek = peekCover(ck);
   const [uri, setUri] = useState<string | null>(peek ?? null);
   const [done, setDone] = useState(peek !== undefined);
-  // Already-cached covers render immediately; uncached ones wait until the tile
-  // is near the viewport so off-screen rows never fetch.
-  const [vpRef, seen] = useInViewport();
+  // Load on mount. We deliberately do NOT viewport-gate the fetch here:
+  // IntersectionObserver doesn't fire on gamepad focus-scroll under gamescope
+  // (only on touch swipe), so gating left dpad-scrolled covers blank. Instead
+  // the parent grid bounds how many tiles are mounted (visN grows as focus
+  // advances), so "load every mounted cover" already loads only what's reached.
   useEffect(() => {
     let alive = true;
     if (!hasCover) { setDone(true); onLoaded?.(null); return; }
     const p = peekCover(ck);
     if (p !== undefined) { setUri(p); setDone(true); onLoaded?.(p); return; }
-    if (!seen) return;  // off-screen: hold the fetch until scrolled into view
     (async () => {
       const u = await awaitCover(ck, () => qGetGameCover(romId, large));
       if (alive) { setUri(u); onLoaded?.(u); setDone(true); }
     })();
     return () => { alive = false; };
-  }, [romId, large, seen]);
+  }, [romId, large]);
   return (
-    <div ref={vpRef} style={{
+    <div style={{
       position: 'relative', width: '100%', aspectRatio: '3 / 4',
       background: V2.coverPlaceholder, borderRadius: radius, overflow: 'hidden',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -581,8 +582,8 @@ function useAutoFocus(ready: boolean, dep?: any) {
 // like the whole grid remounting). With stable props (game ref, useCallback'd
 // onOpen, useState setter onActiveCover) only the newly focused/blurred tile
 // re-renders for its own scale animation.
-const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef }:
-  { game: LibGame; onOpen: (g: LibGame) => void; onActiveCover: (uri: string | null) => void; focusRef?: React.MutableRefObject<any> }) {
+const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef, index, onFocusIdx }:
+  { game: LibGame; onOpen: (g: LibGame) => void; onActiveCover: (uri: string | null) => void; focusRef?: React.MutableRefObject<any>; index?: number; onFocusIdx?: (i: number) => void }) {
   const wide = !!game.screenshot;
   // Wide cards adopt the screenshot's NATURAL aspect ratio (RomM derives the
   // card width from the cover's true shape at a fixed height); 16:9 until loaded.
@@ -779,7 +780,7 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef 
       onOptionsButton={() => { if (dl) requestDelete(); }}
       onOptionsActionDescription={dl ? (confirmDelete ? 'Confirm delete' : 'Delete') : undefined}
       onOKActionDescription={dl ? (isMultiRegion ? 'Launch (hold: regions)' : isMultiDisc ? (discsAreRegion ? 'Launch (hold: regions)' : 'Launch (hold: discs)') : 'Launch') : 'Download'}
-      onFocus={() => { setFocused(true); activate(); ensureDiscs(); ensureSiblings(); }}
+      onFocus={() => { setFocused(true); activate(); ensureDiscs(); ensureSiblings(); if (index !== undefined) onFocusIdx?.(index); }}
       onBlur={() => setFocused(false)}
       onMouseEnter={() => { setFocused(true); activate(); ensureDiscs(); ensureSiblings(); }}
       onMouseLeave={() => setFocused(false)}
@@ -954,20 +955,19 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef 
 function PathImage({ path }: { path: string }) {
   const ik = `img:${path}`;
   const [uri, setUri] = useState<string | null>(peekCover(ik) ?? null);
-  const [vpRef, seen] = useInViewport();
+  // Not viewport-gated: IO doesn't fire on gamepad focus-scroll under gamescope.
   useEffect(() => {
     let alive = true;
     const p = peekCover(ik);
     if (p !== undefined) { setUri(p); return; }
-    if (!seen) return;  // off-screen mosaic cell: defer until visible
     (async () => {
       try { const u = await awaitCover(ik, () => qGetImage(path)); if (alive) setUri(u); }
       catch { /* ignore */ }
     })();
     return () => { alive = false; };
-  }, [path, seen]);
+  }, [path]);
   return (
-    <div ref={vpRef} style={{ width: '100%', height: '100%', background: V2.coverPlaceholder, overflow: 'hidden' }}>
+    <div style={{ width: '100%', height: '100%', background: V2.coverPlaceholder, overflow: 'hidden' }}>
       {uri && <img src={uri} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />}
     </div>
   );
@@ -3049,6 +3049,17 @@ function LibraryGamesPage() {
   const GRID_FIRST = 30, GRID_CHUNK = 30;
   const [visN, setVisN] = useState(() => Math.min(games.length || 0, GRID_FIRST));
   useEffect(() => { setVisN(Math.min(games.length || 0, GRID_FIRST)); }, [group?.key]);
+  // Focus-driven growth — the reliable trigger under gamescope. When the
+  // focused tile nears the end of the mounted set, mount another chunk. (The IO
+  // sentinel below stays as a touch-scroll fallback.) Stable identity via refs
+  // so it doesn't invalidate memo(GameTile).
+  const visNRef = useRef(visN); visNRef.current = visN;
+  const gamesLenRef = useRef(games.length); gamesLenRef.current = games.length;
+  const onTileFocus = useRef((i: number) => {
+    if (i >= visNRef.current - 12)
+      setVisN((n) => Math.min(gamesLenRef.current, Math.max(n, i + 1 + GRID_CHUNK)));
+  }).current;
+
   const sentinelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (visN >= games.length) return;
@@ -3455,7 +3466,7 @@ function LibraryGamesPage() {
         >
           {games.slice(0, visN).map((g, i) => (
             <GameTile key={g.rom_id} game={g} onOpen={openGame} onActiveCover={setBgUri}
-              focusRef={i === 0 ? firstTileRef : undefined} />
+              focusRef={i === 0 ? firstTileRef : undefined} index={i} onFocusIdx={onTileFocus} />
           ))}
           {visN < games.length && (
             <div ref={sentinelRef} style={{ gridColumn: '1 / -1', height: '1px' }} />
