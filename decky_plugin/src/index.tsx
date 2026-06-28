@@ -183,7 +183,9 @@ function fmtBytes(n: number | null | undefined): string {
 function fmtReleaseDate(ts: number | null | undefined): string {
   if (!ts) return '';
   try {
-    const d = new Date(Number(ts) * 1000);
+    const n = Number(ts);
+    if (n > 3000) return String(n);
+    const d = new Date(n * 1000);
     if (isNaN(d.getTime())) return '';
     return d.toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC' });
   } catch { return ''; }
