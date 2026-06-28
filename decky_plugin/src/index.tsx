@@ -1798,6 +1798,9 @@ let _libGameHolder: LibGame | null = null;
 // NavigateBack on these custom Decky routes drops to the home/library root, so
 // we navigate to the explicit origin route instead (set wherever a game opens).
 let _libGameOrigin: string = "/romm-sync-library";
+// Remember which library tab the user was on, so backing out of a games page
+// returns to that tab (platforms/collections) instead of resetting to 'home'.
+let _libLastTab: NavId = 'home';
 // Per-group games cache (key: `${mode}:${groupKey}`) so paging to an already
 // prefetched neighbour shows its covers instantly — the grid slides in with real
 // content instead of popping in after an async fetch.
@@ -2682,7 +2685,7 @@ function HomePanel({ onOpen, onOpenGroup, onBg }:
 }
 
 function LibraryGroupsPage() {
-  const [active, setActive] = useState<NavId>('home');
+  const [active, setActive] = useState<NavId>(_libLastTab);
   const [groups, setGroups] = useState<LibGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [bgUri, setBgUri] = useState<string | null>(null);
@@ -2730,7 +2733,7 @@ function LibraryGroupsPage() {
     Navigation.Navigate(`/romm-sync-game/${g.rom_id}`);
   };
 
-  const onTab = (id: NavId) => setActive(id);
+  const onTab = (id: NavId) => { _libLastTab = id; setActive(id); };
 
   // L1 / R1 page through the nav tabs (BackgroundArt cleared on home/search).
   // After switching, the active panel remounts and drops gamepad focus, so we
@@ -2739,7 +2742,9 @@ function LibraryGroupsPage() {
   const navPillRef = useRef<any>(null);
   const cycle = (dir: -1 | 1) => {
     const i = NAV_ORDER.indexOf(active);
-    setActive(NAV_ORDER[(i + dir + NAV_ORDER.length) % NAV_ORDER.length]);
+    const next = NAV_ORDER[(i + dir + NAV_ORDER.length) % NAV_ORDER.length];
+    _libLastTab = next;
+    setActive(next);
     requestAnimationFrame(() => { try { navPillRef.current?.focus(); } catch { } });
   };
   const onButtonDown = (evt: any) => {
@@ -3111,10 +3116,11 @@ function LibraryGamesPage() {
     else if (b === GamepadButton.BUMPER_RIGHT) cycle(1);
     else if (b === GamepadButton.OPTIONS) toggleSync(); // Y
     else if (b === GamepadButton.SELECT) Navigation.Navigate("/romm-sync-settings");
-    // Steam's default back on this custom route jumps to home; go to the
-    // library index (the groups/collections grid) explicitly instead.
-    else if (b === GamepadButton.CANCEL) Navigation.Navigate("/romm-sync-library");
   };
+  // Back → library index. Use onCancelButton (not a CANCEL case in onButtonDown):
+  // it CONSUMES the B press so Steam's default router-back doesn't ALSO fire and
+  // pop us right back into this platform.
+  const onBack = () => Navigation.Navigate("/romm-sync-library");
 
   const jumpTo = (g: LibGroup) => {
     const from = siblings.findIndex((s) => s.key === group?.key);
@@ -3148,7 +3154,7 @@ function LibraryGamesPage() {
   const railW = prog ? 188 : 64;
 
   return v2Page(
-    <Focusable noFocusRing onButtonDown={onButtonDown}
+    <Focusable noFocusRing onButtonDown={onButtonDown} onCancelButton={onBack}
       onOptionsActionDescription={isCollection && !isVirtual ? (isSynced ? 'Stop syncing' : 'Sync collection') : undefined}>
       <div style={{
         position: 'sticky', top: 0, zIndex: 50,
@@ -4329,13 +4335,14 @@ function GameDetailPage() {
     if (b === GamepadButton.BUMPER_LEFT) cycleTab(-1);
     else if (b === GamepadButton.BUMPER_RIGHT) cycleTab(1);
     else if (b === GamepadButton.SELECT) Navigation.Navigate("/romm-sync-settings");
-    // Back returns to the page this game was opened from (collection/platform
-    // games page or the library index) — Steam's default back would go home.
-    else if (b === GamepadButton.CANCEL) Navigation.Navigate(_libGameOrigin);
   };
+  // Back returns to the page this game was opened from (collection/platform games
+  // page or the library index). onCancelButton CONSUMES B so Steam's default
+  // router-back doesn't also fire (which would land somewhere else entirely).
+  const onBack = () => Navigation.Navigate(_libGameOrigin);
 
   return v2Page(
-    <Focusable noFocusRing onButtonDown={onButtonDown} style={{ padding: '20px 16px' }}>
+    <Focusable noFocusRing onButtonDown={onButtonDown} onCancelButton={onBack} style={{ padding: '20px 16px' }}>
       <Focusable noFocusRing flow-children="horizontal" style={{ display: 'flex', gap: '22px', alignItems: 'flex-start' }}>
         {/* Cover */}
         <div style={{ flex: '0 0 220px', maxWidth: '220px' }}>
