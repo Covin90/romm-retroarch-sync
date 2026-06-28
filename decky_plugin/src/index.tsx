@@ -521,6 +521,11 @@ function GameTile({ game, onOpen, onActiveCover, focusRef }:
   const uriRef = useRef<string | null>(null);
   const [focused, setFocused] = useState(false);
   const [dl, setDl] = useState(!!game.is_downloaded);
+  // A collection sync (backend auto-sync or the one-shot batch) downloads through
+  // a path that doesn't touch this tile's handlers, so reflect the refreshed
+  // prop. Only light the dot — never clear it here — so an in-flight user
+  // download isn't visually undone by a transient refetch.
+  useEffect(() => { if (game.is_downloaded) setDl(true); }, [game.is_downloaded]);
   const [busy, setBusy] = useState<null | 'download' | 'delete' | 'launch'>(null);
   const [activeDlRomId, setActiveDlRomId] = useState<number>(game.rom_id);
   const dlPct = useDownloadProgress(activeDlRomId, busy === 'download')?.percent ?? null;
@@ -1789,6 +1794,10 @@ let _libGroupHolder: { mode: string; group: LibGroup } | null = null;
 // Sibling groups (same mode) so the game grid can page prev/next with L1/R1.
 let _libGroupsHolder: { mode: string; groups: LibGroup[] } | null = null;
 let _libGameHolder: LibGame | null = null;
+// Route to return to when backing out of the game detail page. Steam's default
+// NavigateBack on these custom Decky routes drops to the home/library root, so
+// we navigate to the explicit origin route instead (set wherever a game opens).
+let _libGameOrigin: string = "/romm-sync-library";
 // Per-group games cache (key: `${mode}:${groupKey}`) so paging to an already
 // prefetched neighbour shows its covers instantly — the grid slides in with real
 // content instead of popping in after an async fetch.
@@ -2716,6 +2725,8 @@ function LibraryGroupsPage() {
 
   const openGame = (g: LibGame) => {
     _libGameHolder = g;
+    // Opened from the home/search/index grid → back returns to the library root.
+    _libGameOrigin = "/romm-sync-library";
     Navigation.Navigate(`/romm-sync-game/${g.rom_id}`);
   };
 
@@ -2885,6 +2896,8 @@ function LibraryGamesPage() {
 
   const openGame = (g: LibGame) => {
     _libGameHolder = g;
+    // Return to THIS collection/platform's games page when backing out.
+    _libGameOrigin = group ? `/romm-sync-library/${encodeURIComponent(group.key)}` : "/romm-sync-library";
     Navigation.Navigate(`/romm-sync-game/${g.rom_id}`);
   };
 
@@ -2949,6 +2962,21 @@ function LibraryGamesPage() {
     const ok = await downloadBatch(missing, 3, (done) => setSyncJob({ done, total: missing.length }));
     setSyncJob(null);
     toaster.toast({ title: 'Sync complete', body: `${ok} of ${missing.length} downloaded` });
+    refreshGames();
+  };
+
+  // Re-fetch this group's games (bypassing the stale cache) so the downloaded
+  // dots reflect games pulled in by a collection sync without a plugin restart.
+  const refreshGames = async () => {
+    if (!group) return;
+    try {
+      const res = await getLibraryGames(mode, group.key);
+      if (res?.success) {
+        const list: LibGame[] = res.games || [];
+        _libGamesCache.set(cacheKey(group.key), list);
+        setGames(list);
+      }
+    } catch (e) { console.error('refreshGames failed', e); }
   };
 
   // Background auto-sync progress for THIS collection, polled from the backend so
@@ -2971,7 +2999,8 @@ function LibraryGamesPage() {
             pct: typeof col.downloaded_pct === 'number' ? col.downloaded_pct : null,
           });
         } else {
-          setAutoProg(null);
+          // Just finished a backend auto-sync pass → refresh the dots once.
+          setAutoProg((prev) => { if (prev) refreshGames(); return null; });
         }
       } catch { /* transient */ }
     };
@@ -3082,6 +3111,9 @@ function LibraryGamesPage() {
     else if (b === GamepadButton.BUMPER_RIGHT) cycle(1);
     else if (b === GamepadButton.OPTIONS) toggleSync(); // Y
     else if (b === GamepadButton.SELECT) Navigation.Navigate("/romm-sync-settings");
+    // Steam's default back on this custom route jumps to home; go to the
+    // library index (the groups/collections grid) explicitly instead.
+    else if (b === GamepadButton.CANCEL) Navigation.Navigate("/romm-sync-library");
   };
 
   const jumpTo = (g: LibGroup) => {
@@ -4297,6 +4329,9 @@ function GameDetailPage() {
     if (b === GamepadButton.BUMPER_LEFT) cycleTab(-1);
     else if (b === GamepadButton.BUMPER_RIGHT) cycleTab(1);
     else if (b === GamepadButton.SELECT) Navigation.Navigate("/romm-sync-settings");
+    // Back returns to the page this game was opened from (collection/platform
+    // games page or the library index) — Steam's default back would go home.
+    else if (b === GamepadButton.CANCEL) Navigation.Navigate(_libGameOrigin);
   };
 
   return v2Page(

@@ -8754,13 +8754,18 @@ class CollectionSyncManager:
             self.log(f"All ROMs in '{collection_name}' already downloaded")
             return
 
-        # Initialize progress tracking with TOTAL collection size, not just download count
-        # Start with existing_roms_count since those are already local
+        # Progress tracks THIS sync's work (the games actually being downloaded),
+        # not the whole collection — so the bar runs a clean 0 → 100% over the
+        # games that are downloading instead of starting partway (already-owned
+        # games would otherwise make it jump straight to e.g. 28%).
+        sync_done = 0  # ROMs fully downloaded so far in this sync
         self.download_progress[collection_name] = {
-            'downloaded': existing_roms_count,
-            'total': total_collection_size
+            'downloaded': 0,
+            'total': total_to_download,
+            'downloaded_pct': 0.0,
+            'speed': 0.0,
         }
-        logging.info(f"[PROGRESS] Initialized download_progress for {collection_name}: {existing_roms_count}/{total_collection_size} ({total_to_download} to download)")
+        logging.info(f"[PROGRESS] Initialized download_progress for {collection_name}: 0/{total_to_download} to download")
 
         for rom in roms_to_download:
             # Simple game processing for daemon
@@ -8773,27 +8778,27 @@ class CollectionSyncManager:
             # Create directories
             platform_dir.mkdir(parents=True, exist_ok=True)
 
-            # Progress callback: frac (0–1) is scaled across this ROM's file count
-            # so multi-disc games advance the bar proportionally through their disc slots.
-            _completed_before_this = existing_roms_count + downloaded_count
-
-            def _chunk_progress(info, _coll=collection_name, _base=_completed_before_this,
-                                 _total=total_collection_size, _fcount=rom_file_count):
+            # Progress callback: blend the in-flight ROM's byte fraction into the
+            # this-sync count so the bar advances continuously (0 → 100% over the
+            # games being downloaded), not in coarse per-game steps.
+            def _chunk_progress(info, _coll=collection_name, _done=sync_done,
+                                 _total_dl=total_to_download):
                 frac  = info.get('progress', 0.0)   # 0.0–1.0 within this ROM
                 speed = info.get('speed',    0.0)   # bytes/sec
-                overall_pct = round((_base + frac * _fcount) / _total * 100.0, 1) if _total > 0 else 0.0
+                pct = round((_done + frac) / _total_dl * 100.0, 1) if _total_dl > 0 else 0.0
                 if _coll in self.download_progress:
-                    self.download_progress[_coll]['downloaded']     = _base + 1
-                    self.download_progress[_coll]['downloaded_pct'] = overall_pct
+                    self.download_progress[_coll]['downloaded']     = _done
+                    self.download_progress[_coll]['downloaded_pct'] = pct
                     self.download_progress[_coll]['speed']          = speed
 
             # Download the ROM
             self.log(f"  ⬇️ Downloading {rom.get('name')}...")
 
-            # Update progress immediately to show we're starting this ROM
+            # Anchor the bar at this game's start (no overshoot — the game in
+            # flight is not counted as done until it actually completes).
             if collection_name in self.download_progress:
-                self.download_progress[collection_name]['downloaded'] = _completed_before_this + 1
-                self.download_progress[collection_name]['downloaded_pct'] = round((_completed_before_this + 0.01) / total_collection_size * 100.0, 1) if total_collection_size > 0 else 0.0
+                self.download_progress[collection_name]['downloaded'] = sync_done
+                self.download_progress[collection_name]['downloaded_pct'] = round(sync_done / total_to_download * 100.0, 1) if total_to_download > 0 else 0.0
                 self.download_progress[collection_name]['speed'] = 0.0
 
             success, message = self.romm_client.download_rom(
@@ -8820,11 +8825,13 @@ class CollectionSyncManager:
             if success:
                 self.log(f"  ✅ Downloaded {rom.get('name')}")
                 downloaded_count += rom_file_count
+                sync_done += 1
 
-                # Update progress to exact file count after completed download
-                current_local_count = existing_roms_count + downloaded_count
-                self.download_progress[collection_name]['downloaded'] = current_local_count
-                logging.info(f"[PROGRESS] Updated download_progress for {collection_name}: {current_local_count}/{total_collection_size}")
+                # Advance the bar to this game's completed slot.
+                if collection_name in self.download_progress:
+                    self.download_progress[collection_name]['downloaded'] = sync_done
+                    self.download_progress[collection_name]['downloaded_pct'] = round(sync_done / total_to_download * 100.0, 1) if total_to_download > 0 else 0.0
+                logging.info(f"[PROGRESS] Updated download_progress for {collection_name}: {sync_done}/{total_to_download}")
 
                 # Update available_games with collection info
                 for game in self.available_games:
