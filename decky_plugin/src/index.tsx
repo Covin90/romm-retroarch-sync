@@ -241,6 +241,30 @@ function V2Bg({ uri }: { uri: string | null }) {
   );
 }
 
+// Viewport gate: returns [ref, seen]. `seen` flips true (and stays true) once
+// the element first scrolls within `margin` px of the viewport. Used so cover
+// tiles only fetch their art when they're actually about to be shown — opening
+// a 150-game platform then costs ~a screenful of covers, not all 150 at once.
+// Falls back to eager (seen=true) if IntersectionObserver is unavailable.
+function useInViewport(margin = 400): [Ref<HTMLDivElement>, boolean] {
+  const ref = useRef<HTMLDivElement>(null);
+  const [seen, setSeen] = useState(typeof IntersectionObserver === 'undefined');
+  useEffect(() => {
+    if (seen) return;
+    const el = ref.current;
+    if (!el) return;
+    let io: IntersectionObserver | null = null;
+    try {
+      io = new IntersectionObserver((entries) => {
+        if (entries.some((e) => e.isIntersecting)) { setSeen(true); io?.disconnect(); }
+      }, { rootMargin: `${margin}px` });
+      io.observe(el);
+    } catch { setSeen(true); }
+    return () => { try { io?.disconnect(); } catch {} };
+  }, [seen, margin]);
+  return [ref, seen];
+}
+
 // Lazy, cached cover art. Renders a placeholder until the base64 data URI
 // arrives from the backend (the frontend <img> can't auth to RomM directly).
 // `onLoaded` bubbles the URI up so a tile can feed the blurred background art.
@@ -250,19 +274,23 @@ function GameCover({ romId, hasCover, large = false, radius = V2.radiusArt, onLo
   const peek = peekCover(ck);
   const [uri, setUri] = useState<string | null>(peek ?? null);
   const [done, setDone] = useState(peek !== undefined);
+  // Already-cached covers render immediately; uncached ones wait until the tile
+  // is near the viewport so off-screen rows never fetch.
+  const [vpRef, seen] = useInViewport();
   useEffect(() => {
     let alive = true;
     if (!hasCover) { setDone(true); onLoaded?.(null); return; }
     const p = peekCover(ck);
     if (p !== undefined) { setUri(p); setDone(true); onLoaded?.(p); return; }
+    if (!seen) return;  // off-screen: hold the fetch until scrolled into view
     (async () => {
       const u = await awaitCover(ck, () => qGetGameCover(romId, large));
       if (alive) { setUri(u); onLoaded?.(u); setDone(true); }
     })();
     return () => { alive = false; };
-  }, [romId, large]);
+  }, [romId, large, seen]);
   return (
-    <div style={{
+    <div ref={vpRef} style={{
       position: 'relative', width: '100%', aspectRatio: '3 / 4',
       background: V2.coverPlaceholder, borderRadius: radius, overflow: 'hidden',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -901,18 +929,20 @@ function GameTile({ game, onOpen, onActiveCover, focusRef }:
 function PathImage({ path }: { path: string }) {
   const ik = `img:${path}`;
   const [uri, setUri] = useState<string | null>(peekCover(ik) ?? null);
+  const [vpRef, seen] = useInViewport();
   useEffect(() => {
     let alive = true;
     const p = peekCover(ik);
     if (p !== undefined) { setUri(p); return; }
+    if (!seen) return;  // off-screen mosaic cell: defer until visible
     (async () => {
       try { const u = await awaitCover(ik, () => qGetImage(path)); if (alive) setUri(u); }
       catch { /* ignore */ }
     })();
     return () => { alive = false; };
-  }, [path]);
+  }, [path, seen]);
   return (
-    <div style={{ width: '100%', height: '100%', background: V2.coverPlaceholder, overflow: 'hidden' }}>
+    <div ref={vpRef} style={{ width: '100%', height: '100%', background: V2.coverPlaceholder, overflow: 'hidden' }}>
       {uri && <img src={uri} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />}
     </div>
   );
