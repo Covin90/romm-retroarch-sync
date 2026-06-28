@@ -5251,6 +5251,11 @@ let _rommActionReg: { unregister: () => void } | null = null;
 // the launch intercept lets the session-host run (and execs the emulator) instead
 // of treating it as a bare tile click (terminate + open the browser).
 let _rommLaunchPending = false;
+// Set true while a *picked-game* session is running (host execs the emulator as a
+// Steam-tracked child). When that session ends we want to return to the Game
+// Browser, not leave the user dropped on the Steam/Big-Picture library.
+let _rommSessionActive = false;
+let _rommLifetimeReg: { unregister: () => void } | null = null;
 // Guards the startup setup-wizard auto-open so it fires at most once per session.
 let _setupAutoOpened = false;
 
@@ -5398,6 +5403,7 @@ async function addRommShortcut(): Promise<number | null> {
     _rommAppId = appId;
     await ensureRommArtwork(appId);
     registerRommLaunchIntercept();
+    registerRommSessionEndWatch();
     return appId;
   } catch (e) {
     console.error('[RomM] addRommShortcut', e);
@@ -5433,6 +5439,10 @@ function registerRommLaunchIntercept() {
         // works). Let it run — do NOT terminate or navigate.
         if (_rommLaunchPending) {
           _rommLaunchPending = false;
+          // Remember this is a live emulator session so the app-lifetime
+          // listener can navigate back to the Game Browser when it quits
+          // (instead of leaving the user on the Steam/Big-Picture library).
+          _rommSessionActive = true;
           return;
         }
         // Bare tile click: the exe is a no-op without a fresh spec. The tile
@@ -5449,6 +5459,35 @@ function registerRommLaunchIntercept() {
   } catch (e) { console.error('[RomM] registerRommLaunchIntercept', e); }
 }
 
+// When a picked-game emulator session ends, the session-host PID exits and Steam
+// returns to the library (Big Picture) — not the plugin. Register for app
+// lifetime notifications so that when OUR tile stops running after a real
+// session, we navigate straight back to the Game Browser.
+function registerRommSessionEndWatch() {
+  try {
+    if (_rommLifetimeReg) return;
+    const gs = _sc()?.GameSessions;
+    if (!gs?.RegisterForAppLifetimeNotifications) return;
+    _rommLifetimeReg = gs.RegisterForAppLifetimeNotifications((data: any) => {
+      try {
+        if (data?.bRunning) return;            // only care about stop events
+        if (!_rommSessionActive) return;       // not our emulator session
+        const aid = Number(data?.unAppID);
+        let mine = aid === _rommAppId;
+        if (!mine) { try { mine = _rommAppIds().includes(aid); } catch { /* ignore */ } }
+        if (!mine) { try { mine = _isRommName(_appName(aid)); } catch { /* ignore */ } }
+        if (!mine) return;
+        _rommSessionActive = false;
+        if (_rommNavTimer != null) { try { clearTimeout(_rommNavTimer); } catch { /* ignore */ } }
+        _rommNavTimer = setTimeout(() => {
+          _rommNavTimer = null;
+          try { Navigation.Navigate("/romm-sync-library"); Navigation.CloseSideMenus(); } catch (e) { console.error('[RomM] nav', e); }
+        }, 0);
+      } catch (e) { console.error('[RomM] sessionEnd', e); }
+    });
+  } catch (e) { console.error('[RomM] registerRommSessionEndWatch', e); }
+}
+
 export default definePlugin(() => {
   routerHook.addRoute("/romm-sync-setup", () => <SetupWizard />, { exact: true });
   routerHook.addRoute("/romm-sync-settings", () => <SettingsPage />, { exact: true });
@@ -5463,6 +5502,7 @@ export default definePlugin(() => {
   // where clicking the RomM tile in Big Picture did nothing until the user
   // opened the Decky panel (which triggered reconcileRommTile → register…).
   registerRommLaunchIntercept();
+  registerRommSessionEndWatch();
 
   // Re-bind the launch intercept if the RomM tile was added in a prior session,
   // and auto-open the setup wizard once when no connection is configured.
@@ -5504,6 +5544,8 @@ export default definePlugin(() => {
       stopBackgroundMonitoring();
       try { _rommActionReg?.unregister(); } catch { /* ignore */ }
       _rommActionReg = null;
+      try { _rommLifetimeReg?.unregister(); } catch { /* ignore */ }
+      _rommLifetimeReg = null;
 
       routerHook.removeRoute("/romm-sync-setup");
       routerHook.removeRoute("/romm-sync-settings");
