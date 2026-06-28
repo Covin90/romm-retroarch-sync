@@ -85,8 +85,21 @@ function makeImageQueue(concurrency: number) {
   };
 }
 const imageQueue = makeImageQueue(3);
-const qGetImage = (path: string) => imageQueue(() => getImage(path));
-const qGetGameCover = (romId: number, large: boolean) => imageQueue(() => getGameCover(romId, large));
+// Flip on from the console (`window.__rommTrace = true`) to log per-image
+// wall-clock time as seen by the UI thread — backend + websocket transport +
+// JSON.parse of the (large) base64 payload. Compare against the backend
+// [cover] trace (ROMM_COVER_TRACE=1) to tell apart slow I/O from transport jank.
+(window as any).__rommTrace = (window as any).__rommTrace ?? false;
+function _traced<T>(label: string, job: () => Promise<T>): Promise<T> {
+  if (!(window as any).__rommTrace) return job();
+  const t0 = performance.now();
+  return job().finally(() => {
+    const ms = performance.now() - t0;
+    if (ms > 16) console.log(`[RomM cover] ${label} ${ms.toFixed(0)}ms`);
+  });
+}
+const qGetImage = (path: string) => imageQueue(() => _traced(`img ${path}`, () => getImage(path)));
+const qGetGameCover = (romId: number, large: boolean) => imageQueue(() => _traced(`cover ${romId}`, () => getGameCover(romId, large)));
 
 // Decoded-art cache (data URIs) so covers persist across tile remounts and can be
 // prefetched for neighbouring groups — the grid then slides in fully painted

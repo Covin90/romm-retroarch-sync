@@ -2045,6 +2045,23 @@ class Plugin:
     # before the RomM client re-authenticates. Stores RAW image bytes (compact);
     # the data URI is rebuilt on read. Keyed by sha1 of a stable string key.
     # -----------------------------------------------------------------------
+    # Per-image timing+source to the plugin log — how we tell apart a slow
+    # network fetch from a slow disk read, a big payload, or event-loop
+    # contention when covers feel laggy. On by default while we chase the
+    # cover-loading jank (env ROMM_COVER_TRACE=0 disables); only logs non-memory
+    # paths so volume stays low after the first load.
+    _cover_trace = os.environ.get('ROMM_COVER_TRACE', '1') != '0'
+
+    def _trace_cover(self, kind: str, key, src: str, t0: float, nbytes: int = 0):
+        if not self._cover_trace:
+            return
+        try:
+            ms = (time.monotonic() - t0) * 1000.0
+            logging.info(f"[cover] {kind} {key} src={src} {ms:.0f}ms "
+                         f"{nbytes/1024:.0f}KB mem={len(self._cover_cache)}")
+        except Exception:
+            pass
+
     def _cover_dir(self):
         d = Path.home() / '.config' / 'romm-retroarch-sync' / 'cover_cache'
         try:
@@ -2134,6 +2151,7 @@ class Plugin:
         return await asyncio.to_thread(self._get_game_cover_blocking, rom_id, large)
 
     def _get_game_cover_blocking(self, rom_id: int, large: bool = False):
+        t0 = time.monotonic()
         try:
             ck = (rom_id, large)
             if ck in self._cover_cache:
@@ -2142,6 +2160,7 @@ class Plugin:
             disk = self._disk_cover_get(disk_key)
             if disk:
                 self._cover_cache[ck] = disk
+                self._trace_cover('cover', rom_id, 'disk', t0, len(disk))
                 return {'success': True, 'data_uri': disk}
             if not (self._romm_client and self._romm_client.authenticated):
                 return {'success': False, 'data_uri': None}
@@ -2169,6 +2188,7 @@ class Plugin:
             if len(self._cover_cache) > 400:
                 self._cover_cache.clear()
             self._cover_cache[ck] = uri
+            self._trace_cover('cover', rom_id, 'net', t0, len(resp.content))
             return {'success': True, 'data_uri': uri}
         except Exception as e:
             logging.error(f"get_game_cover error: {e}", exc_info=True)
@@ -2190,6 +2210,7 @@ class Plugin:
         return await asyncio.to_thread(self._get_image_blocking, path)
 
     def _get_image_blocking(self, path: str):
+        t0 = time.monotonic()
         try:
             ck = ('img', path)
             if ck in self._cover_cache:
@@ -2198,6 +2219,7 @@ class Plugin:
             disk = self._disk_cover_get(disk_key)
             if disk:
                 self._cover_cache[ck] = disk
+                self._trace_cover('img', path, 'disk', t0, len(disk))
                 return {'success': True, 'data_uri': disk}
             if not (self._romm_client and self._romm_client.authenticated):
                 return {'success': False, 'data_uri': None}
@@ -2211,6 +2233,7 @@ class Plugin:
             if len(self._cover_cache) > 400:
                 self._cover_cache.clear()
             self._cover_cache[ck] = uri
+            self._trace_cover('img', path, 'net', t0, len(resp.content))
             return {'success': True, 'data_uri': uri}
         except Exception as e:
             logging.error(f"get_image error: {e}", exc_info=True)
