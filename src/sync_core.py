@@ -8005,7 +8005,10 @@ class AutoSyncManager:
                         elif subdir_mode == 'content':
                             # Use the ROM's actual parent folder name (what RetroArch uses as content dir)
                             # rather than the stored emulator field, which may be from a different device/mode.
-                            subdir_name = _content_dir or self.get_platform_slug_from_emulator(romm_emulator)
+                            # For a flat ROM the content dir IS the platform folder (== platform_slug);
+                            # prefer that over the emulator-derived name so saves land where RetroArch reads.
+                            subdir_name = (_content_dir or _platform_slug
+                                           or self.get_platform_slug_from_emulator(romm_emulator))
                             emulator_save_dir = save_base_dir / subdir_name
                         else:
                             emulator_save_dir = save_base_dir
@@ -8134,8 +8137,11 @@ class AutoSyncManager:
                                 emulator_state_dir = self._resolve_core_dir(
                                     state_base_dir, game, romm_emulator) or emulator_state_dir
                         elif subdir_mode == 'content':
-                            # Use the ROM's actual parent folder name (what RetroArch uses as content dir)
-                            subdir_name = _content_dir or self.get_platform_slug_from_emulator(romm_emulator)
+                            # Use the ROM's actual parent folder name (what RetroArch uses as content dir).
+                            # For a flat ROM the content dir IS the platform folder (== platform_slug);
+                            # prefer that over the emulator-derived name so states land where RetroArch reads.
+                            subdir_name = (_content_dir or _platform_slug
+                                           or self.get_platform_slug_from_emulator(romm_emulator))
                             emulator_state_dir = state_base_dir / subdir_name
                         else:
                             emulator_state_dir = state_base_dir
