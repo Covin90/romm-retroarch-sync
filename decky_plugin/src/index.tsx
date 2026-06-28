@@ -1813,6 +1813,58 @@ let _homeCache: {
   platforms: LibGroup[]; collections: LibGroup[];
 } | null = null;
 
+// ---- Persistent browse cache -------------------------------------------------
+// The Maps/vars above live in module scope, so they reset every time the plugin
+// is reloaded or the Steam UI restarts — the browse lists then have to be
+// refetched from the RomM server on the next open. Mirror them into localStorage
+// (which survives reloads) so a restart paints from disk instantly and only
+// silently refreshes in the background.
+const _LS_LIB_PREFIX = 'romm:libcache:v1:';
+const _LS_HOME_KEY = 'romm:homecache:v1';
+const _LS_TTL_MS = 1000 * 60 * 60 * 24; // 24h; lists rarely churn, dots refresh on fetch
+const _lsAvail = (() => { try { return typeof localStorage !== 'undefined'; } catch { return false; } })();
+
+function _persistLibGroup(key: string, list: LibGame[]) {
+  if (!_lsAvail) return;
+  try { localStorage.setItem(_LS_LIB_PREFIX + key, JSON.stringify({ t: Date.now(), v: list })); } catch {}
+}
+function _dropLibGroup(key: string) {
+  if (!_lsAvail) return;
+  try { localStorage.removeItem(_LS_LIB_PREFIX + key); } catch {}
+}
+// Write-through helpers — use these instead of touching _libGamesCache directly.
+function libCacheSet(key: string, list: LibGame[]) { _libGamesCache.set(key, list); _persistLibGroup(key, list); }
+function libCacheDelete(key: string) { _libGamesCache.delete(key); _dropLibGroup(key); }
+function persistHomeCache() {
+  if (!_lsAvail || !_homeCache) return;
+  try { localStorage.setItem(_LS_HOME_KEY, JSON.stringify({ t: Date.now(), v: _homeCache })); } catch {}
+}
+
+// Hydrate both caches once at module load from any non-expired localStorage data.
+(function _hydrateBrowseCaches() {
+  if (!_lsAvail) return;
+  const now = Date.now();
+  try {
+    const stale: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith(_LS_LIB_PREFIX)) continue;
+      try {
+        const o = JSON.parse(localStorage.getItem(k) || 'null');
+        if (o && Array.isArray(o.v) && (now - (o.t || 0)) < _LS_TTL_MS)
+          _libGamesCache.set(k.slice(_LS_LIB_PREFIX.length), o.v);
+        else stale.push(k);
+      } catch { stale.push(k); }
+    }
+    stale.forEach((k) => { try { localStorage.removeItem(k); } catch {} });
+  } catch {}
+  try {
+    const o = JSON.parse(localStorage.getItem(_LS_HOME_KEY) || 'null');
+    if (o && o.v && (now - (o.t || 0)) < _LS_TTL_MS) _homeCache = o.v;
+    else if (o) localStorage.removeItem(_LS_HOME_KEY);
+  } catch {}
+})();
+
 const formatSpeed = (bytesPerSec: number): string => {
   if (bytesPerSec >= 1024 * 1024) return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`;
   if (bytesPerSec >= 1024) return `${(bytesPerSec / 1024).toFixed(0)} KB/s`;
@@ -2605,6 +2657,7 @@ function HomePanel({ onOpen, onOpenGroup, onBg }:
         if (p?.success) { setPlatforms(p.groups || []); next.platforms = p.groups || []; }
         if (c?.success) { setCollections(c.groups || []); next.collections = c.groups || []; }
         _homeCache = next;
+        persistHomeCache();
       } catch (e) { console.error('home load failed', e); }
       finally { if (alive) setLoading(false); }
     })();
@@ -2854,7 +2907,7 @@ function LibraryGamesPage() {
       try {
         const res = await getLibraryGames(mode, key);
         const list: LibGame[] | null = res?.success ? (res.games || []) : null;
-        if (list) { gs = list; _libGamesCache.set(ck, list); }
+        if (list) { gs = list; libCacheSet(ck, list); }
       } catch { /* best-effort prefetch */ }
     }
     if (gs) warmCovers(gs);
@@ -2874,7 +2927,7 @@ function LibraryGamesPage() {
         setLoading(true);
         try {
           const res = await getLibraryGames(mode, group.key);
-          if (res?.success) _libGamesCache.set(ck, res.games || []);
+          if (res?.success) libCacheSet(ck, res.games || []);
           if (alive) setGames(res?.success ? (res.games || []) : []);
         } catch (e) {
           console.error('get_library_games failed', e);
@@ -2978,7 +3031,7 @@ function LibraryGamesPage() {
       const res = await getLibraryGames(mode, group.key);
       if (res?.success) {
         const list: LibGame[] = res.games || [];
-        _libGamesCache.set(cacheKey(group.key), list);
+        libCacheSet(cacheKey(group.key), list);
         setGames(list);
       }
     } catch (e) { console.error('refreshGames failed', e); }
@@ -3070,7 +3123,7 @@ function LibraryGamesPage() {
       const ok = await deleteCollectionRoms(name);
       if (ok === false) throw new Error('backend declined');
       setGames((gs) => gs.map((g) => ({ ...g, is_downloaded: false })));
-      _libGamesCache.delete(cacheKey(name));
+      libCacheDelete(cacheKey(name));
       setReloadTick((n) => n + 1);
     } catch (e) {
       toaster.toast({ title: 'Remove failed', body: String(e) });
