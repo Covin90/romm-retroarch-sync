@@ -2909,27 +2909,19 @@ function LibraryGamesPage() {
   // Sibling groups (same mode) so the game grid can page prev/next with L1/R1.
   const siblings = (_libGroupsHolder && _libGroupsHolder.mode === mode) ? _libGroupsHolder.groups : [];
 
-  // Warm the cover art for a list of games (capped — just the first screenful is
-  // enough to make the slide land painted; the rest stream in as usual).
-  const warmCovers = (gs: LibGame[]) => {
-    for (const g of gs.slice(0, 18)) {
-      if (g.screenshot) awaitCover(`img:${g.screenshot}`, () => qGetImage(g.screenshot!));
-      else if (g.has_cover) awaitCover(`cover:${g.rom_id}:false`, () => qGetGameCover(g.rom_id, false));
-    }
-  };
-
-  // Fetch one group's games (and warm their covers) into the cache.
+  // Prefetch a neighbour group's games LIST only (cheap, small JSON) so an
+  // L1/R1 page lands instantly. Covers are deliberately NOT warmed here — those
+  // tiles aren't on screen, and warming ~18 covers per neighbour fetched ~70
+  // covers (≈14MB of base64) for platforms the user never opened, which is what
+  // caused the load freeze. Each tile fetches its own cover when it mounts.
   const prefetch = async (key: string) => {
     const ck = cacheKey(key);
-    let gs = _libGamesCache.get(ck);
-    if (!gs) {
-      try {
-        const res = await getLibraryGames(mode, key);
-        const list: LibGame[] | null = res?.success ? (res.games || []) : null;
-        if (list) { gs = list; libCacheSet(ck, list); }
-      } catch { /* best-effort prefetch */ }
-    }
-    if (gs) warmCovers(gs);
+    if (_libGamesCache.get(ck)) return;
+    try {
+      const res = await getLibraryGames(mode, key);
+      const list: LibGame[] | null = res?.success ? (res.games || []) : null;
+      if (list) libCacheSet(ck, list);
+    } catch { /* best-effort prefetch */ }
   };
 
   useEffect(() => {
