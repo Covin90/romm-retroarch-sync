@@ -3046,7 +3046,7 @@ function LibraryGamesPage() {
   // spread across frames), keep only what's reached. A sentinel below the last
   // rendered tile grows the count by a chunk whenever it nears the viewport, so
   // typically ~2-3 screens of tiles are mounted and the grid stays fluid.
-  const GRID_FIRST = 48, GRID_CHUNK = 60;
+  const GRID_FIRST = 30, GRID_CHUNK = 30;
   const [visN, setVisN] = useState(() => Math.min(games.length || 0, GRID_FIRST));
   useEffect(() => { setVisN(Math.min(games.length || 0, GRID_FIRST)); }, [group?.key]);
   const sentinelRef = useRef<HTMLDivElement>(null);
@@ -3054,11 +3054,13 @@ function LibraryGamesPage() {
     if (visN >= games.length) return;
     const el = sentinelRef.current;
     const bump = () => setVisN((n) => Math.min(games.length, n + GRID_CHUNK));
+    // ~one screen of lookahead — enough that tiles are ready just before you
+    // reach them, without over-mounting rows you may never scroll to.
     if (!el || typeof IntersectionObserver === 'undefined') { bump(); return; }
     let io: IntersectionObserver | null = null;
     try {
       io = new IntersectionObserver((es) => { if (es.some((e) => e.isIntersecting)) bump(); },
-        { rootMargin: '800px' });
+        { rootMargin: '400px' });
       io.observe(el);
     } catch { bump(); }
     return () => { try { io?.disconnect(); } catch {} };
