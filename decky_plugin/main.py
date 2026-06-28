@@ -2088,21 +2088,36 @@ class Plugin:
         return uri
 
     def _make_thumb(self, content: bytes, large: bool = False):
-        """Downscale raw image bytes to a compact JPEG. Returns (bytes, mime).
-        Falls back to the original bytes if PIL is missing or anything fails."""
+        """Compact an image for grid display. Returns (bytes, mime).
+
+        RomM 'small' covers are already ~small resolution but ship as ~200KB
+        PNGs, so the real win is re-encoding to JPEG (≈30KB), not resizing.
+        We downscale only when wider than the target, then always try a JPEG
+        re-encode and keep it when it actually shrinks the payload. Small
+        images with real transparency (platform icons) are left untouched so
+        they don't get a black background. Falls back to the original bytes if
+        PIL is missing or anything fails."""
         if not PIL_AVAILABLE:
             return content, None
         try:
             import io
             max_w = self._THUMB_W_LARGE if large else self._THUMB_W
             im = Image.open(io.BytesIO(content))
-            if im.width <= max_w:
-                return content, None  # already small enough; keep as-is
-            h = round(im.height * (max_w / im.width))
-            im = im.convert('RGB').resize((max_w, h), Image.LANCZOS)
+            # Preserve small transparent assets (icons) as-is.
+            has_alpha = ('A' in im.getbands())
+            if has_alpha and len(content) < 60_000:
+                return content, None
+            if im.width > max_w:
+                h = round(im.height * (max_w / im.width))
+                im = im.resize((max_w, h), Image.LANCZOS)
             out = io.BytesIO()
-            im.save(out, format='JPEG', quality=82, optimize=True)
-            return out.getvalue(), 'image/jpeg'
+            im.convert('RGB').save(out, format='JPEG', quality=82, optimize=True)
+            jpeg = out.getvalue()
+            # Only adopt the JPEG if it's a real win (it nearly always is for
+            # the big PNG covers; guards against bloating already-tiny art).
+            if len(jpeg) < len(content):
+                return jpeg, 'image/jpeg'
+            return content, None
         except Exception as e:
             logging.debug(f"_make_thumb failed: {e}")
             return content, None
@@ -2215,7 +2230,7 @@ class Plugin:
             if ck in self._cover_cache:
                 return {'success': True, 'data_uri': self._cover_cache[ck]}
             # Thumbnail disk cache (v2). The compact downscaled art.
-            tkey = f"covt:{rom_id}:{large}"
+            tkey = f"covt2:{rom_id}:{large}"
             disk = self._disk_cover_get(tkey)
             if disk:
                 self._cover_cache_put(ck, disk)
@@ -2250,7 +2265,7 @@ class Plugin:
                 return {'success': True, 'data_uri': None}
             mime = resp.headers.get('content-type') or mimetypes.guess_type(path)[0] or 'image/jpeg'
             uri = self._store_thumb(ck, tkey, resp.content, mime, large)
-            self._trace_cover('cover', rom_id, 'net', t0, len(resp.content))
+            self._trace_cover('cover', rom_id, 'net', t0, len(uri))
             return {'success': True, 'data_uri': uri}
         except Exception as e:
             logging.error(f"get_game_cover error: {e}", exc_info=True)
@@ -2277,7 +2292,7 @@ class Plugin:
             ck = ('img', path)
             if ck in self._cover_cache:
                 return {'success': True, 'data_uri': self._cover_cache[ck]}
-            tkey = f"imgt:{path}"
+            tkey = f"imgt2:{path}"
             disk = self._disk_cover_get(tkey)
             if disk:
                 self._cover_cache_put(ck, disk)
@@ -2297,7 +2312,7 @@ class Plugin:
                 return {'success': True, 'data_uri': None}
             mime = resp.headers.get('content-type') or mimetypes.guess_type(path)[0] or 'image/png'
             uri = self._store_thumb(ck, tkey, resp.content, mime, False)
-            self._trace_cover('img', path, 'net', t0, len(resp.content))
+            self._trace_cover('img', path, 'net', t0, len(uri))
             return {'success': True, 'data_uri': uri}
         except Exception as e:
             logging.error(f"get_image error: {e}", exc_info=True)
