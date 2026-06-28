@@ -3041,14 +3041,20 @@ function LibraryGamesPage() {
   // screenful immediately, then grow the count in chunks across frames so first
   // paint is fast and the rest fill in without blocking. Covers are viewport-
   // gated already, so off-screen appended tiles cost almost nothing.
-  const GRID_FIRST = 60, GRID_CHUNK = 120;
+  // First paint = a screenful; the rest grow in SMALL chunks scheduled on idle
+  // time (requestIdleCallback) so gamepad input is processed between chunks.
+  // Big 120-tile chunks each took ~90ms of main-thread mount work and blocked
+  // input for ~half a second; 30-tile idle chunks keep the thread responsive.
+  const GRID_FIRST = 48, GRID_CHUNK = 30;
   const [visN, setVisN] = useState(() => Math.min(games.length || 0, GRID_FIRST));
   useEffect(() => { setVisN(Math.min(games.length || 0, GRID_FIRST)); }, [group?.key]);
   useEffect(() => {
     if (visN >= games.length) return;
-    const id = requestAnimationFrame(() =>
-      setVisN((n) => Math.min(games.length, n + GRID_CHUNK)));
-    return () => cancelAnimationFrame(id);
+    const ric: any = (window as any).requestIdleCallback;
+    const cic: any = (window as any).cancelIdleCallback;
+    const grow = () => setVisN((n) => Math.min(games.length, n + GRID_CHUNK));
+    if (ric) { const id = ric(grow, { timeout: 200 }); return () => cic?.(id); }
+    const id = setTimeout(grow, 32); return () => clearTimeout(id);
   }, [visN, games.length]);
 
   // Timing probe: how long from games-set to the grid being laid out (mount of
