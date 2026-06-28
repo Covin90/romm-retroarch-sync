@@ -7566,6 +7566,8 @@ class AutoSyncManager:
             'mame': 'arcade',
             'stella': 'atari2600',
         }
+        if not romm_emulator:
+            return ''
         normalized = romm_emulator.lower().replace('-', '_')
         return core_to_platform.get(normalized, romm_emulator)
 
@@ -7985,7 +7987,7 @@ class AutoSyncManager:
 
                 for latest_save in saves_to_process:
                     original_filename = latest_save.get('file_name', '')
-                    romm_emulator = latest_save.get('emulator', 'unknown')
+                    romm_emulator = latest_save.get('emulator') or 'unknown'
 
                     # Compute local path to check if file exists before skipping
                     final_path = None
@@ -8110,7 +8112,7 @@ class AutoSyncManager:
                 for latest_state in slot_states:
                     state_id = latest_state.get('id')
                     original_filename = latest_state.get('file_name', '')
-                    romm_emulator = latest_state.get('emulator', 'unknown')
+                    romm_emulator = latest_state.get('emulator') or 'unknown'
                     state_slot = latest_state.get('slot')
 
                     # Infer slot from filename extension if not provided by API
