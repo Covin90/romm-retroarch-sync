@@ -667,7 +667,7 @@ function GameTile({ game, onOpen, onActiveCover, focusRef }:
     setBusy('delete');
     try {
       const r = await deleteGame(game.rom_id);
-      if (r?.success) { setDl(false); toaster.toast({ title: 'Deleted', body: game.name }); }
+      if (r?.success) { setDl(false); }
       else toaster.toast({ title: 'Delete failed', body: r?.message || 'Error' });
     } catch (e) { toaster.toast({ title: 'Delete failed', body: String(e) }); }
     finally { setConfirmDelete(false); setBusy(null); }
@@ -988,7 +988,6 @@ function CollectionTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: 
       if (synced) { await toggleCollectionSync(group.key, false); setSynced(false); }
       const ok = await deleteCollectionRoms(group.key);
       if (ok === false) throw new Error('backend declined');
-      toaster.toast({ title: 'Removed downloads', body: group.label });
     } catch (e) { toaster.toast({ title: 'Remove failed', body: String(e) }); }
   };
   const openMenu = () => {
@@ -3037,7 +3036,6 @@ function LibraryGamesPage() {
       setGames((gs) => gs.map((g) => ({ ...g, is_downloaded: false })));
       _libGamesCache.delete(cacheKey(name));
       setReloadTick((n) => n + 1);
-      toaster.toast({ title: 'Removed downloads', body: name });
     } catch (e) {
       toaster.toast({ title: 'Remove failed', body: String(e) });
     }
@@ -4232,7 +4230,6 @@ function GameDetailPage() {
     try {
       const res = await deleteGame(game.rom_id);
       if (res?.success) {
-        toaster.toast({ title: 'Deleted', body: detail?.name || game.name });
         setIsDownloaded(false);
       } else {
         toaster.toast({ title: 'Delete failed', body: res?.message || 'Unknown error' });
