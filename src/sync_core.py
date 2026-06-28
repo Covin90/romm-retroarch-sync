@@ -4255,6 +4255,38 @@ class RetroArchInterface:
         env.setdefault('DISPLAY', ':0')
         return env
 
+    def _focus_window_after_launch(self, proc):
+        """Try to raise and focus the RetroArch window after launch.
+
+        On Steam Deck (Gamescope / XWayland) the process started by the Decky
+        daemon may not receive keyboard/mouse focus automatically.  We poll for
+        a matching X11 window via ``xdotool`` and activate it.
+        """
+        import subprocess as _sp
+        env = self._host_subprocess_env()
+        try:
+            for _ in range(10):                       # up to 5 s
+                if proc.poll() is not None:
+                    return                            # process already exited
+                time.sleep(0.5)
+                try:
+                    wid_out = _sp.run(
+                        ['xdotool', 'search', '--name', 'RetroArch'],
+                        capture_output=True, text=True, timeout=2, env=env,
+                    )
+                    if wid_out.returncode == 0 and wid_out.stdout.strip():
+                        wid = wid_out.stdout.strip().splitlines()[0]
+                        _sp.run(['xdotool', 'windowactivate', '--sync', wid],
+                                capture_output=True, timeout=2, env=env)
+                        _sp.run(['xdotool', 'windowfocus', '--sync', wid],
+                                capture_output=True, timeout=2, env=env)
+                        logging.debug(f"Focused RetroArch window {wid}")
+                        return
+                except Exception:
+                    pass
+        except Exception as exc:
+            logging.debug(f"_focus_window_after_launch: {exc}")
+
     def launch_game_retrodeck(self, rom_path):
         """Launch game through RetroDECK (which handles core selection automatically)"""
         try:
@@ -4275,6 +4307,9 @@ class RetroArchInterface:
                                         stderr=subprocess.PIPE,
                                         text=True,
                                         env=self._host_subprocess_env())
+
+                # Raise the RetroArch window so it gets focus on Steam Deck.
+                self._focus_window_after_launch(result)
 
                 time.sleep(3)  # Wait to see if it fails immediately
 
@@ -4557,6 +4592,9 @@ class RetroArchInterface:
                                     stderr=subprocess.PIPE,
                                     text=True,
                                     env=self._host_subprocess_env())
+
+            # Raise the RetroArch window so it gets focus on Steam Deck.
+            self._focus_window_after_launch(result)
 
             # Wait a moment to see if it fails immediately
             import time
