@@ -80,6 +80,7 @@ cp "${PLUGIN_DIR}/dist/index.js" "${PLUGIN_DIR}/dist/index.js.map" "${TMP_DIR}/$
 cp -rL "${PLUGIN_DIR}/py_modules" "${TMP_DIR}/${PLUGIN_NAME}/"
 cp "${PLUGIN_DIR}"/assets/logo.png "${PLUGIN_DIR}"/assets/romm-isotipo.svg "${PLUGIN_DIR}"/assets/romm-logotipo.svg "${PLUGIN_DIR}"/assets/auth_background.svg "${PLUGIN_DIR}"/assets/romm-*.png "${TMP_DIR}/${PLUGIN_NAME}/assets/"
 cp "${PLUGIN_DIR}/bin/7zz" "${TMP_DIR}/${PLUGIN_NAME}/bin/" && chmod +x "${TMP_DIR}/${PLUGIN_NAME}/bin/7zz"
+cp "${PLUGIN_DIR}/bin/romm-session-host" "${TMP_DIR}/${PLUGIN_NAME}/bin/" && chmod +x "${TMP_DIR}/${PLUGIN_NAME}/bin/romm-session-host"  # Steam session-host: the RomM tile's exe; execs the picked emulator as a Steam-tracked child so the overlay works on Deck Gaming Mode
 (cd "$TMP_DIR" && zip -rq "$OUT_ZIP" "${PLUGIN_NAME}/")
 mv "$TMP_DIR/$OUT_ZIP" .
 rm -rf "$TMP_DIR"
@@ -126,6 +127,7 @@ Decky Loader's installer validates all of these. **Any missing file causes silen
 | `assets/romm-isotipo.svg` | NO | RomM brand mark shown on the setup-wizard welcome; served pre-connection by `get_romm_logo` (bundled because RomM server assets need auth) |
 | `assets/romm-{grid,hero,logo,header,icon}.png` | NO | RomM-branded Steam library artwork for the optional 'RomM' launcher tile (Steam asset types 0/1/2/3/4). Served by `get_romm_artwork`, painted via `SetCustomArtworkForApp`. Regenerate with `scripts/gen_romm_artwork.py` (needs cairosvg; dev-only). |
 | `bin/7zz` | NO | Static 7-Zip (x64) for `.7z` extraction — SteamOS has no system 7z. `sync_core._find_7z()` resolves `<plugin>/bin/7zz`. Must be `chmod +x`. Without it: `.7z` console ROMs still load via RetroArch, `.7z` PC games won't auto-extract. |
+| `bin/romm-session-host` | NO | Exe behind the "RomM" Steam tile. When a game is picked, the backend `prepare_steam_launch` writes a launch-spec and the frontend RunGame's the tile; Steam launches this script as a tracked game (opening the overlay session) and it `exec`s the resolved emulator argv in-place, so the emulator inherits the Steam overlay on Deck Gaming Mode. Returned by `get_session_host_path`. Must be `chmod +x`. Without it: Play falls back to a direct daemon launch (no working overlay). |
 
 ### ZIP structure
 

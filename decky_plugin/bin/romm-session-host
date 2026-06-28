@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""RomM session-host — the exe behind the single "RomM" Steam library tile.
+
+On Steam Deck Gaming Mode the Steam overlay (QAM / Steam button) is an in-process
+renderer (gameoverlayrenderer.so) that Steam LD_PRELOADs into the *game it
+launched* and binds to a per-game overlay IPC session. A process spawned by the
+Decky daemon is not a Steam-tracked game, so the overlay is audible but never
+renders over it (see memory: steam-overlay-external-launch).
+
+RetroDECK works because Steam launches it and the emulator is its child,
+inheriting the overlay session env. We replicate that with a single tile:
+
+  1. The user picks a game in the plugin's Game Browser and presses Play.
+  2. The Decky backend (prepare_steam_launch) runs the pre-launch save-sync,
+     resolves the exact emulator argv, and writes a launch-spec JSON here.
+  3. The frontend triggers SteamClient.Apps.RunGame on this tile. Steam launches
+     THIS script as a tracked game (opening the overlay session) and we exec the
+     emulator argv in-place — same PID, so Steam keeps tracking it and the
+     overlay env in our environ is inherited by the emulator.
+  4. On emulator exit the PID ends and Steam returns to the library, where the
+     overlay works normally.
+
+A bare tile click (no fresh spec) just exits 0; the frontend's launch intercept
+opens the Game Browser in that case.
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+SESSION_DIR = os.path.join(
+    os.path.expanduser("~"),
+    ".config", "romm-retroarch-sync", "session",
+)
+SPEC = os.path.join(SESSION_DIR, "launch-spec.json")
+LOG = os.path.join(SESSION_DIR, "host.log")
+# How recent the spec must be to count as "this launch" rather than a leftover.
+FRESH_SECONDS = 30
+
+
+def _log(msg):
+    line = "[%s] %s\n" % (time.strftime("%H:%M:%S"), msg)
+    try:
+        sys.stderr.write(line)
+        sys.stderr.flush()
+    except Exception:
+        pass
+    try:
+        with open(LOG, "a", encoding="utf-8") as fh:
+            fh.write(line)
+    except Exception:
+        pass
+
+
+def _load_fresh_spec():
+    try:
+        st = os.stat(SPEC)
+    except OSError:
+        return None
+    if (time.time() - st.st_mtime) > FRESH_SECONDS:
+        return None
+    try:
+        with open(SPEC, "r", encoding="utf-8") as fh:
+            spec = json.load(fh)
+    except Exception:
+        return None
+    # Consume it so a later bare tile click can't re-launch the same game.
+    try:
+        os.remove(SPEC)
+    except OSError:
+        pass
+    argv = spec.get("argv")
+    if not isinstance(argv, list) or not argv:
+        return None
+    return spec
+
+
+def main():
+    _log("session-host start (pid=%d, PATH=%s)" % (os.getpid(), os.environ.get("PATH", "")))
+    spec = _load_fresh_spec()
+    if not spec:
+        # Bare tile click: nothing to launch. The frontend intercept opens the
+        # Game Browser; just exit cleanly so Steam returns to the library.
+        _log("no fresh spec -> bare tile click, exiting 0")
+        return 0
+
+    env = dict(os.environ)
+    for key, val in (spec.get("env") or {}).items():
+        env[str(key)] = str(val)
+
+    argv = [str(a) for a in spec["argv"]]
+    cwd = spec.get("cwd")
+    if cwd and os.path.isdir(cwd):
+        try:
+            os.chdir(cwd)
+        except OSError:
+            pass
+
+    # A Steam-launched shortcut can have a minimal PATH that lacks /usr/bin, so
+    # resolve the launcher (flatpak/snap/retroarch) to an absolute path.
+    exe = argv[0]
+    if not os.path.isabs(exe):
+        search = (env.get("PATH", "") + os.pathsep
+                  + "/usr/bin:/usr/local/bin:/bin")
+        found = shutil.which(exe, path=search)
+        if found:
+            exe = found
+            argv[0] = found
+
+    # Steam wraps shortcuts in its scout runtime, exporting LD_LIBRARY_PATH /
+    # LD_PRELOAD that point at Steam-runtime libs. A host `flatpak`/`retroarch`
+    # inheriting those crashes (wrong libstdc++/OpenSSL). flatpak resets the env
+    # inside its sandbox anyway, so scrubbing these here is safe and necessary.
+    # Keep the Steam overlay vars (SteamAppId/SteamGameId/SteamOverlayGameId) so
+    # the overlay session still binds.
+    for var in ("LD_LIBRARY_PATH", "LD_PRELOAD"):
+        env.pop(var, None)
+
+    _log("launch (PATH-resolved=%s): %s" % (exe, " ".join(argv)))
+    # Run the emulator as a CHILD (not exec) so this host stays alive as the
+    # Steam-tracked game for the whole session and we can capture the launcher's
+    # output to the log. Tee its stderr so a failure is diagnosable.
+    try:
+        with open(LOG, "a", encoding="utf-8") as logfh:
+            proc = subprocess.Popen(argv, env=env, cwd=(cwd if cwd and os.path.isdir(cwd) else None),
+                                    stdout=logfh, stderr=logfh)
+        rc = proc.wait()
+        _log("launcher exited rc=%s" % rc)
+        return 0 if rc == 0 else 1
+    except OSError as exc:
+        _log("launch FAILED: %s" % exc)
+        time.sleep(2)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

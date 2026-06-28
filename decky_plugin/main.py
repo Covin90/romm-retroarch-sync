@@ -2770,6 +2770,92 @@ class Plugin:
             logging.error(f"launch_game error: {e}", exc_info=True)
             return {'success': False, 'message': str(e)}
 
+    async def prepare_steam_launch(self, rom_id: int, disc: str = None,
+                                   sibling_rom_id: int = None):
+        """Resolve a game's emulator argv and write a launch-spec for the Steam
+        session-host tile (Steam Deck Gaming Mode only).
+
+        On gamescope the Steam overlay only renders over a game Steam itself
+        launched. So instead of spawning the emulator from the Decky daemon, the
+        frontend triggers SteamClient.Apps.RunGame on the "RomM" tile, whose exe
+        is bin/romm-session-host. This method does everything launch_game does
+        *except* the final spawn: it runs the pre-launch save-sync and resolves
+        the exact argv, then writes it to the spec file the host reads and execs.
+
+        Returns {success, message, steam_host: bool}. When steam_host is False
+        the caller should fall back to launch_game (e.g. not under gamescope, or
+        the spec couldn't be written).
+        """
+        try:
+            if not (self._retroarch and self._retroarch._gamescope_running()):
+                return {'success': False, 'steam_host': False,
+                        'message': 'Not running under gamescope'}
+            idx = self._games_index()
+            effective_rom_id = sibling_rom_id or rom_id
+            g = idx.get(effective_rom_id)
+            if not g or not g.get('is_downloaded') or not g.get('local_path'):
+                return {'success': False, 'steam_host': False,
+                        'message': 'Game not downloaded'}
+            effective_disc = disc or self._get_last_disc(effective_rom_id) or None
+            launch_path = self._resolve_launch_path(g['local_path'], effective_disc)
+            if not launch_path and effective_disc:
+                effective_disc = None
+                launch_path = self._resolve_launch_path(g['local_path'], None)
+            if not launch_path:
+                return {'success': False, 'steam_host': False,
+                        'message': 'No launchable file found'}
+            if self._auto_sync is not None:
+                try:
+                    await asyncio.to_thread(self._auto_sync.sync_before_launch, g)
+                except Exception as e:
+                    logging.warning(f"pre-launch sync failed (continuing): {e}")
+            platform_name = self._platform_name_for(g)
+            cmd, err = self._retroarch.build_launch_command(Path(launch_path), platform_name)
+            if err or not cmd:
+                return {'success': False, 'steam_host': False,
+                        'message': err or 'Could not resolve launch command'}
+            # The host runs under Steam, so it already has the correct display
+            # (:1), session vars and the real overlay LD_PRELOAD. We deliberately
+            # pass NO env — overriding it would clobber Steam's overlay preload.
+            spec = {'argv': [str(c) for c in cmd], 'rom_name': g.get('name', ''),
+                    'ts': time.time()}
+            spec_path = (Path.home() / '.config' / 'romm-retroarch-sync'
+                         / 'session' / 'launch-spec.json')
+            spec_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = spec_path.with_suffix('.json.tmp')
+            tmp.write_text(json.dumps(spec), encoding='utf-8')
+            os.replace(tmp, spec_path)
+            # Remember an explicit disc choice so the next plain Play resumes it.
+            if disc:
+                try:
+                    self._settings.set('LastDisc', str(effective_rom_id), disc)
+                except Exception as e:
+                    logging.warning(f"could not persist last disc: {e}")
+            logging.info(f"prepare_steam_launch: wrote spec for '{g.get('name')}' "
+                         f"argv={cmd}")
+            return {'success': True, 'steam_host': True, 'message': 'Spec ready'}
+        except Exception as e:
+            logging.error(f"prepare_steam_launch error: {e}", exc_info=True)
+            return {'success': False, 'steam_host': False, 'message': str(e)}
+
+    async def get_session_host_path(self):
+        """Absolute path to bin/romm-session-host — the exe the RomM Steam tile
+        runs so the emulator launches as a child of a Steam-tracked game (overlay
+        works). Returns {path} or {path: ''} if the script is missing.
+        """
+        try:
+            host = Path(__file__).resolve().parent / 'bin' / 'romm-session-host'
+            if host.is_file():
+                try:
+                    if not os.access(host, os.X_OK):
+                        os.chmod(host, 0o755)
+                except Exception:
+                    pass
+                return {'path': str(host)}
+        except Exception as e:
+            logging.error(f"get_session_host_path error: {e}")
+        return {'path': ''}
+
     async def get_bios_status(self):
         """Get detailed BIOS download status for all platforms.
 

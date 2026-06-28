@@ -4,6 +4,7 @@
 import requests
 import json
 import os
+import sys
 import shutil
 import threading
 import pickle
@@ -132,7 +133,8 @@ class GameDataCache:
                         'romm_data': game.get('romm_data', {}),  # Already cleaned by step 1
                         'is_multi_disc': game.get('is_multi_disc', False),  # Preserve multi-disc flag
                         'discs': game.get('discs', []),  # Preserve disc data for multi-disc games
-                        '_sibling_files': game.get('_sibling_files', [])  # Preserve regional variants
+                        '_sibling_files': game.get('_sibling_files', []),  # Preserve regional variants
+                        '_region_save_siblings': game.get('_region_save_siblings', [])  # Per-region ROMs for save attribution
                     }
                     processed_games.append(clean_game)
                 
@@ -2077,6 +2079,15 @@ class RomMClient:
                             s for s in main_rom['sibling_roms']
                             if s.get('id') not in drop_ids
                         ]
+                    # The dropped siblings are real, standalone per-region ROMs
+                    # (e.g. "...(Spain).nds" = its own rom_id) that merely overlap
+                    # with the bundle's member files. They're not independently
+                    # downloadable, so we keep them out of the download UI — but we
+                    # DO preserve them here so saves/states can be attributed to the
+                    # specific region ROM the user launched, not the bundle.
+                    main_rom['_region_save_siblings'] = [
+                        r for r in group_roms if r.get('id') in drop_ids
+                    ]
 
             # Attach siblings to the main ROM
             if sibling_files:
@@ -4253,39 +4264,361 @@ class RetroArchInterface:
                 except Exception:
                     pass
         env.setdefault('DISPLAY', ':0')
+
+        # On Steam Deck Gaming Mode, gamescope runs --xwayland-count 2: the Steam
+        # UI lives on :0 and real games are launched on :1. We inherit DISPLAY=:0
+        # from the gamescope environment; move the launch to the game display
+        # (:1) so the emulator behaves like a normal game (proper focus, FPS
+        # limiting, VRR) instead of sharing Steam's own display.
+        try:
+            if self._gamescope_running():
+                if os.path.exists('/tmp/.X11-unix/X1'):
+                    env['DISPLAY'] = ':1'
+                # Inject the Steam overlay so the QAM/overlay renders over our
+                # emulator (see _steam_overlay_env for the why).
+                overlay = self._steam_overlay_env()
+                preload = overlay.pop('_overlay_preload', None)
+                env.update(overlay)
+                if preload:
+                    existing = [p for p in env.get('LD_PRELOAD', '').split(':') if p]
+                    env['LD_PRELOAD'] = ':'.join(
+                        preload + [p for p in existing if p not in preload])
+                if overlay:
+                    logging.info(
+                        "gamescope: injected Steam overlay env "
+                        f"(SteamGameId={overlay.get('SteamGameId')}, "
+                        f"preload={'yes' if preload else 'no'})")
+        except Exception:
+            pass
         return env
 
-    def _focus_window_after_launch(self, proc):
-        """Try to raise and focus the RetroArch window after launch.
+    def _steam_overlay_env(self):
+        """Return env vars that make the Steam overlay render over a process we
+        launch ourselves under gamescope.
 
-        On Steam Deck (Gamescope / XWayland) the process started by the Decky
-        daemon may not receive keyboard/mouse focus automatically.  We poll for
-        a matching X11 window via ``xdotool`` and activate it.
+        The Steam overlay is NOT composited by gamescope — it is an in-process
+        renderer (gameoverlayrenderer.so) that Steam LD_PRELOADs into the game,
+        plus SteamGameId/SteamOverlayGameId env telling it which app it belongs
+        to. Steam-launched apps (e.g. RetroDECK) pass this down to their children,
+        so the overlay works. Our emulator is spawned by the Decky daemon, which
+        has none of it, so the overlay is audible but invisible.
+
+        We harvest the IDs from the live foreground Steam-tracked process (the
+        `reaper`/shortcut that currently owns a SteamOverlayGameId) so the overlay
+        binds to whatever shortcut the user launched from (e.g. the RomM tile).
         """
-        import subprocess as _sp
-        env = self._host_subprocess_env()
+        overlay = {}
+        preload_paths = []
+        ids = {}
         try:
-            for _ in range(10):                       # up to 5 s
-                if proc.poll() is not None:
-                    return                            # process already exited
-                time.sleep(0.5)
+            for pid in os.listdir('/proc'):
+                if not pid.isdigit():
+                    continue
                 try:
-                    wid_out = _sp.run(
-                        ['xdotool', 'search', '--name', 'RetroArch'],
-                        capture_output=True, text=True, timeout=2, env=env,
-                    )
-                    if wid_out.returncode == 0 and wid_out.stdout.strip():
-                        wid = wid_out.stdout.strip().splitlines()[0]
-                        _sp.run(['xdotool', 'windowactivate', '--sync', wid],
-                                capture_output=True, timeout=2, env=env)
-                        _sp.run(['xdotool', 'windowfocus', '--sync', wid],
-                                capture_output=True, timeout=2, env=env)
-                        logging.debug(f"Focused RetroArch window {wid}")
-                        return
+                    with open(f'/proc/{pid}/environ', 'rb') as fh:
+                        raw = fh.read()
+                except (OSError, IOError):
+                    continue
+                if b'SteamOverlayGameId=' not in raw:
+                    continue
+                penv = {}
+                for item in raw.split(b'\x00'):
+                    if b'=' in item:
+                        k, _, v = item.partition(b'=')
+                        penv[k.decode('latin-1')] = v.decode('latin-1')
+                # Need at least the overlay game id to bind the renderer.
+                if not penv.get('SteamOverlayGameId'):
+                    continue
+                for key in ('SteamAppId', 'SteamGameId', 'SteamOverlayGameId',
+                            'SteamClientLaunch', 'SteamEnv'):
+                    if penv.get(key):
+                        ids[key] = penv[key]
+                # Reuse the exact gameoverlayrenderer.so paths Steam preloaded.
+                for entry in penv.get('LD_PRELOAD', '').split(':'):
+                    if 'gameoverlayrenderer.so' in entry and entry not in preload_paths:
+                        preload_paths.append(entry)
+                if ids.get('SteamOverlayGameId'):
+                    break
+        except Exception:
+            pass
+
+        if not ids.get('SteamOverlayGameId'):
+            return overlay  # no Steam-tracked app to bind to; skip injection
+
+        overlay.update(ids)
+
+        # Fall back to the standard install paths if we couldn't read the
+        # preload list from the tracked process.
+        if not preload_paths:
+            home = os.path.expanduser('~')
+            for sub in ('ubuntu12_32', 'ubuntu12_64'):
+                for base in (f'{home}/.local/share/Steam', f'{home}/.steam/steam'):
+                    cand = f'{base}/{sub}/gameoverlayrenderer.so'
+                    if os.path.exists(cand) and cand not in preload_paths:
+                        preload_paths.append(cand)
+                        break
+        if preload_paths:
+            # Caller merges this with the cleaned env's LD_PRELOAD.
+            overlay['_overlay_preload'] = preload_paths
+        return overlay
+
+    def _focus_window_after_launch(self, proc, match='retroarch'):
+        """Bring the freshly launched emulator window to the foreground.
+
+        On a normal desktop compositor (Mutter/KWin on e.g. Bazzite) a newly
+        mapped window is raised and focused automatically, so this is a no-op
+        there. On the Steam Deck in Gaming Mode the compositor is **gamescope**,
+        which only shows/focuses windows that carry the ``STEAM_GAME`` X11
+        property. A process spawned by the Decky daemon is not tracked by Steam,
+        so RetroArch renders (audio plays) but never becomes the focused surface.
+
+        We fix that by locating the emulator's XWayland window and setting
+        ``STEAM_GAME`` on it to the currently focused baselayer appid (read from
+        the root ``GAMESCOPECTRL_BASELAYER_APPID``). Everything is done via
+        ctypes→libX11 — no xdotool/xprop (absent on SteamOS) and no extra Python
+        deps. Runs in a background thread and fails safe to a no-op.
+        """
+        # Only relevant under gamescope; skip on ordinary desktops. The Decky
+        # daemon does NOT inherit GAMESCOPE_*/XDG_CURRENT_DESKTOP, so env vars
+        # are unreliable here — detect via the gamescope wayland socket in the
+        # runtime dir (and fall back to env vars when present).
+        if not self._gamescope_running():
+            return
+
+        def _worker():
+            try:
+                self._gamescope_set_steam_game(proc, match)
+            except Exception as exc:
+                logging.info(f"gamescope focus: error {exc}")
+
+        try:
+            threading.Thread(target=_worker, daemon=True).start()
+        except Exception as exc:
+            logging.debug(f"_focus_window_after_launch (thread): {exc}")
+
+    def _gamescope_running(self):
+        """True if a gamescope session is present (Steam Deck Gaming Mode).
+
+        Env vars are unreliable from the Decky daemon, so detect by the
+        gamescope-N wayland socket in the runtime dir, falling back to env."""
+        try:
+            uid = os.getuid()
+        except Exception:
+            uid = None
+        xrd = os.environ.get('XDG_RUNTIME_DIR') or (f'/run/user/{uid}' if uid is not None else None)
+        try:
+            if xrd and any(f.startswith('gamescope-') and not f.endswith('.lock')
+                           for f in os.listdir(xrd)):
+                return True
+        except Exception:
+            pass
+        return bool(os.environ.get('GAMESCOPE_WAYLAND_DISPLAY')
+                    or 'gamescope' in os.environ.get('XDG_CURRENT_DESKTOP', '').lower())
+
+    def _gamescope_set_steam_game(self, proc, match):
+        """ctypes/libX11 worker: tag the emulator window with STEAM_GAME so
+        gamescope focuses it. gamescope runs with --xwayland-count 2, so the
+        emulator may land on :0 or :1 — we search every display each poll.
+        Polls up to ~8s for the window to appear."""
+        import ctypes
+        from ctypes import c_int, c_ulong, c_char_p, c_void_p, byref, POINTER
+
+        try:
+            x11 = ctypes.CDLL('libX11.so.6')
+        except OSError:
+            try:
+                x11 = ctypes.CDLL('libX11.so')
+            except OSError:
+                logging.info("gamescope focus: libX11 not found")
+                return
+
+        # Minimal prototypes (only what we use).
+        x11.XOpenDisplay.restype = c_void_p
+        x11.XOpenDisplay.argtypes = [c_char_p]
+        x11.XDefaultRootWindow.restype = c_ulong
+        x11.XDefaultRootWindow.argtypes = [c_void_p]
+        x11.XInternAtom.restype = c_ulong
+        x11.XInternAtom.argtypes = [c_void_p, c_char_p, c_int]
+        x11.XQueryTree.restype = c_int
+        x11.XQueryTree.argtypes = [c_void_p, c_ulong, POINTER(c_ulong),
+                                   POINTER(c_ulong), POINTER(POINTER(c_ulong)),
+                                   POINTER(c_int)]
+        x11.XGetWindowProperty.restype = c_int
+        x11.XGetWindowProperty.argtypes = [
+            c_void_p, c_ulong, c_ulong, c_int, c_int, c_int, c_ulong,
+            POINTER(c_ulong), POINTER(c_int), POINTER(c_ulong),
+            POINTER(c_ulong), POINTER(POINTER(ctypes.c_ubyte))]
+        x11.XChangeProperty.argtypes = [
+            c_void_p, c_ulong, c_ulong, c_ulong, c_int, c_int,
+            POINTER(c_ulong), c_int]
+        x11.XDeleteProperty.argtypes = [c_void_p, c_ulong, c_ulong]
+        x11.XFree.argtypes = [c_void_p]
+        x11.XFlush.argtypes = [c_void_p]
+        x11.XCloseDisplay.argtypes = [c_void_p]
+
+        XA_CARDINAL = 6
+        AnyPropertyType = 0
+
+        # Open every plausible XWayland display once and keep it open.
+        env_disp = os.environ.get('DISPLAY')
+        names = []
+        for n in ([env_disp] if env_disp else []) + [':0', ':1', ':2']:
+            if n and n not in names:
+                names.append(n)
+        displays = []  # list of (name, dpy, atoms-dict)
+        for name in names:
+            dpy = x11.XOpenDisplay(name.encode())
+            if not dpy:
+                continue
+            atoms = {
+                'steam_game': x11.XInternAtom(dpy, b'STEAM_GAME', False),
+                'baselayer': x11.XInternAtom(dpy, b'GAMESCOPECTRL_BASELAYER_APPID', False),
+                'wmclass': x11.XInternAtom(dpy, b'WM_CLASS', False),
+                'netname': x11.XInternAtom(dpy, b'_NET_WM_NAME', False),
+                'wmname': x11.XInternAtom(dpy, b'WM_NAME', False),
+            }
+            displays.append((name, dpy, atoms))
+        if not displays:
+            logging.info("gamescope focus: could not open any X display")
+            return
+        logging.info(f"gamescope focus: searching displays {[d[0] for d in displays]}")
+
+        def get_prop_bytes(dpy, win, atom):
+            actual_type = c_ulong()
+            actual_fmt = c_int()
+            nitems = c_ulong()
+            bytes_after = c_ulong()
+            data = POINTER(ctypes.c_ubyte)()
+            status = x11.XGetWindowProperty(
+                dpy, win, atom, 0, 1024, False, AnyPropertyType,
+                byref(actual_type), byref(actual_fmt), byref(nitems),
+                byref(bytes_after), byref(data))
+            if status != 0 or not data:
+                return b'', 0, 0
+            fmt = actual_fmt.value
+            n = nitems.value
+            per = fmt // 8 if fmt else 1
+            raw = ctypes.string_at(data, n * per) if per else b''
+            x11.XFree(data)
+            return raw, fmt, n
+
+        needle = match.encode().lower()
+
+        def matches(dpy, atoms, win):
+            for key in ('wmclass', 'netname', 'wmname'):
+                raw, fmt, n = get_prop_bytes(dpy, win, atoms[key])
+                if raw and needle in raw.lower():
+                    return True
+            return False
+
+        def walk(dpy, atoms, win):
+            found = []
+            r = c_ulong(); parent = c_ulong()
+            children = POINTER(c_ulong)()
+            nchildren = c_int()
+            if x11.XQueryTree(dpy, win, byref(r), byref(parent),
+                              byref(children), byref(nchildren)) == 0:
+                return found
+            try:
+                for i in range(nchildren.value):
+                    child = children[i]
+                    if matches(dpy, atoms, child):
+                        found.append(child)
+                    found.extend(walk(dpy, atoms, child))
+            finally:
+                if children:
+                    x11.XFree(children)
+            return found
+
+        try:
+            for _ in range(27):  # up to ~8s
+                if proc.poll() is not None:
+                    logging.info("gamescope focus: emulator exited before window appeared")
+                    return
+                for name, dpy, atoms in displays:
+                    root = x11.XDefaultRootWindow(dpy)
+                    wins = walk(dpy, atoms, root)
+                    if not wins:
+                        continue
+                    # gamescope routes VISIBILITY off STEAM_GAME on the window,
+                    # but INPUT (controller/keyboard) off the *top entry* of the
+                    # root GAMESCOPECTRL_BASELAYER_APPID array. Tagging the window
+                    # alone shows it but leaves input on the Steam UI underneath,
+                    # so the gamepad drives both. To steal input we also prepend a
+                    # synthetic appid to the root baselayer and match the window's
+                    # STEAM_GAME to it (approach proven by Zaparoo/steamtinkerlaunch).
+                    # Snapshot the current baselayer array so we can restore it.
+                    raw, fmt, n = get_prop_bytes(dpy, root, atoms['baselayer'])
+                    original = []
+                    if fmt == 32 and n >= 1:
+                        try:
+                            original = [
+                                int.from_bytes(raw[i * 4:i * 4 + 4],
+                                               byteorder=sys.byteorder)
+                                for i in range(n)]
+                        except Exception:
+                            original = []
+
+                    # Reuse the appid Steam already has as the focused baselayer
+                    # (a real, Steam-TRACKED shortcut id — 413091 on this Deck) so
+                    # the Steam overlay still composites over our window. That
+                    # tracked appid has no window of its own; tagging RetroArch
+                    # with it makes RetroArch the one true window for the focused
+                    # game. A synthetic id (e.g. 1) grabs input but Steam refuses
+                    # to render its overlay over an untracked appid.
+                    target_appid = original[0] if (original and original[0]) else 1
+
+                    sg = (c_ulong * 1)(target_appid)
+                    for win in wins:
+                        x11.XChangeProperty(dpy, win, atoms['steam_game'],
+                                            XA_CARDINAL, 32, 0,  # PropModeReplace
+                                            ctypes.cast(sg, POINTER(c_ulong)), 1)
+
+                    # Re-assert the baselayer with target on top. Even when this
+                    # equals the existing array, the XChangeProperty forces
+                    # gamescope to re-run focus selection now that a real window
+                    # exists for the appid, moving INPUT off the Steam UI (769).
+                    new_layer = [target_appid] + [a for a in original if a != target_appid]
+                    arr = (c_ulong * len(new_layer))(*new_layer)
+                    x11.XChangeProperty(dpy, root, atoms['baselayer'],
+                                        XA_CARDINAL, 32, 0,
+                                        ctypes.cast(arr, POINTER(c_ulong)),
+                                        len(new_layer))
+                    x11.XFlush(dpy)
+                    logging.info(
+                        f"gamescope focus: tagged {len(wins)} '{match}' window(s) "
+                        f"on {name}; baselayer {original} -> {new_layer}")
+
+                    # Hold input focus until the emulator exits, then restore the
+                    # original baselayer so the Steam UI regains the gamepad.
+                    try:
+                        while proc.poll() is None:
+                            time.sleep(0.5)
+                    except Exception:
+                        pass
+                    try:
+                        if original:
+                            restore = (c_ulong * len(original))(*original)
+                            x11.XChangeProperty(dpy, root, atoms['baselayer'],
+                                                XA_CARDINAL, 32, 0,
+                                                ctypes.cast(restore, POINTER(c_ulong)),
+                                                len(original))
+                        else:
+                            x11.XDeleteProperty(dpy, root, atoms['baselayer'])
+                        x11.XFlush(dpy)
+                        logging.info("gamescope focus: restored baselayer "
+                                     "after emulator exit")
+                    except Exception as exc:
+                        logging.info(f"gamescope focus: baselayer restore failed: {exc}")
+                    return
+                time.sleep(0.3)
+            logging.info(f"gamescope focus: no '{match}' window found on any display")
+        finally:
+            for _name, dpy, _atoms in displays:
+                try:
+                    x11.XCloseDisplay(dpy)
                 except Exception:
                     pass
-        except Exception as exc:
-            logging.debug(f"_focus_window_after_launch: {exc}")
 
     def launch_game_retrodeck(self, rom_path):
         """Launch game through RetroDECK (which handles core selection automatically)"""
@@ -4308,8 +4641,9 @@ class RetroArchInterface:
                                         text=True,
                                         env=self._host_subprocess_env())
 
-                # Raise the RetroArch window so it gets focus on Steam Deck.
-                self._focus_window_after_launch(result)
+                # On Steam Deck Gaming Mode (gamescope) the daemon-spawned
+                # window won't gain focus on its own; tag it so gamescope shows it.
+                self._focus_window_after_launch(result, match='retroarch')
 
                 time.sleep(3)  # Wait to see if it fails immediately
 
@@ -4547,44 +4881,83 @@ class RetroArchInterface:
         print(f"Available cores: {list(available_cores.keys())}")
         return None, None
 
+    def build_launch_command(self, rom_path, platform_name=None, core_name=None):
+        """Resolve the exact emulator argv for a ROM, without launching it.
+
+        Returns (cmd_list, error). On success error is None. Shared by both the
+        direct desktop launch (launch_game) and the Steam Deck session-host path
+        (prepare_steam_launch in the Decky backend), so the two never drift.
+        """
+        if not self.retroarch_executable:
+            return None, "RetroArch executable not found"
+
+        is_retrodeck = 'retrodeck' in self.retroarch_executable.lower()
+
+        # If no core specified, try to suggest one
+        if not core_name and platform_name:
+            core_name, _ = self.suggest_core_for_platform(platform_name)
+            if not core_name:
+                return None, f"No suitable core found for platform: {platform_name}"
+
+        # Get core path
+        available_cores = self.get_available_cores()
+        if core_name not in available_cores:
+            return None, f"Core not found: {core_name}"
+
+        core_path = available_cores[core_name]
+
+        if is_retrodeck:
+            # Run RetroDECK's BUNDLED RetroArch directly (boot straight into the
+            # game) rather than the RetroDECK frontend. The cores live read-only
+            # inside the flatpak, so -L must use the in-sandbox /app path.
+            sandbox_core = self._retrodeck_sandbox_core(core_path)
+            # The retroarch binary isn't on the flatpak's default PATH, so point
+            # --command at its absolute in-sandbox path.
+            cmd = ['flatpak', 'run',
+                   '--command=/app/retrodeck/components/retroarch/bin/retroarch',
+                   'net.retrodeck.retrodeck', '-L', sandbox_core, str(rom_path)]
+        elif 'flatpak' in self.retroarch_executable:
+            cmd = ['flatpak', 'run', 'org.libretro.RetroArch', '-L', core_path, str(rom_path)]
+        elif 'snap' in self.retroarch_executable:
+            cmd = ['snap', 'run', 'retroarch', '-L', core_path, str(rom_path)]
+        else:
+            cmd = [self.retroarch_executable, '-L', core_path, str(rom_path)]
+        return cmd, None
+
+    @staticmethod
+    def _retrodeck_sandbox_core(core_path):
+        """Translate a host RetroDECK core path to its in-sandbox /app path.
+
+        Host: .../net.retrodeck.retrodeck/current/active/files/retrodeck/components/retroarch/rd_extras/cores/<core>.so
+        Sandbox: /app/retrodeck/components/retroarch/rd_extras/cores/<core>.so
+        (the flatpak's files/ dir is mounted at /app inside the sandbox).
+        """
+        core_path = str(core_path)
+        marker = '/retrodeck/components/retroarch/'
+        idx = core_path.find(marker)
+        if idx != -1:
+            return '/app' + core_path[idx:]
+        return core_path
+
     def launch_game(self, rom_path, platform_name=None, core_name=None):
         """Launch a game in RetroArch with multi-installation support"""
         if not self.retroarch_executable:
             return False, "RetroArch executable not found"
 
-        # Special handling for RetroDECK
-        if 'retrodeck' in self.retroarch_executable.lower():
-            return self.launch_game_retrodeck(rom_path)
-
-        # If no core specified, try to suggest one
-        if not core_name and platform_name:
-            core_name, core_path = self.suggest_core_for_platform(platform_name)
-            if not core_name:
-                return False, f"No suitable core found for platform: {platform_name}"
-
-        # Get core path
-        available_cores = self.get_available_cores()
-        if core_name not in available_cores:
-            return False, f"Core not found: {core_name}"
-
-        core_path = available_cores[core_name]
+        # RetroDECK is handled inside build_launch_command (run its bundled
+        # RetroArch with the core, booting straight into the game — not the
+        # RetroDECK frontend), so no special early-return here anymore.
+        cmd, err = self.build_launch_command(rom_path, platform_name, core_name)
+        if err:
+            return False, err
+        # Recover the resolved core name for the success message below.
+        core_name = core_name or (cmd[cmd.index('-L') + 1] if '-L' in cmd else None)
 
         try:
             import subprocess
 
-            # Build command based on RetroArch type - REPLACE THIS SECTION
-            if 'retrodeck' in self.retroarch_executable.lower():
-                # RetroDECK launches games differently - try multiple approaches
-                cmd = ['flatpak', 'run', 'net.retrodeck.retrodeck', '--pass-args', str(rom_path)]
-            elif 'flatpak' in self.retroarch_executable:
-                cmd = ['flatpak', 'run', 'org.libretro.RetroArch', '-L', core_path, str(rom_path)]
-            elif 'snap' in self.retroarch_executable:
-                cmd = ['snap', 'run', 'retroarch', '-L', core_path, str(rom_path)]
-            else:
-                cmd = [self.retroarch_executable, '-L', core_path, str(rom_path)]
-
             logging.debug(f"Launching: {' '.join(cmd)}")
-            logging.debug(f"ROM path exists: {os.path.exists(rom_path)}, Core path exists: {os.path.exists(core_path)}")
+            logging.debug(f"ROM path exists: {os.path.exists(rom_path)}")
 
             # Launch RetroArch with debugging (don't capture output to see what happens)
             result = subprocess.Popen(cmd,
@@ -4593,8 +4966,9 @@ class RetroArchInterface:
                                     text=True,
                                     env=self._host_subprocess_env())
 
-            # Raise the RetroArch window so it gets focus on Steam Deck.
-            self._focus_window_after_launch(result)
+            # On Steam Deck Gaming Mode (gamescope) the daemon-spawned window
+            # won't gain focus on its own; tag it so gamescope shows it.
+            self._focus_window_after_launch(result, match='retroarch')
 
             # Wait a moment to see if it fails immediately
             import time
@@ -4983,8 +5357,16 @@ class RetroArchInterface:
         possible_dirs = [
             # Flatpak
             Path.home() / '.var/app/org.libretro.RetroArch/config/retroarch/cores',
-            
-            # RetroDECK
+
+            # RetroDECK: cores ship read-only inside the flatpak (rd_extras), not
+            # in the user config dir. The in-sandbox libretro_directory is
+            # /app/retrodeck/components/retroarch/rd_extras/cores; from the host
+            # that is .../current/active/files/retrodeck/... (system or user
+            # flatpak install). _retrodeck_sandbox_core() maps these back to /app.
+            Path('/var/lib/flatpak/app/net.retrodeck.retrodeck/current/active/files/retrodeck/components/retroarch/rd_extras/cores'),
+            Path.home() / '.local/share/flatpak/app/net.retrodeck.retrodeck/current/active/files/retrodeck/components/retroarch/rd_extras/cores',
+
+            # RetroDECK (user-config cores; usually empty but kept for overrides)
             Path.home() / '.var/app/net.retrodeck.retrodeck/config/retroarch/cores',
 
             # Native installations
@@ -6286,6 +6668,24 @@ class AutoSyncManager:
                     matching_game = game
                     break
 
+                # Per-region single-file ROMs (preserved for save attribution):
+                # if the launched content matches a dedicated region ROM, restore
+                # from THAT ROM (12334) rather than the bundle that contains it.
+                # Checked before the bundle `files` match below (more specific).
+                for rsib in (game.get('_region_save_siblings') or []):
+                    rsib_fs_name = rsib.get('fs_name', '')
+                    rsib_no_ext = rsib.get('fs_name_no_ext') or (Path(rsib_fs_name).stem if rsib_fs_name else '')
+                    if rom_filename and rsib_fs_name == rom_filename:
+                        matching_game = game
+                        game['_matched_variant_rom_id'] = rsib.get('id')
+                        break
+                    if is_content_label and rsib_no_ext and rsib_no_ext == rom_stem:
+                        matching_game = game
+                        game['_matched_variant_rom_id'] = rsib.get('id')
+                        break
+                if matching_game:
+                    break
+
                 # Multi-disc / multi-file ROMs: the launched content (e.g.
                 # "Final Fantasy VII (Europe) (Disc 1)") is one entry in the parent
                 # ROM's `files` array, not its fs_name. Match against those files so
@@ -6953,6 +7353,18 @@ class AutoSyncManager:
                 if fs_name_no_ext and (fs_name_no_ext == save_basename or fs_name_no_ext == clean_basename):
                     return game['rom_id']
 
+                # Per-region single-file ROMs (dropped from the download UI but
+                # preserved for save attribution). When the save's basename
+                # exactly matches a dedicated region ROM (e.g. "...(Spain)" =
+                # rom 12334), attribute it to THAT ROM rather than to the bundle
+                # that merely contains the same file as a member. This is the more
+                # specific match and must be checked before the `files` loop below.
+                for rsib in (game.get('_region_save_siblings') or []):
+                    rsib_fs_name = rsib.get('fs_name', '')
+                    rsib_no_ext = rsib.get('fs_name_no_ext') or (Path(rsib_fs_name).stem if rsib_fs_name else '')
+                    if rsib_no_ext and rsib_no_ext in (save_basename, clean_basename):
+                        return rsib.get('id')
+
                 # Multi-disc / multi-FILE ROMs: the save is named after the
                 # launched member file (e.g. a per-region "...HeartGold (Italy)"),
                 # which is one entry in the parent ROM's `files` array, not its
@@ -7232,6 +7644,28 @@ class AutoSyncManager:
             # Use variant ROM ID if matched, otherwise use parent ROM ID
             rom_id = game.get('_matched_variant_rom_id') or game['rom_id']
             game_name = game.get('name', 'Unknown')
+
+            # Bulk restore: saves for this game may live on dedicated per-region
+            # ROMs (kept in _region_save_siblings, e.g. the "(Spain)" rom_id) that
+            # are dropped from the download UI. When restoring the whole game (no
+            # specific variant matched), also pull each region ROM's saves so a
+            # fresh device finds them. Per-region pseudo-games carry no nested
+            # _region_save_siblings, so this does not recurse further.
+            if not game.get('_matched_variant_rom_id'):
+                for rsib in (game.get('_region_save_siblings') or []):
+                    if not rsib.get('id'):
+                        continue
+                    try:
+                        self.download_saves_for_specific_game({
+                            'rom_id': rsib.get('id'),
+                            'name': rsib.get('name') or game_name,
+                            'platform_slug': rsib.get('platform_slug') or game.get('platform_slug', ''),
+                            'file_name': rsib.get('fs_name', ''),
+                            'local_path': game.get('local_path'),
+                            'romm_data': rsib,
+                        })
+                    except Exception as _e:
+                        self.log(f"   Region-sibling restore skipped ({rsib.get('id')}): {_e}")
 
             # Check if we have device-aware sync data to skip unnecessary downloads
             device_saves_to_skip = set()

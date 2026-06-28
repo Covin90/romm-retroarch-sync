@@ -48,6 +48,10 @@ const deleteCollectionRoms = callable<[string], any>("delete_collection_roms");
 const getDownloadProgress = callable<[number], any>("get_download_progress");
 const deleteGame = callable<[number], any>("delete_game");
 const launchGame = callable<[number, (string | null)?, (number | null)?], any>("launch_game");
+// Steam Deck session-host launch: resolves argv + writes a launch-spec; the tile
+// is then RunGame'd so the emulator is a child of a Steam-tracked game (overlay).
+const prepareSteamLaunch = callable<[number, (string | null)?, (number | null)?], any>("prepare_steam_launch");
+const getSessionHostPath = callable<[], any>("get_session_host_path");
 const getLocalDiscs = callable<[number], any>("get_local_discs");
 const getLocalSiblings = callable<[number], any>("get_local_siblings");
 const getHomeData = callable<[], any>("get_home_data");
@@ -614,7 +618,7 @@ function GameTile({ game, onOpen, onActiveCover, focusRef }:
     if (busy) return;
     setBusy('launch');
     try {
-      const r = await launchGame(game.rom_id);
+      const r = await launchGameSmart(game.rom_id);
       if (r?.success) toaster.toast({ title: 'Launching', body: game.name });
       else toaster.toast({ title: 'Launch failed', body: r?.message || 'Error' });
     } catch (e) { toaster.toast({ title: 'Launch failed', body: String(e) }); }
@@ -3995,11 +3999,50 @@ function regionDisplayLabel(fname: string): string {
   return m ? m[1] : base;
 }
 
+// Launch a game. Under gamescope (Steam Deck Gaming Mode) this routes through
+// the RomM tile's session-host so the Steam overlay works: prepare_steam_launch
+// writes the emulator argv, then we RunGame the tile and the host execs it as a
+// Steam-tracked child. Anywhere that fails (not gamescope, no tile, RunGame
+// unavailable) it falls back to the direct daemon launch.
+async function launchGameSmart(romId: number, disc: string | null = null,
+  siblingRomId: number | null = null): Promise<any> {
+  try {
+    // Re-resolve the live tile appid: SetShortcutExe renumbers it (appid is a
+    // hash of exe+name), so a cached _rommAppId can be stale.
+    const liveIds = _rommAppIds();
+    const appId = (liveIds.length ? liveIds[0] : (_rommAppId ?? await findRommShortcut()));
+    if (appId != null) {
+      _rommAppId = appId;
+      const prep = await prepareSteamLaunch(romId, disc, siblingRomId);
+      if (prep?.steam_host) {
+        _rommLaunchPending = true;
+        try {
+          // A non-Steam shortcut is launched by its 64-bit gameID, not the bare
+          // 32-bit appid: gameID = (appid << 32) | 0x02000000 (shortcut tag).
+          // This is the same value GameActionStart reports back to the intercept.
+          const gid = ((BigInt(appId) << 32n) | 0x2000000n).toString();
+          await _sc()?.Apps?.RunGame?.(gid, "", -1, 100);
+          return { success: true, message: 'Launching' };
+        } catch (e) {
+          _rommLaunchPending = false;
+          console.error('[RomM] RunGame', e);
+        }
+      } else if (prep && prep.success === false && prep.steam_host === false
+                 && prep.message && prep.message !== 'Not running under gamescope') {
+        // A real failure (e.g. game not downloaded) — surface it rather than
+        // silently falling back to a direct launch that would fail the same way.
+        return prep;
+      }
+    }
+  } catch (e) { console.error('[RomM] launchGameSmart', e); }
+  return await launchGame(romId, disc, siblingRomId);
+}
+
 async function runLaunch(romId: number, gameName: string, disc: string | null,
   label?: string, setBusy?: (b: any) => void, onDone?: () => void, siblingRomId?: number | null) {
   if (setBusy) setBusy('launch');
   try {
-    const r = await launchGame(romId, disc, siblingRomId ?? null);
+    const r = await launchGameSmart(romId, disc, siblingRomId ?? null);
     if (r?.success) toaster.toast({ title: 'Launching', body: label || gameName });
     else toaster.toast({ title: 'Launch failed', body: r?.message || 'Error' });
   } catch (e) {
@@ -5227,7 +5270,24 @@ function SetupWizard() {
 // SteamClient calls are undocumented + version-fragile, so every call is
 // feature-detected and wrapped — failures degrade to a toast, never a crash.
 const ROMM_SHORTCUT_NAME = "RomM";
-const ROMM_SHORTCUT_EXE = "/bin/true"; // no-op: the tile only triggers navigation
+// Fallback exe when the session-host script can't be resolved. With /bin/true the
+// tile still opens the browser (via the launch intercept) but the Steam-overlay
+// session-host launch path is unavailable, so Play falls back to a direct launch.
+const ROMM_SHORTCUT_EXE = "/bin/true";
+// The real exe: bin/romm-session-host. When the tile is RunGame'd after a game is
+// picked, Steam launches this as a tracked game (opening the overlay session) and
+// it execs the resolved emulator argv in-place — so the emulator inherits the
+// overlay. Resolved lazily from the backend (absolute, plugin-dir dependent).
+let _sessionHostExe: string | null = null;
+async function rommShortcutExe(): Promise<string> {
+  if (_sessionHostExe) return _sessionHostExe;
+  try {
+    const r = await getSessionHostPath();
+    const p = typeof r === 'string' ? r : r?.path;
+    if (p) { _sessionHostExe = p; return p; }
+  } catch (e) { console.error('[RomM] getSessionHostPath', e); }
+  return ROMM_SHORTCUT_EXE;
+}
 // Stamped into the shortcut's launch options so we can re-identify our tile
 // even when Steam hasn't persisted its name (the root cause of duplicates and
 // the toggle flipping off after an update).
@@ -5235,6 +5295,10 @@ const ROMM_TILE_SENTINEL = "romm-sync-monitor-tile";
 let _rommAppId: number | null = null;
 let _rommNavTimer: any = null;
 let _rommActionReg: { unregister: () => void } | null = null;
+// Set true immediately before we RunGame the tile to launch a *picked* game, so
+// the launch intercept lets the session-host run (and execs the emulator) instead
+// of treating it as a bare tile click (terminate + open the browser).
+let _rommLaunchPending = false;
 // Guards the startup setup-wizard auto-open so it fires at most once per session.
 let _setupAutoOpened = false;
 
@@ -5259,7 +5323,8 @@ function _appName(appid: number): string {
 // All our tiles carry the name "RomM"; also accept the exe-derived fallback
 // names Steam uses when a name didn't persist. Real games carry their own names.
 function _isRommName(nm: string): boolean {
-  return nm === ROMM_SHORTCUT_NAME || nm === 'true' || nm === '/bin/true';
+  return nm === ROMM_SHORTCUT_NAME || nm === 'true' || nm === '/bin/true'
+    || nm === 'romm-session-host';
 }
 
 function _rommAppIds(): number[] {
@@ -5302,6 +5367,11 @@ async function reconcileRommTile(): Promise<number | null> {
   const apps = _sc()?.Apps;
   try { await apps?.SetShortcutName?.(appId, ROMM_SHORTCUT_NAME); } catch { /* ignore */ }
   try { await apps?.SetShortcutLaunchOptions?.(appId, ROMM_TILE_SENTINEL); } catch { /* ignore */ }
+  // Migrate the exe to the session-host script (older tiles used /bin/true).
+  try {
+    const exe = await rommShortcutExe();
+    if (apps?.SetShortcutExe) await apps.SetShortcutExe(appId, exe);
+  } catch (e) { console.error('[RomM] reconcile SetShortcutExe', e); }
   // Stamping name/launch-options can renumber the shortcut appid (it's a hash of
   // exe+name+options). Re-resolve so the cache, intercept and artwork all target
   // the live tile rather than the now-dead pre-stamp appid.
@@ -5353,9 +5423,14 @@ async function addRommShortcut(): Promise<number | null> {
   try {
     const apps = _sc()?.Apps;
     if (!apps?.AddShortcut) { toaster.toast({ title: 'RomM', body: 'Steam shortcuts API unavailable on this build.' }); return null; }
+    const exe = await rommShortcutExe();
     let appId = await findRommShortcut();
     if (appId == null) {
-      appId = Number(await apps.AddShortcut(ROMM_SHORTCUT_NAME, ROMM_SHORTCUT_EXE, "", ""));
+      appId = Number(await apps.AddShortcut(ROMM_SHORTCUT_NAME, exe, "", ""));
+    } else if (apps.SetShortcutExe) {
+      // Migrate older /bin/true tiles to the session-host exe so the overlay
+      // launch path works. Harmless if already set.
+      try { await apps.SetShortcutExe(appId, exe); } catch (e) { console.error('[RomM] SetShortcutExe', e); }
     }
     // Always (re)assert the display name. AddShortcut's name arg doesn't reliably
     // persist to the shortcut's strAppName on all Steam builds, so the tile can
@@ -5411,12 +5486,16 @@ function registerRommLaunchIntercept() {
       if (!mine) { try { mine = _rommAppIds().includes(aid) || _rommAppIds().includes(raw); } catch { /* ignore */ } }
       if (mine) {
         _rommAppId = aid;
-        // The /bin/true tile fires this twice (launch start type=6, then exit
-        // type=7 ~1.5s later). Navigating immediately gets clobbered when Steam
-        // returns to the tile on exit. Debounce, and navigate on a short delay
-        // so our route lands AFTER Steam settles back from the no-op launch.
-        // End the no-op launch immediately so we don't have to wait for it to
-        // exit on its own (that wait is what made the browser slow to appear).
+        // A picked-game launch: we wrote a launch-spec and RunGame'd the tile so
+        // the session-host can exec the emulator as a Steam-tracked child (overlay
+        // works). Let it run — do NOT terminate or navigate.
+        if (_rommLaunchPending) {
+          _rommLaunchPending = false;
+          return;
+        }
+        // Bare tile click: the exe is a no-op without a fresh spec. The tile
+        // fires this twice (launch start type=6, then exit type=7 ~1.5s later).
+        // End the launch immediately and open the Game Browser instead.
         try { _sc()?.Apps?.TerminateApp?.(String(strAppId), false); } catch { /* ignore */ }
         if (_rommNavTimer != null) { try { clearTimeout(_rommNavTimer); } catch { /* ignore */ } }
         _rommNavTimer = setTimeout(() => {
