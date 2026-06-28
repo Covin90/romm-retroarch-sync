@@ -3041,20 +3041,27 @@ function LibraryGamesPage() {
   // screenful immediately, then grow the count in chunks across frames so first
   // paint is fast and the rest fill in without blocking. Covers are viewport-
   // gated already, so off-screen appended tiles cost almost nothing.
-  // First paint = a screenful; the rest grow in SMALL chunks scheduled on idle
-  // time (requestIdleCallback) so gamepad input is processed between chunks.
-  // Big 120-tile chunks each took ~90ms of main-thread mount work and blocked
-  // input for ~half a second; 30-tile idle chunks keep the thread responsive.
-  const GRID_FIRST = 48, GRID_CHUNK = 30;
+  // On-demand mount (infinite scroll): rather than eagerly mounting all 480
+  // tiles for a big platform (480 Focusable trees is inherently heavy, even
+  // spread across frames), keep only what's reached. A sentinel below the last
+  // rendered tile grows the count by a chunk whenever it nears the viewport, so
+  // typically ~2-3 screens of tiles are mounted and the grid stays fluid.
+  const GRID_FIRST = 48, GRID_CHUNK = 60;
   const [visN, setVisN] = useState(() => Math.min(games.length || 0, GRID_FIRST));
   useEffect(() => { setVisN(Math.min(games.length || 0, GRID_FIRST)); }, [group?.key]);
+  const sentinelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (visN >= games.length) return;
-    const ric: any = (window as any).requestIdleCallback;
-    const cic: any = (window as any).cancelIdleCallback;
-    const grow = () => setVisN((n) => Math.min(games.length, n + GRID_CHUNK));
-    if (ric) { const id = ric(grow, { timeout: 200 }); return () => cic?.(id); }
-    const id = setTimeout(grow, 32); return () => clearTimeout(id);
+    const el = sentinelRef.current;
+    const bump = () => setVisN((n) => Math.min(games.length, n + GRID_CHUNK));
+    if (!el || typeof IntersectionObserver === 'undefined') { bump(); return; }
+    let io: IntersectionObserver | null = null;
+    try {
+      io = new IntersectionObserver((es) => { if (es.some((e) => e.isIntersecting)) bump(); },
+        { rootMargin: '800px' });
+      io.observe(el);
+    } catch { bump(); }
+    return () => { try { io?.disconnect(); } catch {} };
   }, [visN, games.length]);
 
   // Timing probe: how long from games-set to the grid being laid out (mount of
@@ -3448,6 +3455,9 @@ function LibraryGamesPage() {
             <GameTile key={g.rom_id} game={g} onOpen={openGame} onActiveCover={setBgUri}
               focusRef={i === 0 ? firstTileRef : undefined} />
           ))}
+          {visN < games.length && (
+            <div ref={sentinelRef} style={{ gridColumn: '1 / -1', height: '1px' }} />
+          )}
         </Focusable>
       )}
       <style>{`
