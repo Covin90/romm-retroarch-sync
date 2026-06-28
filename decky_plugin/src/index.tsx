@@ -2263,9 +2263,11 @@ const V2_ROW_STYLE = `
   }
 `;
 
-function v2Page(children: any, bgUri: string | null = null) {
+function V2Page({ children, bgUri = null }: { children: any; bgUri?: string | null }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => { if (ref.current) ref.current.scrollTop = 0; }, []);
   return (
-    <div className="romm-ui" style={{
+    <div ref={ref} className="romm-ui" style={{
       fontFamily: V2.font, color: V2.fg, background: V2.bg,
       position: 'relative', overflowY: 'auto', height: 'calc(100vh - 40px)',
       marginTop: '40px',
@@ -2277,6 +2279,9 @@ function v2Page(children: any, bgUri: string | null = null) {
       </div>
     </div>
   );
+}
+function v2Page(children: any, bgUri: string | null = null) {
+  return <V2Page bgUri={bgUri}>{children}</V2Page>;
 }
 
 const NAV_ORDER: NavId[] = ['home', 'platforms', 'collections', 'search'];
