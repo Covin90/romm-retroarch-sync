@@ -16,7 +16,7 @@ import {
 } from "@decky/ui";
 import { callable, definePlugin, toaster, routerHook, openFilePicker, FileSelectionType } from "@decky/api";
 import { useState, useEffect, useLayoutEffect, useRef, forwardRef, type Ref, type ChangeEvent } from "react";
-import { FaSync, FaTrash, FaCog, FaSteam, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight, FaCheckCircle, FaUsers, FaExternalLinkAlt, FaPuzzlePiece, FaBoxOpen, FaClone, FaRedo, FaClock, FaCheck, FaEllipsisH, FaGlobe } from "react-icons/fa";
+import { FaSync, FaTrash, FaCog, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight, FaCheckCircle, FaUsers, FaExternalLinkAlt, FaPuzzlePiece, FaBoxOpen, FaClone, FaRedo, FaClock, FaCheck, FaEllipsisH, FaGlobe } from "react-icons/fa";
 import { BsGearFill } from "react-icons/bs";
 import { MdVerified } from "react-icons/md";
 
@@ -4626,15 +4626,13 @@ function SettingsPage() {
   const [loading, setLoading] = useState<boolean>(true);
   const [confirmLogout, setConfirmLogout] = useState<boolean>(false);
   const [loggingOut, setLoggingOut] = useState<boolean>(false);
-  const [tilePresent, setTilePresent] = useState<boolean>(false);
-  const [tileBusy, setTileBusy] = useState<boolean>(false);
   const [serverInfo, setServerInfo] = useState<string>('');
 
   useEffect(() => { (async () => {
-    // Reconcile here (not just at plugin load): by the time Settings opens the
-    // shortcut store is reliably ready, so duplicates get swept and the toggle
-    // reflects the real tile state even right after a plugin update.
-    try { setTilePresent((await reconcileRommTile()) != null); } catch { /* ignore */ }
+    // The "RomM" tile is mandatory and auto-created at plugin load. Reconcile
+    // here too (the shortcut store is reliably ready by the time Settings opens)
+    // to sweep duplicates and repair the survivor's exe/name/art after updates.
+    try { await reconcileRommTile(); } catch { /* ignore */ }
     try {
       const cfg = await getConfig();
       const url = cfg?.url || '';
@@ -4644,19 +4642,6 @@ function SettingsPage() {
       setServerInfo(name && url ? `${name} · ${url}` : (name || url || ''));
     } catch { /* ignore */ }
   })(); }, []);
-
-  const handleAddTile = async () => {
-    setTileBusy(true);
-    try {
-      const id = await addRommShortcut();
-      if (id != null) { setTilePresent(true); toaster.toast({ title: 'RomM', body: 'Added “RomM” to your Steam library.' }); }
-    } finally { setTileBusy(false); }
-  };
-  const handleRemoveTile = async () => {
-    setTileBusy(true);
-    try { if (await removeRommShortcut()) { setTilePresent(false); toaster.toast({ title: 'RomM', body: 'Removed the library tile.' }); } }
-    finally { setTileBusy(false); }
-  };
 
   useEffect(() => {
     // Load initial logging preference
@@ -4717,17 +4702,6 @@ function SettingsPage() {
         <GameActionButton icon={<FaChevronLeft size={16} />} onClick={() => Navigation.NavigateBack()} />
         <div style={{ fontSize: '24px', fontWeight: 800, letterSpacing: '-0.01em' }}>Settings</div>
       </div>
-
-      <V2SettingsSection title="Steam Library">
-        <V2SettingsRow
-          icon={<FaSteam size={16} />}
-          title="Add “RomM” to Steam library"
-          subtitle="A library tile that jumps straight into the RomM browser — it won't launch a game."
-          onClick={tileBusy ? undefined : (tilePresent ? handleRemoveTile : handleAddTile)}
-          right={<V2Switch checked={tilePresent} />}
-          disabled={tileBusy}
-        />
-      </V2SettingsSection>
 
       <V2SettingsSection title="Debug">
         <V2SettingsRow
@@ -5044,7 +5018,6 @@ function SetupWizard() {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [busy, setBusy] = useState(false);
-  const [addSteamTile, setAddSteamTile] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -5054,8 +5027,6 @@ function SetupWizard() {
         setRomDir(c.rom_directory || ''); setSaveDir(c.save_directory || ''); setBiosDir(c.bios_directory || '');
         setDeviceName(c.device_name || ''); setDeviceNameDefault(c.device_name_default || 'SteamOS');
         setHasPassword(c.has_password || false);
-        // Pre-check the Steam library tile if it was already added in a prior session.
-        try { setAddSteamTile((await findRommShortcut()) != null); } catch { /* ignore */ }
       } catch { /* ignore */ }
       try { const l = await getRommLogo(); setLogo(l?.data_uri || null); } catch { /* ignore */ }
     })();
@@ -5078,11 +5049,10 @@ function SetupWizard() {
   const doFinish = async () => {
     setBusy(true);
     try {
-      // Add or remove the "RomM" Steam library tile before navigating away.
+      // The "RomM" Steam library tile is mandatory — ensure it exists before
+      // navigating away (create if missing; reconcile repairs an existing one).
       try {
-        const exists = (await findRommShortcut()) != null;
-        if (addSteamTile && !exists) await addRommShortcut();
-        else if (!addSteamTile && exists) await removeRommShortcut();
+        if ((await reconcileRommTile()) == null) await addRommShortcut();
       } catch (e) { console.error('[RomM] wizard steam tile', e); }
 
       if (mode === 'pair') {
@@ -5242,14 +5212,6 @@ function SetupWizard() {
                 ? 'We\'ll pair this device with your RomM server and open your library.'
                 : 'We\'ll save your connection and open your library.'}
             </div>
-            <div style={{ width: '100%', maxWidth: '380px', marginTop: '4px' }}>
-              <RomSwitch
-                label="Add “RomM” to Steam library"
-                description="Adds a library tile that opens the RomM game browser when launched."
-                checked={addSteamTile}
-                onChange={setAddSteamTile}
-              />
-            </div>
             {footer(
               <GameActionButton variant="emphasized" disabled={busy}
                 label={busy ? 'Connecting…' : 'Finish & open library'}
@@ -5264,11 +5226,13 @@ function SetupWizard() {
   );
 }
 
-// ─── Steam library "RomM" shortcut (opt-in) ──────────────────────────────────
-// Creates a non-Steam shortcut named "RomM" whose launch is intercepted and
-// redirected into the plugin's Game Browser instead of running anything. All
-// SteamClient calls are undocumented + version-fragile, so every call is
-// feature-detected and wrapped — failures degrade to a toast, never a crash.
+// ─── Steam library "RomM" shortcut (mandatory) ───────────────────────────────
+// A non-Steam shortcut named "RomM" is auto-created at plugin load (once RomM is
+// configured) and is required: launching it from the library opens the Game
+// Browser, and picking a game RunGame's this same tile so the emulator runs as a
+// Steam-tracked child (working overlay). All SteamClient calls are undocumented +
+// version-fragile, so every call is feature-detected and wrapped — failures
+// degrade to a toast, never a crash.
 const ROMM_SHORTCUT_NAME = "RomM";
 // Fallback exe when the session-host script can't be resolved. With /bin/true the
 // tile still opens the browser (via the launch intercept) but the Steam-overlay
@@ -5454,16 +5418,6 @@ async function addRommShortcut(): Promise<number | null> {
   }
 }
 
-async function removeRommShortcut(): Promise<boolean> {
-  try {
-    const apps = _sc()?.Apps;
-    const appId = _rommAppId ?? await findRommShortcut();
-    if (appId == null) return true;
-    await apps?.RemoveShortcut?.(appId);
-    _rommAppId = null;
-    return true;
-  } catch (e) { console.error('[RomM] removeRommShortcut', e); return false; }
-}
 
 // Intercept the RomM tile's launch → cancel the no-op run and open the browser.
 function registerRommLaunchIntercept() {
@@ -5525,28 +5479,31 @@ export default definePlugin(() => {
   // Re-bind the launch intercept if the RomM tile was added in a prior session,
   // and auto-open the setup wizard once when no connection is configured.
   (async () => {
-    try {
-      // Best-effort at load; the shortcut store may not be ready this early, so
-      // Settings-open reconciles again. Retry with exponential backoff to catch
-      // the store becoming ready without needing the user to open Settings.
-      const tryReconcile = async (attempt: number) => {
-        if ((await reconcileRommTile()) != null) return;
-        if (attempt < 5) {
-          const delay = Math.min(4000 * Math.pow(1.5, attempt), 15000);
-          setTimeout(() => { tryReconcile(attempt + 1); }, delay);
-        }
-      };
-      await tryReconcile(0);
-    } catch (e) { console.error('[RomM] shortcut rebind', e); }
-    try {
-      const cfg = await getConfig();
-      // Auto-open the wizard only when there's genuinely no connection, and only
-      // once per session — never re-trap the user after they've set things up.
-      if (cfg && !cfg.configured && !_setupAutoOpened) {
-        _setupAutoOpened = true;
-        setTimeout(() => { try { Navigation.Navigate("/romm-sync-setup"); } catch (e) { console.error('[RomM] setup auto-open', e); } }, 1500);
-      }
-    } catch (e) { console.error('[RomM] config probe', e); }
+    let configured = false;
+    try { configured = !!(await getConfig())?.configured; } catch { /* ignore */ }
+    if (configured) {
+      try {
+        // The tile is mandatory: ensure it EXISTS (create if missing), not just
+        // reconcile. The shortcut store may not be ready this early, so retry
+        // with exponential backoff until it is.
+        const ensureTile = async (attempt: number) => {
+          try {
+            if ((await reconcileRommTile()) != null) return;   // found + repaired
+            if ((await addRommShortcut()) != null) return;     // created
+          } catch (e) { console.error('[RomM] ensure tile', e); }
+          if (attempt < 5) {
+            const delay = Math.min(4000 * Math.pow(1.5, attempt), 15000);
+            setTimeout(() => { ensureTile(attempt + 1); }, delay);
+          }
+        };
+        await ensureTile(0);
+      } catch (e) { console.error('[RomM] shortcut ensure', e); }
+    } else if (!_setupAutoOpened) {
+      // No connection yet: auto-open the wizard once per session (the tile is
+      // created on wizard finish). Never re-trap the user after setup.
+      _setupAutoOpened = true;
+      setTimeout(() => { try { Navigation.Navigate("/romm-sync-setup"); } catch (e) { console.error('[RomM] setup auto-open', e); } }, 1500);
+    }
   })();
 
   return {
