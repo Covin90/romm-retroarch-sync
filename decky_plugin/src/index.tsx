@@ -37,6 +37,10 @@ const restoreSaveVersion = callable<[number, number, string, boolean], any>("res
 // Game Browser
 const getLibraryGroups = callable<[string], any>("get_library_groups");
 const getLibraryGames = callable<[string, string], any>("get_library_games");
+const _dbg = callable<[string], any>("debug_log");
+// Fire-and-forget timing log to the backend log file (UI thread has no console
+// in Gaming Mode). Gated so it's free when tracing is off.
+const dbg = (msg: string) => { try { _dbg(msg); } catch {} };
 const getGameCover = callable<[number, boolean], any>("get_game_cover");
 const getImage = callable<[string], any>("get_image");
 const clearCoverCache = callable<[], any>("clear_cover_cache");
@@ -2992,6 +2996,7 @@ function LibraryGamesPage() {
 
   useEffect(() => {
     let alive = true;
+    const _t0 = performance.now();
     (async () => {
       if (!group) { setLoading(false); return; }
       setBgUri(null);
@@ -2999,11 +3004,13 @@ function LibraryGamesPage() {
       const hit = _libGamesCache.get(ck);
       if (hit) {
         // Instant: real covers slide in with the carousel, no pop-in.
+        dbg(`open '${group.key}' list=cache n=${hit.length} +${(performance.now()-_t0).toFixed(0)}ms`);
         setGames(hit); setLoading(false);
       } else {
         setLoading(true);
         try {
           const res = await getLibraryGames(mode, group.key);
+          dbg(`open '${group.key}' list=fetch n=${(res?.games||[]).length} +${(performance.now()-_t0).toFixed(0)}ms`);
           if (res?.success) libCacheSet(ck, res.games || []);
           if (alive) setGames(res?.success ? (res.games || []) : []);
         } catch (e) {
@@ -3028,6 +3035,32 @@ function LibraryGamesPage() {
   // first tile so the user can navigate straight into the grid — no extra DOWN
   // press to leave the header carousel.
   const firstTileRef = useAutoFocus(!loading && games.length > 0, group?.key);
+
+  // Progressive mount: a big platform (e.g. GBA = 480 games) mounted all tiles
+  // in one commit → ~360ms layout before anything showed. Render the first
+  // screenful immediately, then grow the count in chunks across frames so first
+  // paint is fast and the rest fill in without blocking. Covers are viewport-
+  // gated already, so off-screen appended tiles cost almost nothing.
+  const GRID_FIRST = 60, GRID_CHUNK = 120;
+  const [visN, setVisN] = useState(() => Math.min(games.length || 0, GRID_FIRST));
+  useEffect(() => { setVisN(Math.min(games.length || 0, GRID_FIRST)); }, [group?.key]);
+  useEffect(() => {
+    if (visN >= games.length) return;
+    const id = requestAnimationFrame(() =>
+      setVisN((n) => Math.min(games.length, n + GRID_CHUNK)));
+    return () => cancelAnimationFrame(id);
+  }, [visN, games.length]);
+
+  // Timing probe: how long from games-set to the grid being laid out (mount of
+  // the FIRST batch of GameTiles). Logged once per group open to the backend log.
+  const _paintT = useRef<number>(0);
+  useEffect(() => { if (games.length) _paintT.current = performance.now(); }, [group?.key]);
+  useLayoutEffect(() => {
+    if (!games.length || !_paintT.current) return;
+    const ms = performance.now() - _paintT.current;
+    dbg(`grid '${group?.key}' first-paint n=${Math.min(games.length, GRID_FIRST)}/${games.length} layout+${ms.toFixed(0)}ms`);
+    _paintT.current = 0;
+  }, [games]);
 
   // Stable identity across renders so memo(GameTile) isn't invalidated every
   // time the page re-renders (e.g. on background-art / progress updates). The
@@ -3405,7 +3438,7 @@ function LibraryGamesPage() {
             gap: '18px 16px', padding: '6px 16px',
           }}
         >
-          {games.map((g, i) => (
+          {games.slice(0, visN).map((g, i) => (
             <GameTile key={g.rom_id} game={g} onOpen={openGame} onActiveCover={setBgUri}
               focusRef={i === 0 ? firstTileRef : undefined} />
           ))}
