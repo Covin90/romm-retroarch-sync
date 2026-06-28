@@ -2268,7 +2268,7 @@ function v2Page(children: any, bgUri: string | null = null) {
     <div className="romm-ui" style={{
       fontFamily: V2.font, color: V2.fg, background: V2.bg,
       position: 'relative', overflowY: 'auto', height: 'calc(100vh - 40px)',
-      marginTop: '40px', scrollPaddingTop: '64px',
+      marginTop: '40px', scrollPaddingTop: '96px',
     }}>
       <style>{V2_FOCUS_STYLE}{V2_ROW_STYLE}</style>
       <V2Bg uri={bgUri} />
