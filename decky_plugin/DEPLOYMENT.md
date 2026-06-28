@@ -57,13 +57,21 @@ Notes:
 
 ## Build & Package (release zip)
 
-Run the following from the **repo root**. `pnpm run package` builds the frontend and restores
-the `py_modules/sync_core.py` symlink via its `postpackage` hook.
+The recipe below is **cwd-independent** — it anchors everything to the repo root via `git`, so
+it works whether you paste it from the repo root or from inside `decky_plugin/`. `pnpm run
+package` builds the frontend and restores the `py_modules/sync_core.py` symlink via its
+`postpackage` hook.
+
+> ⚠️ Always run `pnpm run package` in a **subshell** `(cd decky_plugin && …)` — it leaves the
+> shell in `decky_plugin/`, so a bare `cd decky_plugin && pnpm run package` breaks every
+> repo-root-relative `cp` that follows.
 
 ```bash
-cd /home/covin/romm-retroarch-sync
+# Anchor to the repo root no matter where this is pasted from.
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
 
-# Step 1: Build frontend (auto-restores the symlink afterward)
+# Step 1: Build frontend (auto-restores the symlink afterward). Subshell keeps cwd at ROOT.
 (cd decky_plugin && pnpm run package)
 
 # Step 2: Package into the versioned zip.
