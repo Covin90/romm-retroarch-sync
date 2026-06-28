@@ -15,7 +15,7 @@ import {
   MenuItem,
 } from "@decky/ui";
 import { callable, definePlugin, toaster, routerHook, openFilePicker, FileSelectionType } from "@decky/api";
-import { useState, useEffect, useLayoutEffect, useRef, forwardRef, type Ref, type ChangeEvent } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, forwardRef, memo, type Ref, type ChangeEvent } from "react";
 import { FaSync, FaTrash, FaCog, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight, FaCheckCircle, FaUsers, FaExternalLinkAlt, FaPuzzlePiece, FaBoxOpen, FaClone, FaRedo, FaClock, FaCheck, FaEllipsisH, FaGlobe } from "react-icons/fa";
 import { BsGearFill } from "react-icons/bs";
 import { MdVerified } from "react-icons/md";
@@ -556,7 +556,12 @@ function useAutoFocus(ready: boolean, dep?: any) {
   return ref;
 }
 
-function GameTile({ game, onOpen, onActiveCover, focusRef }:
+// memo: a focus move updates the parent page's background-art state, which
+// would otherwise re-render every tile in the grid on each dpad press (felt
+// like the whole grid remounting). With stable props (game ref, useCallback'd
+// onOpen, useState setter onActiveCover) only the newly focused/blurred tile
+// re-renders for its own scale animation.
+const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef }:
   { game: LibGame; onOpen: (g: LibGame) => void; onActiveCover: (uri: string | null) => void; focusRef?: React.MutableRefObject<any> }) {
   const wide = !!game.screenshot;
   // Wide cards adopt the screenshot's NATURAL aspect ratio (RomM derives the
@@ -922,7 +927,7 @@ function GameTile({ game, onOpen, onActiveCover, focusRef }:
       </div>
     </Focusable>
   );
-}
+});
 
 // One image fetched by RomM resource path (collection mosaic cells), base64
 // via the backend, cached. Renders nothing visible until loaded.
@@ -2993,12 +2998,18 @@ function LibraryGamesPage() {
   // press to leave the header carousel.
   const firstTileRef = useAutoFocus(!loading && games.length > 0, group?.key);
 
-  const openGame = (g: LibGame) => {
+  // Stable identity across renders so memo(GameTile) isn't invalidated every
+  // time the page re-renders (e.g. on background-art / progress updates). The
+  // latest `group` is read through a ref.
+  const openGameImpl = (g: LibGame) => {
     _libGameHolder = g;
     // Return to THIS collection/platform's games page when backing out.
     _libGameOrigin = group ? `/romm-sync-library/${encodeURIComponent(group.key)}` : "/romm-sync-library";
     Navigation.Navigate(`/romm-sync-game/${g.rom_id}`);
   };
+  const openGameImplRef = useRef(openGameImpl);
+  openGameImplRef.current = openGameImpl;
+  const openGame = useRef((g: LibGame) => openGameImplRef.current(g)).current;
 
   // L1 / R1 page through sibling groups (same mode) without backing out.
   // (`siblings` is declared above for the prefetch logic.)
