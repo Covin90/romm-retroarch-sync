@@ -2351,44 +2351,39 @@ const V2SearchField = forwardRef(function V2SearchField(
 // Used by the setup wizard so its fields match the library search bar.
 function V2TextField({ label, value, onChange, password, placeholder, icon, mono, maxLength }:
   { label?: string; value: string; onChange: (v: string) => void; password?: boolean; placeholder?: string; icon?: any; mono?: boolean; maxLength?: number }) {
-  const inputRef = useRef<HTMLInputElement | null>(null);
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
   const [focused, setFocused] = useState(false);
+  const uid = useRef(`v2tf-${Math.random().toString(36).slice(2, 8)}`).current;
+  useEffect(() => {
+    if (placeholder) {
+      const input = wrapperRef.current?.querySelector('input');
+      if (input) input.setAttribute('placeholder', placeholder);
+    }
+  }, [placeholder]);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%' }}>
       {label && <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: V2.fgMuted, textAlign: 'center' }}>{label}</div>}
-      <Focusable noFocusRing onActivate={() => inputRef.current?.focus()} style={{ borderRadius: V2.radiusMd }}>
-        <style>{`.v2-field-input::placeholder{color:rgba(255,255,255,0.40)}`}</style>
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: '10px', height: '40px', padding: '0 12px',
-          borderRadius: V2.radiusMd,
-          background: focused ? V2.surfaceHover : 'rgba(255,255,255,0.045)',
-          border: `1px solid ${focused ? V2.brand : V2.border}`,
-          boxShadow: focused ? `0 0 0 3px rgba(139,116,232,0.22)` : 'none',
-          transition: 'background 0.2s, border-color 0.2s, box-shadow 0.2s',
-        }}>
-          {icon && <span style={{ flexShrink: 0, color: focused ? V2.brandHover : V2.fgMuted, display: 'inline-flex' }}>{icon}</span>}
-          <input
-            ref={inputRef}
-            className="v2-field-input"
-            type={password ? 'password' : 'text'}
+      <style>{`.${uid} label{display:none!important}.${uid}>div{background:transparent!important;border:none!important;box-shadow:none!important;padding:0!important;margin:0!important}.${uid}>div>div{background:transparent!important;border:none!important;box-shadow:none!important;padding:0!important}.${uid} input{background:transparent!important;border:none!important;outline:none!important;box-shadow:none!important;color:${V2.fg}!important;font-size:${mono?'20px':'14px'}!important;font-weight:${mono?'700':'400'}!important;font-family:${mono?'monospace':'inherit'}!important;padding:0!important;margin:0!important;height:auto!important;min-height:0!important;caret-color:${V2.brand}!important;text-align:center!important;letter-spacing:${mono?'.3em':'normal'}!important;text-indent:${mono?'.3em':0}!important;text-transform:${mono?'uppercase':'none'}!important}.${uid} input::placeholder{color:rgba(255,255,255,0.40)!important}`}</style>
+      <div ref={wrapperRef} className={uid} style={{
+        display: 'flex', alignItems: 'center', gap: '10px', height: '40px', padding: '0 12px',
+        borderRadius: V2.radiusMd,
+        background: focused ? V2.surfaceHover : 'rgba(255,255,255,0.045)',
+        border: `1px solid ${focused ? V2.brand : V2.border}`,
+        boxShadow: focused ? `0 0 0 3px rgba(139,116,232,0.22)` : 'none',
+        transition: 'background 0.2s, border-color 0.2s, box-shadow 0.2s',
+      }}>
+        {icon && <span style={{ flexShrink: 0, color: focused ? V2.brandHover : V2.fgMuted, display: 'inline-flex' }}>{icon}</span>}
+        <div style={{ flex: '1 1 auto', minWidth: 0 }}
+          onFocusCapture={() => setFocused(true)}
+          onBlurCapture={() => setFocused(false)}
+        >
+          <TextField
             value={value}
-            placeholder={placeholder}
-            maxLength={maxLength}
-            onChange={(e: ChangeEvent<HTMLInputElement>) => onChange(e.target.value)}
-            onFocus={() => setFocused(true)}
-            onBlur={() => setFocused(false)}
-            style={{
-              flex: '1 1 auto', minWidth: 0, background: 'transparent', border: 'none', outline: 'none',
-              color: V2.fg, fontFamily: mono ? 'monospace' : 'inherit', padding: 0, textAlign: 'center',
-              fontSize: mono ? '20px' : '14px',
-              fontWeight: mono ? 700 : 400,
-              letterSpacing: mono ? '0.3em' : 'normal',
-              textIndent: mono ? '0.3em' : 0, // balance the trailing letter-spacing so text stays centered
-              textTransform: mono ? 'uppercase' : 'none',
-            }}
+            bIsPassword={password}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => onChange(maxLength != null ? e.target.value.slice(0, maxLength) : e.target.value)}
           />
         </div>
-      </Focusable>
+      </div>
     </div>
   );
 }
@@ -2399,46 +2394,40 @@ function V2TextField({ label, value, onChange, password, placeholder, icon, mono
 // the caret lands on the next empty slot.
 function PairCodeField({ label, value, onChange }:
   { label?: string; value: string; onChange: (v: string) => void }) {
-  const inputRef = useRef<HTMLInputElement | null>(null);
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
   const [focused, setFocused] = useState(false);
   const digits = value.replace(/-/g, '');
   const font: any = { fontFamily: 'monospace', fontSize: '20px', fontWeight: 700, letterSpacing: '0.3em', textIndent: '0.3em' };
-  // Mask cells: typed chars bright, remaining slots a muted '*', dash between.
   const cells: any[] = [];
   for (let i = 0; i < 8; i++) {
     const ch = digits[i];
     cells.push(<span key={i} style={{ color: ch ? V2.fg : V2.fgMuted }}>{ch || '*'}</span>);
     if (i === 3) cells.push(<span key="dash" style={{ color: digits.length > 4 ? V2.fg : V2.fgMuted }}>-</span>);
   }
+  const uid = useRef(`v2pf-${Math.random().toString(36).slice(2, 8)}`).current;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%' }}>
       {label && <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: V2.fgMuted, textAlign: 'center' }}>{label}</div>}
-      <Focusable noFocusRing onActivate={() => inputRef.current?.focus()} style={{ borderRadius: V2.radiusMd }}>
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'center', height: '40px', padding: '0 12px',
-          borderRadius: V2.radiusMd,
-          background: focused ? V2.surfaceHover : 'rgba(255,255,255,0.045)',
-          border: `1px solid ${focused ? V2.brand : V2.border}`,
-          boxShadow: focused ? `0 0 0 3px rgba(139,116,232,0.22)` : 'none',
-          transition: 'background 0.2s, border-color 0.2s, box-shadow 0.2s',
-        }}>
-          <div style={{ position: 'relative', display: 'inline-block' }}>
-            <div style={{ ...font, whiteSpace: 'pre', pointerEvents: 'none' }}>{cells}</div>
-            <input
-              ref={inputRef}
-              value={value}
-              maxLength={9}
-              onChange={(e: ChangeEvent<HTMLInputElement>) => onChange(e.target.value)}
-              onFocus={() => setFocused(true)}
-              onBlur={() => setFocused(false)}
-              style={{
-                position: 'absolute', inset: 0, width: '100%', background: 'transparent', border: 'none',
-                outline: 'none', color: 'transparent', caretColor: V2.brand, padding: 0, textTransform: 'uppercase', ...font,
-              }}
-            />
-          </div>
+      <style>{`.${uid} label{display:none!important}.${uid}>div{background:transparent!important;border:none!important;box-shadow:none!important;padding:0!important;margin:0!important}.${uid}>div>div{background:transparent!important;border:none!important;box-shadow:none!important;padding:0!important}.${uid} input{position:absolute!important;inset:0!important;width:100%!important;background:transparent!important;border:none!important;outline:none!important;box-shadow:none!important;color:transparent!important;caret-color:${V2.brand}!important;padding:0!important;margin:0!important;height:100%!important;min-height:0!important;font-family:monospace!important;font-size:20px!important;font-weight:700!important;letter-spacing:.3em!important;text-indent:.3em!important;text-transform:uppercase!important}`}</style>
+      <div ref={wrapperRef} className={uid} style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'center', height: '40px', padding: '0 12px',
+        borderRadius: V2.radiusMd,
+        background: focused ? V2.surfaceHover : 'rgba(255,255,255,0.045)',
+        border: `1px solid ${focused ? V2.brand : V2.border}`,
+        boxShadow: focused ? `0 0 0 3px rgba(139,116,232,0.22)` : 'none',
+        transition: 'background 0.2s, border-color 0.2s, box-shadow 0.2s',
+      }}>
+        <div style={{ position: 'relative', display: 'inline-block', width: '100%' }}
+          onFocusCapture={() => setFocused(true)}
+          onBlurCapture={() => setFocused(false)}
+        >
+          <div style={{ ...font, whiteSpace: 'pre', pointerEvents: 'none' }}>{cells}</div>
+          <TextField
+            value={value}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => onChange(e.target.value.slice(0, 9))}
+          />
         </div>
-      </Focusable>
+      </div>
     </div>
   );
 }
