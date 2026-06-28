@@ -532,6 +532,9 @@ function GameTile({ game, onOpen, onActiveCover, focusRef }:
   const discsTried = useRef(false);
   const pickableDiscs = discs.filter((d) => !d.is_m3u);
   const isMultiDisc = !!game.is_multi_disc && dl;
+  // A downloaded multi-FILE ROM whose members are regional variants (no disc
+  // playlist). Detected once the on-disk entries are fetched (on focus).
+  const discsAreRegion = discs.length > 0 && discs.every((d) => d.is_region);
   const isMultiRegion = !!game.region_count && game.region_count > 1;
   const [activeRegionId, setActiveRegionId] = useState<number>(game.rom_id);
   const [downloadedRegionIds, setDownloadedRegionIds] = useState<Set<number>>(new Set());
@@ -553,17 +556,22 @@ function GameTile({ game, onOpen, onActiveCover, focusRef }:
       if (r?.success) setDownloadedRegionIds(new Set(r.downloaded_ids || []));
     } catch { /* leave empty */ }
   };
-  // Hold A to open the disc picker; a quick press still launches. We arm a
-  // timer on A-down and, if it elapses while held, open the menu and flag the
-  // press so the subsequent onActivate is suppressed.
+  // Hold A to open the disc/region picker; a quick press launches. The OK
+  // button's onActivate fires on the PRESS edge on Steam Deck, so we can't let
+  // it launch (it would fire before a hold is recognised). Instead, for multi
+  // games launch is driven entirely from the release handler: arm a timer on
+  // A-down that opens the picker at 500ms; on release, if the timer hasn't fired
+  // yet it was a short press → launch. onActivate is suppressed for multi games.
+  const isMulti = isMultiRegion || isMultiDisc;
   const longFired = useRef(false);
   const pressTimer = useRef<any>(null);
   const onBtnDown = (e: any) => {
-    if (e?.detail?.button === GamepadButton.OK && (isMultiRegion || isMultiDisc)) {
+    if (e?.detail?.button === GamepadButton.OK && isMulti) {
       longFired.current = false;
       if (pressTimer.current) clearTimeout(pressTimer.current);
       pressTimer.current = setTimeout(() => {
         longFired.current = true;
+        pressTimer.current = null;
         if (isMultiRegion) {
           const allSiblings = game.sibling_roms || [];
           openRegionPicker(game.rom_id, game.name, allSiblings, downloadedRegionIds,
@@ -576,8 +584,13 @@ function GameTile({ game, onOpen, onActiveCover, focusRef }:
     }
   };
   const onBtnUp = (e: any) => {
-    if (e?.detail?.button === GamepadButton.OK && pressTimer.current) {
-      clearTimeout(pressTimer.current); pressTimer.current = null;
+    if (e?.detail?.button === GamepadButton.OK && isMulti) {
+      // Short press (timer still pending) → launch the default; long press
+      // already opened the picker, so do nothing.
+      if (pressTimer.current) {
+        clearTimeout(pressTimer.current); pressTimer.current = null;
+        if (!longFired.current) primary();
+      }
     }
   };
 
@@ -672,7 +685,12 @@ function GameTile({ game, onOpen, onActiveCover, focusRef }:
   return (
     <Focusable noFocusRing
       ref={focusRef}
-      onActivate={() => { if (longFired.current) { longFired.current = false; return; } primary(); }}
+      onActivate={() => {
+        // Multi games drive launch from the release handler (onBtnUp) so a hold
+        // can open the picker without the press-edge activation launching first.
+        if (isMulti) { longFired.current = false; return; }
+        primary();
+      }}
       onClick={primary}
       onButtonDown={onBtnDown}
       onButtonUp={onBtnUp}
@@ -680,7 +698,7 @@ function GameTile({ game, onOpen, onActiveCover, focusRef }:
       onSecondaryActionDescription="Details"
       onOptionsButton={() => { if (dl) requestDelete(); }}
       onOptionsActionDescription={dl ? (confirmDelete ? 'Confirm delete' : 'Delete') : undefined}
-      onOKActionDescription={dl ? (isMultiRegion ? 'Launch (hold: regions)' : isMultiDisc ? 'Launch (hold: discs)' : 'Launch') : 'Download'}
+      onOKActionDescription={dl ? (isMultiRegion ? 'Launch (hold: regions)' : isMultiDisc ? (discsAreRegion ? 'Launch (hold: regions)' : 'Launch (hold: discs)') : 'Launch') : 'Download'}
       onFocus={() => { setFocused(true); activate(); ensureDiscs(); ensureSiblings(); }}
       onBlur={() => setFocused(false)}
       onMouseEnter={() => { setFocused(true); activate(); ensureDiscs(); ensureSiblings(); }}
@@ -763,7 +781,9 @@ function GameTile({ game, onOpen, onActiveCover, focusRef }:
             background: 'rgba(0,0,0,0.78)', border: '1px solid rgba(255,255,255,0.12)', color: V2.fg,
             opacity: focused ? 0 : 1, transition: 'opacity 0.18s ease',
           }}>
-            <FaClone size={9} />{game.disc_count || pickableDiscs.length || ''}
+            {discsAreRegion
+              ? <><FaGlobe size={9} />{discs.length || game.disc_count || ''}</>
+              : <><FaClone size={9} />{game.disc_count || pickableDiscs.length || ''}</>}
           </div>
         )}
 
@@ -3956,7 +3976,7 @@ function SaveDataTab({ romId }: { romId: number }) {
 
 // ── Multi-disc helpers (shared by the cover tile, the Play button and the
 // Files tab) ────────────────────────────────────────────────────────────────
-type LocalDisc = { name: string; path: string; is_m3u: boolean };
+type LocalDisc = { name: string; path: string; is_m3u: boolean; is_region?: boolean };
 
 // Friendly label for a disc file: keep the "(Disc N)" tail when present, else
 // fall back to the bare filename (sans extension).
@@ -3964,6 +3984,15 @@ function discDisplayLabel(fname: string): string {
   const base = fname.replace(/\.[^.]+$/, '');
   const m = base.match(/\(dis[ck]\s*\d+[^)]*\)/i);
   return m ? m[0].replace(/[()]/g, '') : base;
+}
+
+// Friendly label for a regional variant file: surface the "(Region)" tag
+// (e.g. "(Italy)", "(USA, Europe)") that RomM/No-Intro dumps carry, else the
+// bare filename (sans extension).
+function regionDisplayLabel(fname: string): string {
+  const base = fname.replace(/\.[^.]+$/, '');
+  const m = base.match(/\(([^)]+)\)\s*$/);
+  return m ? m[1] : base;
 }
 
 async function runLaunch(romId: number, gameName: string, disc: string | null,
@@ -3994,6 +4023,24 @@ function discMark(active: boolean) {
 // playlist persists the .m3u name so a later plain Play resumes the playlist.
 function openDiscPicker(romId: number, gameName: string, discs: LocalDisc[],
   last?: string, setBusy?: (b: any) => void, onLaunched?: () => void) {
+  // A regional multi-file ROM has no playlist — every entry is a standalone
+  // region. Present it as a region picker (no "all discs" default).
+  const isRegion = discs.length > 0 && discs.every((d) => d.is_region);
+  if (isRegion) {
+    // Default to the remembered region, else the first one.
+    const activeName = (last && discs.some((d) => d.name === last)) ? last : discs[0]?.name;
+    showContextMenu(
+      <Menu label="Select region">
+        {discs.map((d) => (
+          <MenuItem key={d.name} onSelected={() =>
+            runLaunch(romId, gameName, d.name, regionDisplayLabel(d.name), setBusy, onLaunched)}>
+            {discMark(d.name === activeName)}{regionDisplayLabel(d.name)}
+          </MenuItem>
+        ))}
+      </Menu>
+    );
+    return;
+  }
   const m3u = discs.find((d) => d.is_m3u);
   const pickable = discs.filter((d) => !d.is_m3u);
   // The playlist is the active default when it is the remembered choice, or when

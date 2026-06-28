@@ -104,9 +104,51 @@ logging.getLogger('urllib3').setLevel(logging.WARNING)
 _LAUNCHABLE_DISC_EXTS = ('.m3u', '.chd', '.cue', '.iso', '.pbp',
                           '.ccd', '.gdi', '.cdi', '.nrg')
 
+# Auxiliary (non-game) files that may sit alongside ROMs inside a download
+# folder: playlists, cover art, saves/states, and metadata. Used to isolate the
+# actual standalone game files when classifying a multi-FILE ROM (regional
+# variants) — must match Plugin._NON_GAME_EXTS.
+_NON_GAME_EXTS = (
+    '.m3u', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp',
+    '.srm', '.sav', '.dsv', '.mcr', '.eep', '.fla', '.mpk', '.sra',
+    '.state', '.auto', '.txt', '.nfo', '.xml', '.dat', '.json', '.cue',
+)
+
+
+def _list_standalone_games(folder):
+    """Return the standalone game files inside a folder (regional/multi-file ROM).
+
+    A RomM multi-FILE ROM (e.g. one entry whose member files are per-region
+    cartridge dumps like .nds) extracts to a folder containing the game files
+    plus a RomM-generated .m3u. Those files are NOT discs — each is a complete,
+    independently bootable game — so the .m3u must never be launched (it would
+    hand the emulator two full games as "discs"). This isolates the real games:
+    every file that is not auxiliary (playlist/cover/save/metadata) and not a
+    disc image. Returns a name-sorted list of Path objects.
+    """
+    games = []
+    for f in folder.rglob('*'):
+        if not f.is_file():
+            continue
+        ext = f.suffix.lower()
+        if ext in _NON_GAME_EXTS or ext in _LAUNCHABLE_DISC_EXTS:
+            continue
+        # State slots are ".state", ".state1", ".state.auto", etc.
+        if ext.startswith('.state'):
+            continue
+        games.append(f)
+    return sorted(games, key=lambda x: x.name.lower())
+
 
 def _detect_multi_disc(local_path, is_downloaded):
-    """Return (is_multi_disc, disc_count) for the downloaded game."""
+    """Return (is_multi_disc, disc_count) for the downloaded game.
+
+    Covers both flavours of "multiple bootable files in one folder":
+      - true multi-DISC games (disc images / an .m3u playlist), and
+      - multi-FILE ROMs whose members are regional cartridge variants.
+    Both are surfaced through the same picker; region-vs-disc labelling is
+    resolved later from the on-disk entries (see get_local_discs).
+    """
     if not is_downloaded:
         return False, 0
     p = Path(local_path)
@@ -115,7 +157,11 @@ def _detect_multi_disc(local_path, is_downloaded):
     if p.is_dir():
         launchable = [f for f in p.rglob('*')
                       if f.is_file() and f.suffix.lower() in _LAUNCHABLE_DISC_EXTS]
-        return len(launchable) > 1, len(launchable)
+        if len(launchable) > 1:
+            return True, len(launchable)
+        # No disc set — fall back to standalone game files (regional variants).
+        games = _list_standalone_games(p)
+        return len(games) > 1, len(games)
     return False, 0
 
 
@@ -368,6 +414,10 @@ class Plugin:
                             'fs_size_bytes':   rom.get('fs_size_bytes', 0),
                             'platform_id':     rom.get('platform_id'),
                             'platform_slug':   rom.get('platform_slug'),
+                            # Member files (multi-disc / multi-FILE regional ROMs);
+                            # the save-sync matcher maps a launched member back to
+                            # this parent ROM. Requires with_files=true in get_roms.
+                            'files':           rom.get('files', []),
                         },
                     })
                 logging.info(f"Loaded {len(self._available_games)} games")
@@ -741,6 +791,7 @@ class Plugin:
                                     'fs_size_bytes': rom.get('fs_size_bytes', 0),
                                     'platform_id': rom.get('platform_id'),
                                     'platform_slug': rom.get('platform_slug'),
+                                    'files': rom.get('files', []),
                                 },
                             }
 
@@ -798,6 +849,7 @@ class Plugin:
                                 'fs_size_bytes': rom.get('fs_size_bytes', 0),
                                 'platform_id': rom.get('platform_id'),
                                 'platform_slug': rom.get('platform_slug'),
+                                'files': rom.get('files', []),
                             },
                         })
                     logging.info(f"Full refresh: loaded {len(self._available_games)} games")
@@ -1607,12 +1659,23 @@ class Plugin:
     _LAUNCHABLE_DISC_EXTS = ('.m3u', '.chd', '.cue', '.iso', '.pbp',
                              '.ccd', '.gdi', '.cdi', '.nrg')
 
-    def _list_local_discs(self, local_path):
-        """Return launchable disc entries inside a downloaded multi-disc folder.
+    # Auxiliary (non-game) extensions — must match module-level _NON_GAME_EXTS.
+    _NON_GAME_EXTS = _NON_GAME_EXTS
 
-        Each entry: {name, path, is_m3u}. Returns [] for a single-file ROM or
-        when nothing launchable is found. The .m3u (whole-game playlist) sorts
-        first so it reads as the natural "all discs" default.
+    def _list_local_discs(self, local_path):
+        """Return launchable entries inside a downloaded multi-file folder.
+
+        Each entry: {name, path, is_m3u, is_region}. Returns [] for a single-file
+        ROM or when nothing launchable is found.
+
+        Two folder shapes are handled:
+          - true multi-DISC games: disc images + an .m3u playlist. The .m3u sorts
+            first so it reads as the natural "all discs" default, and is_region is
+            False on every entry.
+          - multi-FILE regional ROMs: standalone game files (e.g. per-region
+            .nds). Here the .m3u is a RomM artefact that would mis-boot the
+            emulator, so it is excluded entirely and each game is a region entry
+            (is_region True). The caller boots one variant, never a playlist.
         """
         try:
             p = Path(local_path)
@@ -1622,9 +1685,18 @@ class Plugin:
             for f in sorted(p.rglob('*'), key=lambda x: x.name.lower()):
                 if f.is_file() and f.suffix.lower() in self._LAUNCHABLE_DISC_EXTS:
                     discs.append({'name': f.name, 'path': str(f),
-                                  'is_m3u': f.suffix.lower() == '.m3u'})
-            # If a .cue exists for a disc, drop a bare .iso/.bin twin is already
-            # handled by the ext filter; just float the .m3u to the top.
+                                  'is_m3u': f.suffix.lower() == '.m3u',
+                                  'is_region': False})
+            # A real disc set has 2+ disc images (the .m3u doesn't count). When
+            # there is no such set, treat the folder as a regional multi-file ROM
+            # and surface the standalone game files instead of the stray .m3u.
+            disc_images = [d for d in discs if not d['is_m3u']]
+            if len(disc_images) < 2:
+                games = _list_standalone_games(p)
+                if len(games) > 1:
+                    return [{'name': f.name, 'path': str(f),
+                             'is_m3u': False, 'is_region': True} for f in games]
+            # Float the .m3u to the top so it is the default "all discs" entry.
             discs.sort(key=lambda d: (not d['is_m3u'], d['name'].lower()))
             return discs
         except Exception as e:
@@ -1635,9 +1707,10 @@ class Plugin:
         """Resolve a game's local_path (file or folder) to the file to boot.
 
         - Single-file ROM: returns local_path unchanged.
-        - Folder + explicit `disc` filename: returns that disc's path.
-        - Folder, no disc: prefers the .m3u playlist (in-game swap), else the
-          first launchable disc.
+        - Folder + explicit `disc` filename: returns that disc/region's path.
+        - Folder, no disc: for a true disc set, prefers the .m3u playlist
+          (in-game swap); for a regional multi-file ROM, the first variant
+          (there is no playlist — booting it would mis-launch).
         Returns None when nothing launchable is present.
         """
         p = Path(local_path)
@@ -1675,7 +1748,11 @@ class Plugin:
             # Drop a stale remembered name if that disc no longer exists.
             if last and not any(d['name'] == last for d in discs):
                 last = ''
-            return {'success': True, 'discs': discs, 'last': last}
+            # Regional multi-file ROM (variants, no playlist) vs true disc set:
+            # lets the UI title the picker "region" and skip "all discs".
+            is_region = bool(discs) and all(d.get('is_region') for d in discs)
+            return {'success': True, 'discs': discs, 'last': last,
+                    'is_region': is_region}
         except Exception as e:
             logging.error(f"get_local_discs error: {e}", exc_info=True)
             return {'success': False, 'discs': [], 'last': '', 'message': str(e)}

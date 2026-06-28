@@ -2050,6 +2050,34 @@ class RomMClient:
                 main_rom = candidates[0]
                 sibling_files = [r for r in group_roms if r is not main_rom]
 
+            # RomM's `sibling_roms` lumps together everything that maps to the
+            # same game. When the group contains a *folder* ROM (no extension —
+            # a multi-file ROM such as a multi-disc game or a bundle of regional
+            # variants), RomM exposes each constituent file as its own child ROM
+            # too (e.g. "G-Police (Italy) (Disc 1).chd", or the regional .nds
+            # files inside "Pokémon HeartGold Version"). Those children are NOT
+            # independently downloadable: GET /api/roms/{child}/content 404s and
+            # only the parent folder serves a zip of everything. So if a folder
+            # ROM exists in the group, drop the file-member siblings — the folder
+            # itself is the single downloadable unit. Groups with no folder ROM
+            # (e.g. separate per-region .nsp/.chd ROMs) keep all their siblings.
+            has_folder = any(
+                not (r.get('fs_extension') or '') for r in group_roms
+            )
+            if has_folder:
+                drop_ids = {
+                    r.get('id') for r in group_roms
+                    if r is not main_rom and (r.get('fs_extension') or '')
+                }
+                if drop_ids:
+                    sibling_files = [s for s in sibling_files
+                                     if s.get('id') not in drop_ids]
+                    if main_rom.get('sibling_roms'):
+                        main_rom['sibling_roms'] = [
+                            s for s in main_rom['sibling_roms']
+                            if s.get('id') not in drop_ids
+                        ]
+
             # Attach siblings to the main ROM
             if sibling_files:
                 main_rom['_sibling_files'] = sibling_files
@@ -4488,27 +4516,27 @@ class RetroArchInterface:
         """Launch a game in RetroArch with multi-installation support"""
         if not self.retroarch_executable:
             return False, "RetroArch executable not found"
-        
+
         # Special handling for RetroDECK
         if 'retrodeck' in self.retroarch_executable.lower():
             return self.launch_game_retrodeck(rom_path)
-    
+
         # If no core specified, try to suggest one
         if not core_name and platform_name:
             core_name, core_path = self.suggest_core_for_platform(platform_name)
             if not core_name:
                 return False, f"No suitable core found for platform: {platform_name}"
-        
+
         # Get core path
         available_cores = self.get_available_cores()
         if core_name not in available_cores:
             return False, f"Core not found: {core_name}"
-        
+
         core_path = available_cores[core_name]
-        
+
         try:
             import subprocess
-            
+
             # Build command based on RetroArch type - REPLACE THIS SECTION
             if 'retrodeck' in self.retroarch_executable.lower():
                 # RetroDECK launches games differently - try multiple approaches
@@ -4519,7 +4547,7 @@ class RetroArchInterface:
                 cmd = ['snap', 'run', 'retroarch', '-L', core_path, str(rom_path)]
             else:
                 cmd = [self.retroarch_executable, '-L', core_path, str(rom_path)]
-            
+
             logging.debug(f"Launching: {' '.join(cmd)}")
             logging.debug(f"ROM path exists: {os.path.exists(rom_path)}, Core path exists: {os.path.exists(core_path)}")
 
@@ -6886,7 +6914,21 @@ class AutoSyncManager:
 
                 if fs_name_no_ext and (fs_name_no_ext == save_basename or fs_name_no_ext == clean_basename):
                     return game['rom_id']
-                
+
+                # Multi-disc / multi-FILE ROMs: the save is named after the
+                # launched member file (e.g. a per-region "...HeartGold (Italy)"),
+                # which is one entry in the parent ROM's `files` array, not its
+                # fs_name. Match those members and attribute the save to the parent
+                # ROM (multi-file ROMs have no per-member rom_id). Requires
+                # with_files=true on the ROM list (see get_roms).
+                for rf in (rom_data.get('files') or []):
+                    rf_name = rf.get('file_name', '')
+                    if not rf_name:
+                        continue
+                    rf_stem = Path(rf_name).stem
+                    if rf_stem in (save_basename, clean_basename):
+                        return game['rom_id']
+
                 # Check regional variants (_sibling_files)
                 if game.get('_sibling_files'):
                     for sibling in game['_sibling_files']:
@@ -7119,6 +7161,24 @@ class AutoSyncManager:
             self.log(f"  [DEBUG] core fallback: {romm_emulator!r} → using first mapped dir {first_mapped.name!r} (will be created)")
             return first_mapped
         return None
+
+    def _save_member_key(self, file_name):
+        """Group key identifying which member/region a save belongs to.
+
+        Multi-file ROMs (e.g. per-region cartridge variants, or multi-disc sets)
+        store a distinct save per member file, named after that file — e.g.
+        "...HeartGold (Italy).srm" vs "...(Spain).srm". To restore each region's
+        own progress we must group by the member basename, not collapse them into
+        one "latest" save. Strips the timestamp tag and extension so revisions of
+        the SAME member collapse together. Single-file ROMs yield one key
+        (unchanged behaviour). Region variants are deliberately kept separate:
+        saves are not guaranteed compatible across regional ROM builds.
+        """
+        import re
+        if not file_name:
+            return ''
+        base = re.sub(r'\s*\[[\d\-\s:_]+\]', '', file_name)
+        return Path(base).stem.lower()
 
     def download_saves_for_specific_game(self, game):
         """Download only the LATEST saves/states for a specific game from RomM with smart overwrite protection"""
@@ -7437,9 +7497,21 @@ class AutoSyncManager:
                 save_base_dir = self.retroarch.save_dirs['saves']
                 user_saves = rom_details.get('user_saves', [])
 
-                latest_save = get_latest_file(user_saves, "save")
+                # Per-member selection: a multi-file/region ROM holds one save per
+                # member file, so pick the latest of EACH member (not one global
+                # latest) — restoring every region's save under its own filename.
+                # Single-file ROMs collapse to a single member (unchanged).
+                saves_by_member = {}
+                for _s in user_saves:
+                    if not isinstance(_s, dict):
+                        continue
+                    saves_by_member.setdefault(
+                        self._save_member_key(_s.get('file_name', '')), []).append(_s)
+                saves_to_process = [get_latest_file(grp, "save")
+                                    for grp in saves_by_member.values()]
+                saves_to_process = [s for s in saves_to_process if s]
 
-                if latest_save:
+                for latest_save in saves_to_process:
                     original_filename = latest_save.get('file_name', '')
                     romm_emulator = latest_save.get('emulator', 'unknown')
 
@@ -7551,10 +7623,14 @@ class AutoSyncManager:
                             if not slot and state.get('file_name'):
                                 slot, _, _ = RomMClient.get_slot_info(state['file_name'])
                             slot_key = slot or 'quicksave'
-                            if slot_key not in slot_groups:
-                                slot_groups[slot_key] = []
-                            slot_groups[slot_key].append(state)
-                        for slot_key, states in slot_groups.items():
+                            # Key by (member/region, slot) so each region keeps its
+                            # own per-slot states; single-file ROMs collapse to one
+                            # member (behaviour unchanged).
+                            group_key = (self._save_member_key(state.get('file_name', '')), slot_key)
+                            if group_key not in slot_groups:
+                                slot_groups[group_key] = []
+                            slot_groups[group_key].append(state)
+                        for (member_key, slot_key), states in slot_groups.items():
                             latest = get_latest_file(states, f"state/{slot_key}")
                             if latest:
                                 slot_states.append(latest)
