@@ -15,7 +15,7 @@ import {
   MenuItem,
 } from "@decky/ui";
 import { callable, definePlugin, toaster, routerHook, openFilePicker, FileSelectionType } from "@decky/api";
-import { useState, useEffect, useLayoutEffect, useRef, forwardRef, memo, type Ref, type ChangeEvent } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useMemo, forwardRef, memo, type Ref, type ChangeEvent } from "react";
 import { FaSync, FaTrash, FaCog, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight, FaCheckCircle, FaUsers, FaExternalLinkAlt, FaPuzzlePiece, FaBoxOpen, FaClone, FaRedo, FaClock, FaCheck, FaEllipsisH, FaGlobe } from "react-icons/fa";
 import { BsGearFill } from "react-icons/bs";
 import { MdVerified } from "react-icons/md";
@@ -3101,6 +3101,16 @@ function LibraryGamesPage() {
   openGameImplRef.current = openGameImpl;
   const openGame = useRef((g: LibGame) => openGameImplRef.current(g)).current;
 
+  // Memoize the tile elements so a background-art re-render (setBgUri fires on
+  // EVERY focus move) reuses the same element references instead of rebuilding
+  // and re-diffing all `visN` tiles — that O(mounted) reconciliation per dpad
+  // press is what made scrolling degrade as more tiles mounted. Recomputed only
+  // when the game list or mounted count actually changes.
+  const gridTiles = useMemo(() => games.slice(0, visN).map((g, i) => (
+    <GameTile key={g.rom_id} game={g} onOpen={openGame} onActiveCover={setBgUri}
+      focusRef={i === 0 ? firstTileRef : undefined} index={i} onFocusIdx={onTileFocus} />
+  )), [games, visN]);
+
   // L1 / R1 page through sibling groups (same mode) without backing out.
   // (`siblings` is declared above for the prefetch logic.)
   // Re-anchor focus on the persistent header row after paging — the games grid
@@ -3464,10 +3474,7 @@ function LibraryGamesPage() {
             gap: '18px 16px', padding: '6px 16px',
           }}
         >
-          {games.slice(0, visN).map((g, i) => (
-            <GameTile key={g.rom_id} game={g} onOpen={openGame} onActiveCover={setBgUri}
-              focusRef={i === 0 ? firstTileRef : undefined} index={i} onFocusIdx={onTileFocus} />
-          ))}
+          {gridTiles}
           {visN < games.length && (
             <div ref={sentinelRef} style={{ gridColumn: '1 / -1', height: '1px' }} />
           )}
