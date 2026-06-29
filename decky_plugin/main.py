@@ -2047,10 +2047,9 @@ class Plugin:
     # -----------------------------------------------------------------------
     # Per-image timing+source to the plugin log — how we tell apart a slow
     # network fetch from a slow disk read, a big payload, or event-loop
-    # contention when covers feel laggy. On by default while we chase the
-    # cover-loading jank (env ROMM_COVER_TRACE=0 disables); only logs non-memory
-    # paths so volume stays low after the first load.
-    _cover_trace = os.environ.get('ROMM_COVER_TRACE', '1') != '0'
+    # contention when covers feel laggy. Off by default; set ROMM_COVER_TRACE=1
+    # to re-enable. Only logs non-memory paths so volume stays low.
+    _cover_trace = bool(os.environ.get('ROMM_COVER_TRACE'))
 
     def _trace_cover(self, kind: str, key, src: str, t0: float, nbytes: int = 0):
         if not self._cover_trace:

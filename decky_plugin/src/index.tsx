@@ -37,10 +37,6 @@ const restoreSaveVersion = callable<[number, number, string, boolean], any>("res
 // Game Browser
 const getLibraryGroups = callable<[string], any>("get_library_groups");
 const getLibraryGames = callable<[string, string], any>("get_library_games");
-const _dbg = callable<[string], any>("debug_log");
-// Fire-and-forget timing log to the backend log file (UI thread has no console
-// in Gaming Mode). Gated so it's free when tracing is off.
-const dbg = (msg: string) => { try { _dbg(msg); } catch {} };
 const getGameCover = callable<[number, boolean], any>("get_game_cover");
 const getImage = callable<[string], any>("get_image");
 const clearCoverCache = callable<[], any>("clear_cover_cache");
@@ -89,21 +85,8 @@ function makeImageQueue(concurrency: number) {
   };
 }
 const imageQueue = makeImageQueue(3);
-// Flip on from the console (`window.__rommTrace = true`) to log per-image
-// wall-clock time as seen by the UI thread — backend + websocket transport +
-// JSON.parse of the (large) base64 payload. Compare against the backend
-// [cover] trace (ROMM_COVER_TRACE=1) to tell apart slow I/O from transport jank.
-(window as any).__rommTrace = (window as any).__rommTrace ?? false;
-function _traced<T>(label: string, job: () => Promise<T>): Promise<T> {
-  if (!(window as any).__rommTrace) return job();
-  const t0 = performance.now();
-  return job().finally(() => {
-    const ms = performance.now() - t0;
-    if (ms > 16) console.log(`[RomM cover] ${label} ${ms.toFixed(0)}ms`);
-  });
-}
-const qGetImage = (path: string) => imageQueue(() => _traced(`img ${path}`, () => getImage(path)));
-const qGetGameCover = (romId: number, large: boolean) => imageQueue(() => _traced(`cover ${romId}`, () => getGameCover(romId, large)));
+const qGetImage = (path: string) => imageQueue(() => getImage(path));
+const qGetGameCover = (romId: number, large: boolean) => imageQueue(() => getGameCover(romId, large));
 
 // Resolved platform-icon cache: platformKey -> data URI (or null = no icon).
 // Persisted to localStorage because there are only ~dozens of tiny icons and
@@ -259,30 +242,6 @@ function V2Bg({ uri }: { uri: string | null }) {
       }} />
     </>
   );
-}
-
-// Viewport gate: returns [ref, seen]. `seen` flips true (and stays true) once
-// the element first scrolls within `margin` px of the viewport. Used so cover
-// tiles only fetch their art when they're actually about to be shown — opening
-// a 150-game platform then costs ~a screenful of covers, not all 150 at once.
-// Falls back to eager (seen=true) if IntersectionObserver is unavailable.
-function useInViewport(margin = 400): [Ref<HTMLDivElement>, boolean] {
-  const ref = useRef<HTMLDivElement>(null);
-  const [seen, setSeen] = useState(typeof IntersectionObserver === 'undefined');
-  useEffect(() => {
-    if (seen) return;
-    const el = ref.current;
-    if (!el) return;
-    let io: IntersectionObserver | null = null;
-    try {
-      io = new IntersectionObserver((entries) => {
-        if (entries.some((e) => e.isIntersecting)) { setSeen(true); io?.disconnect(); }
-      }, { rootMargin: `${margin}px` });
-      io.observe(el);
-    } catch { setSeen(true); }
-    return () => { try { io?.disconnect(); } catch {} };
-  }, [seen, margin]);
-  return [ref, seen];
 }
 
 // Lazy, cached cover art. Renders a placeholder until the base64 data URI
@@ -2996,7 +2955,6 @@ function LibraryGamesPage() {
 
   useEffect(() => {
     let alive = true;
-    const _t0 = performance.now();
     (async () => {
       if (!group) { setLoading(false); return; }
       setBgUri(null);
@@ -3004,13 +2962,11 @@ function LibraryGamesPage() {
       const hit = _libGamesCache.get(ck);
       if (hit) {
         // Instant: real covers slide in with the carousel, no pop-in.
-        dbg(`open '${group.key}' list=cache n=${hit.length} +${(performance.now()-_t0).toFixed(0)}ms`);
         setGames(hit); setLoading(false);
       } else {
         setLoading(true);
         try {
           const res = await getLibraryGames(mode, group.key);
-          dbg(`open '${group.key}' list=fetch n=${(res?.games||[]).length} +${(performance.now()-_t0).toFixed(0)}ms`);
           if (res?.success) libCacheSet(ck, res.games || []);
           if (alive) setGames(res?.success ? (res.games || []) : []);
         } catch (e) {
@@ -3076,17 +3032,6 @@ function LibraryGamesPage() {
     } catch { bump(); }
     return () => { try { io?.disconnect(); } catch {} };
   }, [visN, games.length]);
-
-  // Timing probe: how long from games-set to the grid being laid out (mount of
-  // the FIRST batch of GameTiles). Logged once per group open to the backend log.
-  const _paintT = useRef<number>(0);
-  useEffect(() => { if (games.length) _paintT.current = performance.now(); }, [group?.key]);
-  useLayoutEffect(() => {
-    if (!games.length || !_paintT.current) return;
-    const ms = performance.now() - _paintT.current;
-    dbg(`grid '${group?.key}' first-paint n=${Math.min(games.length, GRID_FIRST)}/${games.length} layout+${ms.toFixed(0)}ms`);
-    _paintT.current = 0;
-  }, [games]);
 
   // Stable identity across renders so memo(GameTile) isn't invalidated every
   // time the page re-renders (e.g. on background-art / progress updates). The
