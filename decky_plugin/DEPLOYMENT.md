@@ -86,7 +86,7 @@ mkdir -p "${TMP_DIR}/${PLUGIN_NAME}/dist" "${TMP_DIR}/${PLUGIN_NAME}/assets" "${
 cp "${PLUGIN_DIR}/plugin.json" "${PLUGIN_DIR}/package.json" "${PLUGIN_DIR}/LICENSE" "${PLUGIN_DIR}/main.py" "${TMP_DIR}/${PLUGIN_NAME}/"
 cp "${PLUGIN_DIR}/dist/index.js" "${PLUGIN_DIR}/dist/index.js.map" "${TMP_DIR}/${PLUGIN_NAME}/dist/"
 cp -rL "${PLUGIN_DIR}/py_modules" "${TMP_DIR}/${PLUGIN_NAME}/"
-cp "${PLUGIN_DIR}"/assets/logo.png "${PLUGIN_DIR}"/assets/romm-isotipo.svg "${PLUGIN_DIR}"/assets/romm-logotipo.svg "${PLUGIN_DIR}"/assets/auth_background.svg "${PLUGIN_DIR}"/assets/romm-*.png "${TMP_DIR}/${PLUGIN_NAME}/assets/"
+cp "${PLUGIN_DIR}"/assets/logo.png "${PLUGIN_DIR}"/assets/romm-isotipo.svg "${PLUGIN_DIR}"/assets/romm-logotipo.svg "${PLUGIN_DIR}"/assets/auth_background.svg "${PLUGIN_DIR}"/assets/retrodeck.svg "${PLUGIN_DIR}"/assets/romm-*.png "${TMP_DIR}/${PLUGIN_NAME}/assets/"
 cp "${PLUGIN_DIR}/bin/7zz" "${TMP_DIR}/${PLUGIN_NAME}/bin/" && chmod +x "${TMP_DIR}/${PLUGIN_NAME}/bin/7zz"
 cp "${PLUGIN_DIR}/bin/romm-session-host" "${TMP_DIR}/${PLUGIN_NAME}/bin/" && chmod +x "${TMP_DIR}/${PLUGIN_NAME}/bin/romm-session-host"  # Steam session-host: the RomM tile's exe; execs the picked emulator as a Steam-tracked child so the overlay works on Deck Gaming Mode
 (cd "$TMP_DIR" && zip -rq "$OUT_ZIP" "${PLUGIN_NAME}/")

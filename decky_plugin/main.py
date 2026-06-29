@@ -968,29 +968,56 @@ class Plugin:
             logging.error(f"toggle_collection_sync error: {e}", exc_info=True)
             return False
 
-    async def delete_collection_roms(self, collection_name: str):
-        """Delete all local ROM files for a collection.
+    async def delete_collection_roms(self, collection_name: str, mode: str = 'collection'):
+        """Delete all local ROM files for a group (collection or platform).
 
-        toggle_collection_sync already handled settings + sync object updates
-        before this is called, so this method only does the file deletion.
-        Uses the existing authenticated client and in-memory caches to avoid
-        redundant API calls.
+        Local-only: removes downloaded files under the download dir. It never
+        touches the RomM server. toggle_collection_sync already handled
+        settings + sync object updates before this is called (collections
+        only), so this method only does the file deletion. Uses the existing
+        authenticated client and in-memory caches to avoid redundant API calls.
         """
         try:
             import shutil
-            logging.info(f"Starting ROM deletion for collection: {collection_name}")
-
-            # Use the already-authenticated client — no new login needed
-            client = self._romm_client
-            if not client or not client.authenticated:
-                logging.error("RomM client not available for ROM deletion")
-                return False
+            logging.info(f"Starting ROM deletion for {mode}: {collection_name}")
 
             download_dir = Path(self._settings.get('Download', 'rom_directory',
                                                     '~/RomMSync/roms')).expanduser()
             if not download_dir.exists():
                 logging.info(f"Download directory not found, nothing to delete: {download_dir}")
                 return True
+
+            # Platform groups aren't tracked by CollectionSyncManager — delete
+            # straight from the in-memory game list (keyed by resolved platform
+            # name, matching get_library_games).
+            if mode == 'platform':
+                deleted_count = 0
+                for game in (self._available_games or []):
+                    if self._platform_name_for(game) != collection_name:
+                        continue
+                    if not game.get('is_downloaded') or not game.get('local_path'):
+                        continue
+                    rom_path = Path(game['local_path'])
+                    if rom_path.exists():
+                        try:
+                            if rom_path.is_file():
+                                rom_path.unlink()
+                            else:
+                                shutil.rmtree(rom_path)
+                            deleted_count += 1
+                            logging.info(f"  Deleted: {rom_path}")
+                        except Exception as e:
+                            logging.error(f"  Failed to delete {rom_path}: {e}")
+                    game['is_downloaded'] = False
+                    game['local_path'] = None
+                logging.info(f"Deleted {deleted_count} ROM(s) from platform '{collection_name}'")
+                return True
+
+            # Use the already-authenticated client — no new login needed
+            client = self._romm_client
+            if not client or not client.authenticated:
+                logging.error("RomM client not available for ROM deletion")
+                return False
 
             # Get collection ID from cached collection list
             collection_id = None
@@ -1207,10 +1234,90 @@ class Plugin:
                 return {'username': ''}
             user = client.get_current_user() or {}
             name = user.get('username') or user.get('display_name') or ''
-            return {'username': name}
+            return {
+                'username': name,
+                'role': user.get('role') or '',
+                'avatar_path': user.get('avatar_path') or '',
+                'updated_at': user.get('updated_at') or '',
+            }
         except Exception as e:
             logging.error(f"get_account_username error: {e}")
             return {'username': ''}
+
+    async def get_plugin_stats(self):
+        """Plugin-local stats for the user-menu Stats page. Computed live from
+        in-memory state (no API calls): library size, what's downloaded on this
+        device, disk usage, platforms, and collection sync state."""
+        try:
+            games = self._available_games or []
+            downloaded = [g for g in games if g.get('is_downloaded')]
+            size_on_disk = sum(int(g.get('local_size') or 0) for g in downloaded)
+            platforms = {g.get('platform_slug') for g in games if g.get('platform_slug')}
+
+            # Per-platform breakdown for the Platforms section. rom_count is the
+            # library total for the platform; fs_size_bytes is the on-disk size of
+            # its downloaded games, so the bars/percentages reflect disk usage
+            # (consistent with the Size-on-disk summary total).
+            plat_map = {}
+            for g in games:
+                slug = (g.get('platform_slug')
+                        or (g.get('romm_data') or {}).get('platform_slug')
+                        or 'unknown')
+                p = plat_map.setdefault(slug, {
+                    'slug': slug,
+                    'fs_slug': slug,
+                    'name': self._platform_name_for(g),
+                    'rom_count': 0,
+                    'downloaded': 0,
+                    'fs_size_bytes': 0,
+                })
+                p['rom_count'] += 1
+                if g.get('is_downloaded'):
+                    p['downloaded'] += 1
+                    p['fs_size_bytes'] += int(g.get('local_size') or 0)
+            platforms_breakdown = sorted(
+                plat_map.values(), key=lambda p: p['fs_size_bytes'], reverse=True)
+
+            collections_total = 0
+            collections_synced = 0
+            try:
+                if self._romm_client and self._romm_client.authenticated:
+                    status = build_sync_status(
+                        romm_client=self._romm_client,
+                        collection_sync=self._collection_sync,
+                        auto_sync=self._auto_sync,
+                        available_games=games,
+                        known_collections=self._romm_collections,
+                        disabled_collection_counts=self._disabled_collection_counts,
+                        retroarch=self._retroarch,
+                        bios_tracking=self._bios_tracking,
+                        steam_manager=self._steam_manager,
+                    )
+                    cols = status.get('collections', [])
+                    collections_total = len(cols)
+                    collections_synced = sum(
+                        1 for c in cols
+                        if c.get('auto_sync') or c.get('sync_state') == 'synced'
+                    )
+            except Exception as e:
+                logging.debug(f"get_plugin_stats collections error: {e}")
+
+            return {
+                'games_total':         len(games),
+                'games_downloaded':    len(downloaded),
+                'size_on_disk':        size_on_disk,
+                'platforms':           len(platforms),
+                'collections_total':   collections_total,
+                'collections_synced':  collections_synced,
+                'platforms_breakdown': platforms_breakdown,
+            }
+        except Exception as e:
+            logging.error(f"get_plugin_stats error: {e}", exc_info=True)
+            return {
+                'games_total': 0, 'games_downloaded': 0, 'size_on_disk': 0,
+                'platforms': 0, 'collections_total': 0, 'collections_synced': 0,
+                'platforms_breakdown': [],
+            }
 
     async def get_logging_enabled(self):
         try:
@@ -1218,6 +1325,24 @@ class Plugin:
         except Exception as e:
             logging.error(f"get_logging_enabled error: {e}")
             return True
+
+    async def get_retrodeck_button_enabled(self):
+        """Whether the Game Browser shows the 'Launch RetroDECK' header button.
+        Defaults off; only meaningful when RetroDECK is actually installed."""
+        try:
+            return load_decky_settings().get('retrodeck_button_enabled', False)
+        except Exception as e:
+            logging.error(f"get_retrodeck_button_enabled error: {e}")
+            return False
+
+    async def set_retrodeck_button_enabled(self, enabled: bool):
+        try:
+            settings = load_decky_settings()
+            settings['retrodeck_button_enabled'] = bool(enabled)
+            return save_decky_settings(settings)
+        except Exception as e:
+            logging.error(f"set_retrodeck_button_enabled error: {e}")
+            return False
 
     async def reset_all_settings(self):
         """Delete all downloaded ROMs from ALL collections, delete downloaded
@@ -2376,6 +2501,39 @@ class Plugin:
             logging.error(f"get_romm_logo error: {e}", exc_info=True)
             return {'success': False, 'data_uri': None}
 
+    async def get_retrodeck_logo(self):
+        """Return RetroDECK's bundled brand mark as an SVG data URI for the
+        optional 'Launch RetroDECK' button in the top bar."""
+        try:
+            import base64
+            svg = Path(__file__).parent / "assets" / "retrodeck.svg"
+            if not svg.exists():
+                return {'success': False, 'data_uri': None}
+            raw = base64.b64encode(svg.read_bytes()).decode('ascii')
+            return {'success': True, 'data_uri': f"data:image/svg+xml;base64,{raw}"}
+        except Exception as e:
+            logging.error(f"get_retrodeck_logo error: {e}", exc_info=True)
+            return {'success': False, 'data_uri': None}
+
+    async def get_ra_earned(self, ra_id: int):
+        """Earned achievement badge ids for a game's ra_id, fetched on its own so
+        the game detail can render immediately and fill in earned state after.
+        Returns {'earned': [badge_id, ...]}."""
+        try:
+            if not (ra_id and self._romm_client and self._romm_client.authenticated):
+                return {'earned': []}
+            mr = self._romm_client.session.get(
+                urljoin(self._romm_client.base_url, '/api/users/me'), timeout=10)
+            me = mr.json() if mr.status_code == 200 else {}
+            for prog in ((me.get('ra_progression') or {}).get('results') or []):
+                if prog.get('rom_ra_id') == ra_id:
+                    return {'earned': [str(e.get('id'))
+                                       for e in (prog.get('earned_achievements') or [])
+                                       if e.get('id') is not None]}
+        except Exception as e:
+            logging.debug(f"get_ra_earned error: {e}")
+        return {'earned': []}
+
     async def get_game_detail(self, rom_id: int):
         """Return IGDB-style metadata + files + local state for a game."""
         try:
@@ -2408,20 +2566,12 @@ class Plugin:
             # earned when its badge_id is in the user's progression set for this
             # game (located by rom_ra_id == rom.ra_id). Badge art uses the public
             # RetroAchievements CDN URLs so the frontend <img> can load directly.
+            # Earned state is fetched separately (get_ra_earned) so this response
+            # never blocks on the extra /api/users/me round-trip. Achievements
+            # render immediately as not-earned; the frontend fills in earned after.
             achievements = []
             ra_id = d.get('ra_id')
             earned_ids = set()
-            if ra_id:
-                try:
-                    mr = self._romm_client.session.get(
-                        urljoin(self._romm_client.base_url, '/api/users/me'), timeout=10)
-                    me = mr.json() if mr.status_code == 200 else {}
-                    for prog in ((me.get('ra_progression') or {}).get('results') or []):
-                        if prog.get('rom_ra_id') == ra_id:
-                            earned_ids = {str(e.get('id')) for e in (prog.get('earned_achievements') or []) if e.get('id') is not None}
-                            break
-                except Exception:
-                    earned_ids = set()
             ra_meta = d.get('merged_ra_metadata') or {}
             raw_ach = sorted((ra_meta.get('achievements') or []),
                              key=lambda a: (a.get('display_order') if a.get('display_order') is not None else 1e9))
@@ -2552,6 +2702,7 @@ class Plugin:
                 'files': files,
                 'screenshots': [s for s in (d.get('merged_screenshots') or []) if s],
                 'achievements': achievements,
+                'ra_id': ra_id,
                 'fs_size_bytes': d.get('fs_size_bytes') or 0,
                 'is_downloaded': bool(local.get('is_downloaded')),
                 'has_cover': bool(d.get('path_cover_small') or local.get('cover_path')),

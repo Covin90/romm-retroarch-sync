@@ -4043,6 +4043,9 @@ class RetroArchInterface:
 
         # Cache for RetroDECK detection
         self._is_retrodeck_cache = None
+        # Cache for the per-system core map parsed from RetroDECK/ES-DE's
+        # es_systems.xml (lazy; built on first core lookup).
+        self._retrodeck_core_map_cache = None
 
         # Check for custom path override first
         custom_path = self.settings.get('RetroArch', 'custom_path', '').strip()
@@ -4243,6 +4246,21 @@ class RetroArchInterface:
             else:
                 env.pop(var, None)
 
+        # Strip GUI-toolkit env that the launcher's own runtime injects. Decky
+        # Loader runs as an AppImage which exports GDK/GTK/GIO/font vars pointing
+        # into its private mount; `flatpak run` forwards the host env into the
+        # sandbox, so a flatpak GUI app (RetroDECK/ES-DE) loads a MISMATCHED host
+        # gdk-pixbuf SVG loader and aborts (`undefined symbol:
+        # rsvg_handle_get_pixbuf_and_error` → core dump). Removing these lets the
+        # flatpak use its own runtime's loaders. Harmless when unset (e.g. the
+        # GTK desktop app), so it's safe for every host launch.
+        for var in ('GDK_PIXBUF_MODULE_FILE', 'GDK_PIXBUF_MODULEDIR',
+                    'GTK_PATH', 'GTK_EXE_PREFIX', 'GTK_DATA_PREFIX',
+                    'GTK_IM_MODULE_FILE', 'GIO_MODULE_DIR', 'GIO_EXTRA_MODULES',
+                    'GSETTINGS_SCHEMA_DIR', 'FONTCONFIG_FILE', 'FONTCONFIG_PATH',
+                    'GST_PLUGIN_SYSTEM_PATH', 'GST_PLUGIN_PATH'):
+            env.pop(var, None)
+
         # Backfill the graphical-session vars. The Decky daemon spawns us without
         # DISPLAY/WAYLAND_DISPLAY/XDG_RUNTIME_DIR/DBUS_SESSION_BUS_ADDRESS, so a
         # GUI emulator finds no display and exits immediately (code 1). Derive
@@ -4264,6 +4282,20 @@ class RetroArchInterface:
                 except Exception:
                     pass
         env.setdefault('DISPLAY', ':0')
+        # The daemon has no XAUTHORITY, so X11 clients (ES-DE on desktop) get
+        # "Authorization required". Point at the user's cookie when present.
+        if not env.get('XAUTHORITY'):
+            import glob as _glob
+            cands = [os.path.expanduser('~/.Xauthority')]
+            if xrd:
+                # mutter/GNOME writes a random-suffixed cookie, e.g.
+                # .mutter-Xwaylandauth.OEDRR3 — glob rather than guess the name.
+                cands += sorted(_glob.glob(f'{xrd}/.mutter-Xwaylandauth*'))
+                cands.append(f'{xrd}/Xauthority')
+            for cand in cands:
+                if cand and os.path.exists(cand):
+                    env['XAUTHORITY'] = cand
+                    break
 
         # On Steam Deck Gaming Mode, gamescope runs --xwayland-count 2: the Steam
         # UI lives on :0 and real games are launched on :1. We inherit DISPLAY=:0
@@ -4821,11 +4853,124 @@ class RetroArchInterface:
         
         return None
 
-    def suggest_core_for_platform(self, platform_name):
+    # ─── RetroDECK / ES-DE core map ──────────────────────────────────────────
+    # RetroDECK's frontend (ES-DE) records, per system, the ordered list of
+    # emulators it would use in resources/systems/linux/es_systems.xml. The first
+    # %CORE_RETROARCH% command is the default core; the user can override it per
+    # system (stored as <alternativeEmulator><label> at the top of the system's
+    # gamelist.xml). Parsing these lets us launch with exactly the core RetroDECK
+    # would use instead of our hand-tuned guesses. ElementTree ignores XML
+    # comments, so disabled (<!-- ... -->) commands are skipped automatically.
+    def _es_systems_paths(self):
+        """Yield es_systems.xml paths: bundled default first, then any
+        custom_systems override (which replaces a system's definition)."""
+        bundled_rel = ('app/net.retrodeck.retrodeck/current/active/files/retrodeck'
+                       '/components/es-de/share/es-de/resources/systems/linux'
+                       '/es_systems.xml')
+        for base in (Path.home() / '.local' / 'share' / 'flatpak',
+                     Path('/var/lib/flatpak'),
+                     Path('/run/host/var/lib/flatpak')):
+            p = base / bundled_rel
+            if p.is_file():
+                yield p
+                break
+        for c in (Path.home() / 'retrodeck' / 'ES-DE' / 'custom_systems' / 'es_systems.xml',
+                  Path.home() / '.var' / 'app' / 'net.retrodeck.retrodeck' / 'config'
+                  / 'ES-DE' / 'custom_systems' / 'es_systems.xml'):
+            if c.is_file():
+                yield c
+
+    def _retrodeck_core_map(self):
+        """{system_slug: [(label, core_key), ...]} parsed from es_systems.xml,
+        in ES-DE's emulator priority order. core_key matches get_available_cores
+        keys (basename minus the _libretro suffix). Cached; empty if RetroDECK /
+        ES-DE isn't installed."""
+        if self._retrodeck_core_map_cache is not None:
+            return self._retrodeck_core_map_cache
+        import xml.etree.ElementTree as ET
+        mapping = {}
+        for path in self._es_systems_paths():
+            try:
+                root = ET.parse(str(path)).getroot()
+            except Exception:
+                continue
+            for sysel in root.findall('system'):
+                name = (sysel.findtext('name') or '').strip()
+                if not name:
+                    continue
+                cores = []
+                for cmd in sysel.findall('command'):
+                    m = re.search(r'%CORE_RETROARCH%/(\S+?)_libretro\.so', cmd.text or '')
+                    if m:
+                        cores.append(((cmd.get('label') or '').strip(), m.group(1)))
+                if cores:
+                    mapping[name] = cores  # later file (custom) overrides default
+        self._retrodeck_core_map_cache = mapping
+        return mapping
+
+    def _retrodeck_alt_emulator(self, slug):
+        """The user's per-system emulator override label (ES-DE stores it as
+        <alternativeEmulator><label> at the top of gamelists/<slug>/gamelist.xml),
+        or None."""
+        import xml.etree.ElementTree as ET
+        for base in (Path.home() / 'retrodeck' / 'ES-DE' / 'gamelists',
+                     Path.home() / '.var' / 'app' / 'net.retrodeck.retrodeck' / 'config'
+                     / 'ES-DE' / 'gamelists'):
+            gl = base / slug / 'gamelist.xml'
+            if gl.is_file():
+                try:
+                    label = ET.parse(str(gl)).getroot().findtext('alternativeEmulator/label')
+                    if label and label.strip():
+                        return label.strip()
+                except Exception:
+                    pass
+        return None
+
+    def _retrodeck_core_for_slug(self, slug, available_cores):
+        """Resolve the core RetroDECK would use for an ES-DE system slug: the
+        user's per-system override if set, else ES-DE's default. Returns a core
+        key present in available_cores, or None."""
+        entries = self._retrodeck_core_map().get(slug)
+        if not entries:
+            return None
+        alt = self._retrodeck_alt_emulator(slug)
+        if alt:
+            for label, core in entries:
+                if label == alt and core in available_cores:
+                    return core
+        for _, core in entries:  # ES-DE priority order; first available wins
+            if core in available_cores:
+                return core
+        return None
+
+    @staticmethod
+    def _system_slug_from_path(rom_path):
+        """The ES-DE/RetroDECK system slug a ROM lives under, i.e. the path
+        component right after 'roms' (e.g. .../retrodeck/roms/psx/Game.chd → psx).
+        None if the path isn't under a roms directory."""
+        try:
+            parts = Path(rom_path).parts
+            if 'roms' in parts:
+                i = parts.index('roms')
+                if i + 1 < len(parts):
+                    return parts[i + 1]
+        except Exception:
+            pass
+        return None
+
+    def suggest_core_for_platform(self, platform_name, system_slug=None):
         """Suggest best core for a platform"""
         available_cores = self.get_available_cores()
 
         print(f"🎮 Looking for core for platform: '{platform_name}'")
+
+        # Prefer the core RetroDECK/ES-DE itself would use for this system (its
+        # configured default, or the user's per-system override) over our guesses.
+        if system_slug:
+            rd_core = self._retrodeck_core_for_slug(system_slug, available_cores)
+            if rd_core:
+                print(f"✅ Using RetroDECK/ES-DE core for '{system_slug}': {rd_core}")
+                return rd_core, available_cores[rd_core]
 
         # Try exact match first
         suggested_cores = self.platform_core_map.get(platform_name, [])
@@ -4893,9 +5038,12 @@ class RetroArchInterface:
 
         is_retrodeck = 'retrodeck' in self.retroarch_executable.lower()
 
-        # If no core specified, try to suggest one
+        # If no core specified, try to suggest one. Pass the ES-DE system slug
+        # (derived from the ROM's roms/<slug>/ path) so RetroDECK's own per-system
+        # core choice can win over our generic guesses.
         if not core_name and platform_name:
-            core_name, _ = self.suggest_core_for_platform(platform_name)
+            core_name, _ = self.suggest_core_for_platform(
+                platform_name, system_slug=self._system_slug_from_path(rom_path))
             if not core_name:
                 return None, f"No suitable core found for platform: {platform_name}"
 

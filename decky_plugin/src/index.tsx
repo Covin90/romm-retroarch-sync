@@ -16,7 +16,7 @@ import {
 } from "@decky/ui";
 import { callable, definePlugin, toaster, routerHook, openFilePicker, FileSelectionType } from "@decky/api";
 import { useState, useEffect, useLayoutEffect, useRef, useMemo, forwardRef, memo, type Ref, type ChangeEvent } from "react";
-import { FaSync, FaTrash, FaCog, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight, FaCheckCircle, FaUsers, FaExternalLinkAlt, FaPuzzlePiece, FaBoxOpen, FaClone, FaRedo, FaClock, FaCheck, FaEllipsisH, FaGlobe } from "react-icons/fa";
+import { FaSync, FaTrash, FaCog, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight, FaCheckCircle, FaUsers, FaExternalLinkAlt, FaPuzzlePiece, FaBoxOpen, FaClone, FaRedo, FaClock, FaCheck, FaEllipsisH, FaGlobe, FaChevronDown, FaChartBar, FaSignOutAlt } from "react-icons/fa";
 import { BsGearFill } from "react-icons/bs";
 import { MdVerified } from "react-icons/md";
 
@@ -25,9 +25,13 @@ const getServiceStatus = callable<[], any>("get_service_status");
 const refreshFromRomm = callable<[boolean], any>("refresh_from_romm");
 const getLoggingEnabled = callable<[], boolean>("get_logging_enabled");
 const updateLoggingEnabled = callable<[boolean], boolean>("set_logging_enabled");
+const getRetrodeckButtonEnabled = callable<[], boolean>("get_retrodeck_button_enabled");
+const setRetrodeckButtonEnabled = callable<[boolean], boolean>("set_retrodeck_button_enabled");
+const getRetrodeckLogo = callable<[], any>("get_retrodeck_logo");
 const getConfig = callable<[], any>("get_config");
 const logout = callable<[boolean], any>("logout");
 const getAccountUsername = callable<[], any>("get_account_username");
+const getPluginStats = callable<[], any>("get_plugin_stats");
 const saveConfig = callable<[string, string, string, string, string, string, string], any>("save_config");
 const testRommConnection = callable<[string, string, string], any>("test_connection");
 const pairDevice = callable<[string, string], any>("pair_device");
@@ -42,9 +46,10 @@ const getImage = callable<[string], any>("get_image");
 const clearCoverCache = callable<[], any>("clear_cover_cache");
 const searchGames = callable<[string], any>("search_games");
 const getGameDetail = callable<[number], any>("get_game_detail");
+const getRaEarned = callable<[number], any>("get_ra_earned");
 const downloadGame = callable<[number], any>("download_game");
 const toggleCollectionSync = callable<[string, boolean], any>("toggle_collection_sync");
-const deleteCollectionRoms = callable<[string], any>("delete_collection_roms");
+const deleteCollectionRoms = callable<[string, string], any>("delete_collection_roms");
 const getDownloadProgress = callable<[number], any>("get_download_progress");
 const deleteGame = callable<[number], any>("delete_game");
 const launchGame = callable<[number, (string | null)?, (number | null)?], any>("launch_game");
@@ -101,7 +106,7 @@ function _platIconCacheSet(key: string, uri: string | null) {
     const obj: Record<string, string | null> = {};
     _platIconCache.forEach((v, k) => { obj[k] = v; });
     localStorage.setItem(_LS_PLATICON, JSON.stringify(obj));
-  } catch {}
+  } catch { }
 }
 
 // Decoded-art cache (data URIs) so covers persist across tile remounts and can be
@@ -199,9 +204,9 @@ function fmtBytes(n: number | null | undefined): string {
 function fmtReleaseDate(ts: number | null | undefined): string {
   if (!ts) return '';
   try {
-    const n = Number(ts);
-    if (n > 3000) return String(n);
-    const d = new Date(n * 1000);
+    // RomM stores first_release_date as a Unix timestamp in milliseconds and
+    // formats it directly (new Date(ms)); match that exactly.
+    const d = new Date(Number(ts));
     if (isNaN(d.getTime())) return '';
     return d.toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC' });
   } catch { return ''; }
@@ -513,8 +518,10 @@ function ProgressRing({ pct, size = 40, stroke = 3, glow = false, children }:
         {!glow && <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgba(0,0,0,0.22)" strokeWidth={stroke} />}
         <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={V2.brand} strokeWidth={stroke}
           strokeDasharray={c} strokeDashoffset={c * (1 - p / 100)} strokeLinecap="round"
-          style={{ transition: 'stroke-dashoffset 0.3s ease',
-            ...(glow ? { filter: `drop-shadow(0 0 5px ${V2.brand}) drop-shadow(0 0 3px ${V2.brand})` } : {}) }} />
+          style={{
+            transition: 'stroke-dashoffset 0.3s ease',
+            ...(glow ? { filter: `drop-shadow(0 0 5px ${V2.brand}) drop-shadow(0 0 3px ${V2.brand})` } : {})
+          }} />
       </svg>
       {children}
     </div>
@@ -605,7 +612,12 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
   const isMulti = isMultiRegion || isMultiDisc;
   const longFired = useRef(false);
   const pressTimer = useRef<any>(null);
+  // Set when a press starts on an overlay sub-button (Details / Delete). The
+  // multi-game OK handlers below run on the PARENT and aren't stopped by the
+  // child's stopPropagation, so without this a tap on Details would also launch.
+  const subPress = useRef(false);
   const onBtnDown = (e: any) => {
+    if (subPress.current) return;
     if (e?.detail?.button === GamepadButton.OK && isMulti) {
       longFired.current = false;
       if (pressTimer.current) clearTimeout(pressTimer.current);
@@ -624,6 +636,11 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
     }
   };
   const onBtnUp = (e: any) => {
+    if (subPress.current) {
+      subPress.current = false;
+      if (pressTimer.current) { clearTimeout(pressTimer.current); pressTimer.current = null; }
+      return;
+    }
     if (e?.detail?.button === GamepadButton.OK && isMulti) {
       // Short press (timer still pending) → launch the default; long press
       // already opened the picker, so do nothing.
@@ -726,6 +743,10 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
     <Focusable noFocusRing
       ref={focusRef}
       onActivate={() => {
+        // A press that started on an overlay sub-button (Details / Delete) must
+        // not also activate the cover — Steam routes the tap to this parent
+        // Focusable since the sub-buttons are plain divs.
+        if (subPress.current) { subPress.current = false; return; }
         // Multi games drive launch from the release handler (onBtnUp) so a hold
         // can open the picker without the press-edge activation launching first.
         if (isMulti) { longFired.current = false; return; }
@@ -879,15 +900,19 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
           opacity: focused ? 1 : 0, transform: focused ? 'translateY(0)' : 'translateY(6px)',
           transition: 'opacity 0.18s ease, transform 0.18s ease',
         }}>
-          <div onClick={(e: any) => { e.stopPropagation(); onOpen(game); }} style={roundBtn(30, 'glass')}>
+          <div onPointerDown={() => { subPress.current = true; }}
+            onClick={(e: any) => { e.stopPropagation(); subPress.current = false; onOpen(game); }} style={roundBtn(30, 'glass')}>
             <FaInfoCircle size={13} />
           </div>
           {dl && (
-            <div onClick={(e: any) => { e.stopPropagation(); requestDelete(); }}
-              style={{ ...roundBtn(30, 'danger'),
+            <div onPointerDown={() => { subPress.current = true; }}
+              onClick={(e: any) => { e.stopPropagation(); subPress.current = false; requestDelete(); }}
+              style={{
+                ...roundBtn(30, 'danger'),
                 // Armed state: solid red fill + check glyph, so it's clear the
                 // next press commits the delete.
-                ...(confirmDelete ? { background: V2.danger, borderColor: V2.danger, color: '#fff' } : {}) }}>
+                ...(confirmDelete ? { background: V2.danger, borderColor: V2.danger, color: '#fff' } : {})
+              }}>
               {busy === 'delete'
                 ? <FaSync size={12} style={{ animation: 'spin 1s linear infinite' }} />
                 : confirmDelete ? <FaCheck size={12} /> : <FaTrash size={12} />}
@@ -1026,7 +1051,7 @@ function CollectionTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: 
   const doTileRemove = async () => {
     try {
       if (synced) { await toggleCollectionSync(group.key, false); setSynced(false); }
-      const ok = await deleteCollectionRoms(group.key);
+      const ok = await deleteCollectionRoms(group.key, 'collection');
       if (ok === false) throw new Error('backend declined');
     } catch (e) { toaster.toast({ title: 'Remove failed', body: String(e) }); }
   };
@@ -1074,8 +1099,8 @@ function CollectionTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: 
 
   const badge = group.kind === 'smart' ? { label: 'SMART', bg: V2.brandHover }
     : group.kind === 'virtual' ? { label: 'VIRTUAL', bg: V2.brandHover }
-    : group.kind === 'favorite' ? { label: '★', bg: '#ff4f6b' }
-    : null;
+      : group.kind === 'favorite' ? { label: '★', bg: '#ff4f6b' }
+        : null;
   return (
     <Focusable noFocusRing
       ref={focusRef}
@@ -1257,15 +1282,67 @@ function PlatformTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: (g
 // pill is RSliderBtnGroup's "tab" variant: surface bg + strong border, pill
 // radius, and the ACTIVE tab is a solid white (--r-color-fg) pill with dark
 // (--r-color-bg) text.
+// Compact labeled pill for the top bar's optional "Launch RetroDECK" action.
+// Sits beside the 32px brand mark: app icon + short label so the action reads
+// clearly (vs. a bare glyph). Fully controller-focusable.
+function NavLaunchButton({ iconSrc, label, onActivate }:
+  { iconSrc: string | null; label: string; onActivate: () => void }) {
+  const [active, setActive] = useState(false);
+  return (
+    <Focusable noFocusRing
+      onActivate={onActivate} onClick={onActivate}
+      onFocus={() => setActive(true)} onBlur={() => setActive(false)}
+      onMouseEnter={() => setActive(true)} onMouseLeave={() => setActive(false)}
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: '7px',
+        height: '34px', padding: iconSrc ? '0 12px 0 5px' : '0 12px',
+        borderRadius: V2.radiusPill, cursor: 'pointer',
+        background: active ? V2.surfaceHover : V2.surface,
+        color: active ? V2.fg : V2.fg2,
+        fontSize: '13px', fontWeight: 600, whiteSpace: 'nowrap',
+        border: `1px solid ${V2.borderStrong}`,
+        boxShadow: active ? `0 0 0 2px ${V2.brand}` : 'none',
+        transition: 'background 0.15s, color 0.15s, box-shadow 0.15s',
+      }}
+    >
+      {iconSrc
+        ? <img src={iconSrc} style={{ width: '26px', height: '26px', display: 'block', flexShrink: 0, borderRadius: '50%' }} />
+        : <FaExternalLinkAlt size={13} style={{ marginLeft: '3px' }} />}
+      <span>{label}</span>
+    </Focusable>
+  );
+}
+
 type NavId = 'home' | 'platforms' | 'collections' | 'search';
 function V2NavBar({ active, onTab, activeRef }: { active: NavId; onTab: (id: NavId) => void; activeRef?: React.MutableRefObject<any> }) {
   const [iso, setIso] = useState<string | null>(null);
   const [word, setWord] = useState<string | null>(null);
+  const [username, setUsername] = useState<string>('Guest');
+  const [role, setRole] = useState<string>('');
+  const [avatar, setAvatar] = useState<string | null>(null);
+  const [rdEnabled, setRdEnabled] = useState<boolean>(false);
+  const [rdIcon, setRdIcon] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
     (async () => {
       try { const a = await getImage('/assets/isotipo.svg'); if (alive) setIso(a?.data_uri || null); } catch { }
       try { const b = await getImage('/assets/logotipo.svg'); if (alive) setWord(b?.data_uri || null); } catch { }
+      try {
+        const on = await getRetrodeckButtonEnabled();
+        if (alive) setRdEnabled(!!on);
+        if (on) { const r = await getRetrodeckLogo(); if (alive) setRdIcon(r?.data_uri || null); }
+      } catch { }
+      try {
+        const acc = await getAccountUsername();
+        if (alive && acc?.username) setUsername(acc.username);
+        if (alive && acc?.role) setRole(acc.role);
+        // Avatars are user-uploaded assets served at /api/raw/assets/<path>,
+        // cache-busted by updated_at — same URL RomM's userAvatarUrl builds.
+        if (acc?.avatar_path) {
+          const img = await getImage(`/api/raw/assets/${acc.avatar_path}?ts=${acc.updated_at || ''}`);
+          if (alive) setAvatar(img?.data_uri || null);
+        }
+      } catch { }
     })();
     return () => { alive = false; };
   }, []);
@@ -1301,49 +1378,305 @@ function V2NavBar({ active, onTab, activeRef }: { active: NavId; onTab: (id: Nav
       backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)',
       borderBottom: `1px solid ${V2.border}`,
     }}>
+      {/* Left cluster: brand mark + wordmark. When the RetroDECK launch button
+          is enabled, the wordmark gives way to the button so the left column
+          stays compact on small (Deck) screens — mark + button, never both
+          the wordmark and the button. */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
         {iso && <img src={iso} style={{ width: '32px', height: '32px', display: 'block' }} />}
-        {word && <img src={word} style={{ height: '22px', width: 'auto', display: 'block' }} />}
+        {rdEnabled
+          ? <NavLaunchButton iconSrc={rdIcon} label="Launch RetroDECK" onActivate={async () => {
+            try {
+              const r = await launchRetrodeckViaSteam();
+              if (r.ok) {
+                toaster.toast({ title: 'RetroDECK', body: 'Launching…' });
+                try { Navigation.CloseSideMenus(); } catch { /* ignore */ }
+              } else {
+                toaster.toast({ title: 'RetroDECK', body: r.reason || 'Launch failed' });
+              }
+            } catch (e) { toaster.toast({ title: 'RetroDECK', body: String(e) }); }
+          }} />
+          : (word && <img src={word} style={{ height: '22px', width: 'auto', display: 'block' }} />)}
       </div>
       <div style={{ justifySelf: 'center', display: 'flex', alignItems: 'center', gap: '10px' }}>
-      <Bumper label="L1" />
-      <Focusable noFocusRing flow-children="horizontal" style={{
-        position: 'relative', display: 'flex', gap: '2px', padding: '4px',
-        background: V2.surface, border: `1px solid ${V2.borderStrong}`, borderRadius: V2.radiusPill,
-      }}>
-        {/* Sliding indicator */}
-        {ind && (
-          <div style={{
-            position: 'absolute', top: '4px', bottom: '4px',
-            left: `${ind.left}px`, width: `${ind.width}px`,
-            background: V2.fg, borderRadius: V2.radiusPill, zIndex: 0,
-            opacity: shown ? 1 : 0,
-            transform: shown ? 'scaleX(1)' : 'scaleX(0.6)', transformOrigin: 'center',
-            transition: 'left 0.28s cubic-bezier(0.22,1,0.36,1), width 0.28s cubic-bezier(0.22,1,0.36,1), opacity 0.28s ease, transform 0.28s cubic-bezier(0.22,1,0.36,1)',
-          }} />
-        )}
-        {tabs.map(({ id, label, Icon }, i) => {
-          const on = active === id;
-          return (
-            <Focusable noFocusRing key={id} ref={on && activeRef ? activeRef : undefined} onActivate={() => onTab(id)} onClick={() => onTab(id)}>
-              <div ref={(el) => { btnRefs.current[i] = el; }}
-                style={{
-                  position: 'relative', zIndex: 1,
-                  display: 'flex', alignItems: 'center', gap: '7px', padding: '7px 18px',
-                  borderRadius: V2.radiusPill, fontSize: '13.5px', cursor: 'pointer',
-                  fontWeight: on ? 600 : 500, color: on ? V2.bg : V2.fg2,
-                  transition: 'color 0.2s ease',
-                }}>
-                <Icon size={12} /><span>{label}</span>
-              </div>
-            </Focusable>
-          );
-        })}
-      </Focusable>
-      <Bumper label="R1" />
+        <Bumper label="L1" />
+        <Focusable noFocusRing flow-children="horizontal" style={{
+          position: 'relative', display: 'flex', gap: '2px', padding: '4px',
+          background: V2.surface, border: `1px solid ${V2.borderStrong}`, borderRadius: V2.radiusPill,
+        }}>
+          {/* Sliding indicator */}
+          {ind && (
+            <div style={{
+              position: 'absolute', top: '4px', bottom: '4px',
+              left: `${ind.left}px`, width: `${ind.width}px`,
+              background: V2.fg, borderRadius: V2.radiusPill, zIndex: 0,
+              opacity: shown ? 1 : 0,
+              transform: shown ? 'scaleX(1)' : 'scaleX(0.6)', transformOrigin: 'center',
+              transition: 'left 0.28s cubic-bezier(0.22,1,0.36,1), width 0.28s cubic-bezier(0.22,1,0.36,1), opacity 0.28s ease, transform 0.28s cubic-bezier(0.22,1,0.36,1)',
+            }} />
+          )}
+          {tabs.map(({ id, label, Icon }, i) => {
+            const on = active === id;
+            return (
+              <Focusable noFocusRing key={id} ref={on && activeRef ? activeRef : undefined} onActivate={() => onTab(id)} onClick={() => onTab(id)}>
+                <div ref={(el) => { btnRefs.current[i] = el; }}
+                  style={{
+                    position: 'relative', zIndex: 1,
+                    display: 'flex', alignItems: 'center', gap: '7px', padding: '7px 18px',
+                    borderRadius: V2.radiusPill, fontSize: '13.5px', cursor: 'pointer',
+                    fontWeight: on ? 600 : 500, color: on ? V2.bg : V2.fg2,
+                    transition: 'color 0.2s ease',
+                  }}>
+                  <Icon size={12} /><span>{label}</span>
+                </div>
+              </Focusable>
+            );
+          })}
+        </Focusable>
+        <Bumper label="R1" />
       </div>
-      <div style={{ justifySelf: 'end' }} />
+      {/* User pill — RomM AppShell/UserMenu.vue's .r-v2-user, copied 1:1:
+          avatar(30) + username + chevron, pill radius, surface bg + strong
+          border, tight 3px padding on the avatar side. Opens the account menu
+          (Stats / Settings for now). */}
+      <div style={{ justifySelf: 'end' }}>
+        <UserPill username={username} role={role} avatar={avatar} />
+      </div>
     </div>
+  );
+}
+
+// Circular avatar — real RomM avatar when uploaded, else the RAvatar fallback
+// (surface circle with the user's initial). Shared by the pill and the menu.
+function UserAvatar({ username, avatar, size }: { username: string; avatar: string | null; size: number }) {
+  return (
+    <div style={{
+      width: `${size}px`, height: `${size}px`, borderRadius: '50%', flexShrink: 0,
+      background: V2.bgElevated, border: `1px solid ${V2.borderStrong}`,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      fontSize: `${Math.round(size * 0.43)}px`, fontWeight: 700, color: V2.fg2, overflow: 'hidden',
+    }}>
+      {avatar
+        ? <img src={avatar} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+        : (username[0] || 'G').toUpperCase()}
+    </div>
+  );
+}
+
+// One RomM RMenuItem row: leading icon + label, hover/focus highlight, optional
+// danger variant. Closes the menu, then runs the action.
+function UserMenuRow({ icon, label, danger, disabled, onSelect }:
+  { icon: any; label: string; danger?: boolean; disabled?: boolean; onSelect: () => void }) {
+  const [hot, setHot] = useState(false);
+  const fg = disabled ? V2.fgFaint : (danger ? V2.danger : V2.fg);
+  return (
+    <Focusable noFocusRing onActivate={() => !disabled && onSelect()} onClick={() => !disabled && onSelect()}
+      onFocus={() => setHot(true)} onBlur={() => setHot(false)}
+      onMouseEnter={() => setHot(true)} onMouseLeave={() => setHot(false)}
+      style={{
+        display: 'flex', alignItems: 'center', gap: '11px', padding: '9px 12px',
+        borderRadius: V2.radiusMd, cursor: disabled ? 'default' : 'pointer',
+        background: (hot && !disabled) ? (danger ? 'rgba(255,80,80,0.12)' : V2.surfaceHover) : 'transparent',
+        color: fg, transition: 'background 0.12s ease', opacity: disabled ? 0.55 : 1,
+      }}>
+      <div style={{ flexShrink: 0, width: '16px', display: 'flex', justifyContent: 'center', color: disabled ? V2.fgFaint : (danger ? V2.danger : V2.fgMuted) }}>{icon}</div>
+      <span style={{ fontSize: '13.5px', fontWeight: 500 }}>{label}</span>
+    </Focusable>
+  );
+}
+
+// RomM UserMenu, rebuilt in the v2 design language (matches RestoreModal's
+// chrome): a glass panel anchored top-right (RomM's location="bottom end"),
+// with the identity header card over Stats / Settings / Log out.
+function UserMenuModal({ username, role, avatar, closeModal }:
+  { username: string; role: string; avatar: string | null; closeModal?: () => void }) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { const t = setTimeout(() => panelRef.current?.focus(), 60); return () => clearTimeout(t); }, []);
+
+  const go = (route: string) => { closeModal?.(); Navigation.Navigate(route); };
+  const doLogout = async () => {
+    // Non-destructive logout (keeps downloaded files), matching RomM's simple
+    // logout. The wipe-data variant stays in Settings.
+    closeModal?.();
+    try {
+      const res = await logout(false);
+      if (res?.success) {
+        toaster.toast({ title: 'Logged out', body: 'Signed out of RomM. Downloaded files were kept.' });
+        Navigation.Navigate("/romm-sync-setup");
+        Navigation.CloseSideMenus();
+      } else {
+        toaster.toast({ title: 'Logout failed', body: res?.error ?? 'Unknown error' });
+      }
+    } catch (e) {
+      toaster.toast({ title: 'Logout failed', body: String(e) });
+    }
+  };
+
+  return (
+    <ModalRoot bHideCloseIcon onCancel={closeModal} onEscKeypress={closeModal}
+      className="romm-modal-collapse" modalClassName="romm-modal-collapse">
+      <Focusable noFocusRing className="romm-ui"
+        onCancelButton={() => closeModal?.()}
+        onButtonDown={(e: any) => { if (e?.detail?.button === GamepadButton.CANCEL) closeModal?.(); }}
+        style={{
+          position: 'fixed', inset: 0, zIndex: 9999,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: 'rgba(7,7,15,0.45)',
+          WebkitBackdropFilter: 'blur(8px)', backdropFilter: 'blur(8px)',
+        }}>
+        <style>{`
+          ${V2_FOCUS_STYLE}
+          .romm-modal-collapse, .romm-modal-collapse > div {
+            background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important;
+          }
+          @keyframes umIn { from { opacity: 0; transform: translateY(-6px) scale(0.98); } to { opacity: 1; transform: none; } }
+        `}</style>
+        {/* Click-away scrim */}
+        <div onClick={() => closeModal?.()} style={{ position: 'absolute', inset: 0 }} />
+        <Focusable noFocusRing autoFocus ref={panelRef} flow-children="vertical" style={{
+          position: 'relative', width: '260px', maxWidth: '90vw', boxSizing: 'border-box',
+          fontFamily: V2.font, color: V2.fg, padding: '8px',
+          display: 'flex', flexDirection: 'column',
+          background: 'linear-gradient(180deg, rgba(20,20,30,0.7) 0%, rgba(10,10,18,0.78) 100%)',
+          WebkitBackdropFilter: 'blur(28px) saturate(1.1)', backdropFilter: 'blur(28px) saturate(1.1)',
+          border: `1px solid rgba(255,255,255,0.12)`, borderRadius: V2.radiusCard,
+          boxShadow: '0 16px 48px rgba(0,0,0,0.55)',
+          maxHeight: '82vh', overflowY: 'auto',
+          animation: 'umIn 0.18s cubic-bezier(0.22,1,0.36,1)',
+        }}>
+          {/* Identity header card — RomM UserMenu __header. */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '6px 8px 12px', minWidth: 0 }}>
+            <UserAvatar username={username} avatar={avatar} size={34} />
+            <div style={{ minWidth: 0 }}>
+              <div style={{
+                fontSize: '13px', fontWeight: 700, color: V2.fg, lineHeight: 1.3,
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>{username}</div>
+              {role && <div style={{
+                fontSize: '10.5px', fontWeight: 600, textTransform: 'capitalize',
+                color: V2.fgMuted, marginTop: '2px', whiteSpace: 'nowrap',
+              }}>{role}</div>}
+            </div>
+          </div>
+          <div style={{ height: '1px', background: V2.border, margin: '0 4px 4px' }} />
+          <UserMenuRow icon={<FaChartBar size={15} />} label="Stats" onSelect={() => go("/romm-sync-stats")} />
+          <UserMenuRow icon={<FaCog size={15} />} label="Settings" onSelect={() => go("/romm-sync-settings")} />
+          <div style={{ height: '1px', background: V2.border, margin: '4px 4px' }} />
+          <UserMenuRow icon={<FaSignOutAlt size={15} />} label="Log out" danger onSelect={doLogout} />
+        </Focusable>
+      </Focusable>
+    </ModalRoot>
+  );
+}
+
+// Collection / platform actions menu, in the same v2 glass chrome as the
+// account dropdown (UserMenuModal). Opened from the games-count rail. Holds
+// "Sync/Download missing" and the destructive "Remove downloaded" (arm →
+// confirm, matching the game-tile delete affordance).
+function CollectionActionsModal({ title, isCollection, isVirtual, isSynced, missing, downloaded, syncing, onSyncMissing, onToggleSync, onRemove, closeModal }:
+  {
+    title: string; isCollection: boolean; isVirtual: boolean; isSynced: boolean;
+    missing: number; downloaded: number; syncing: boolean;
+    onSyncMissing: () => void; onToggleSync: () => void; onRemove: () => void; closeModal?: () => void;
+  }) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [armed, setArmed] = useState(false);
+  useEffect(() => { const t = setTimeout(() => panelRef.current?.focus(), 60); return () => clearTimeout(t); }, []);
+  useEffect(() => { if (!armed) return; const t = setTimeout(() => setArmed(false), 4000); return () => clearTimeout(t); }, [armed]);
+
+  const syncDisabled = syncing || missing === 0;
+  const removeDisabled = downloaded === 0;
+  return (
+    <ModalRoot bHideCloseIcon onCancel={closeModal} onEscKeypress={closeModal}
+      className="romm-modal-collapse" modalClassName="romm-modal-collapse">
+      <Focusable noFocusRing className="romm-ui"
+        onCancelButton={() => closeModal?.()}
+        onButtonDown={(e: any) => { if (e?.detail?.button === GamepadButton.CANCEL) closeModal?.(); }}
+        style={{
+          position: 'fixed', inset: 0, zIndex: 9999,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: 'rgba(7,7,15,0.45)',
+          WebkitBackdropFilter: 'blur(8px)', backdropFilter: 'blur(8px)',
+        }}>
+        <style>{`
+          ${V2_FOCUS_STYLE}
+          .romm-modal-collapse, .romm-modal-collapse > div {
+            background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important;
+          }
+          @keyframes umIn { from { opacity: 0; transform: translateY(-6px) scale(0.98); } to { opacity: 1; transform: none; } }
+        `}</style>
+        <div onClick={() => closeModal?.()} style={{ position: 'absolute', inset: 0 }} />
+        <Focusable noFocusRing autoFocus ref={panelRef} flow-children="vertical" style={{
+          position: 'relative', width: '270px', maxWidth: '90vw', boxSizing: 'border-box',
+          fontFamily: V2.font, color: V2.fg, padding: '8px',
+          display: 'flex', flexDirection: 'column',
+          background: 'linear-gradient(180deg, rgba(20,20,30,0.7) 0%, rgba(10,10,18,0.78) 100%)',
+          WebkitBackdropFilter: 'blur(28px) saturate(1.1)', backdropFilter: 'blur(28px) saturate(1.1)',
+          border: `1px solid rgba(255,255,255,0.12)`, borderRadius: V2.radiusCard,
+          boxShadow: '0 16px 48px rgba(0,0,0,0.55)',
+          maxHeight: '82vh', overflowY: 'auto',
+          animation: 'umIn 0.18s cubic-bezier(0.22,1,0.36,1)',
+        }}>
+          {/* Header — collection/platform name. */}
+          <div style={{
+            fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em',
+            color: V2.fgMuted, padding: '6px 8px 10px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+          }}>{title}</div>
+          <div style={{ height: '1px', background: V2.border, margin: '0 4px 4px' }} />
+          <UserMenuRow
+            icon={syncing ? <FaSync size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <FaDownload size={14} />}
+            label={`Download missing${missing ? ` (${missing})` : ''}`}
+            disabled={syncDisabled}
+            onSelect={() => { if (syncDisabled) return; closeModal?.(); onSyncMissing(); }} />
+          {/* Auto-sync toggle — collections only (platforms have no continuous
+              sync; virtual collections aren't tracked by the sync manager). */}
+          {isCollection && !isVirtual && (
+            <UserMenuRow
+              icon={<FaSync size={14} />}
+              label={isSynced ? 'Disable auto-sync' : 'Enable auto-sync'}
+              onSelect={() => { closeModal?.(); onToggleSync(); }} />
+          )}
+          {!isVirtual && (
+            <>
+              <div style={{ height: '1px', background: V2.border, margin: '4px 4px' }} />
+              <UserMenuRow
+                icon={armed ? <FaCheck size={14} /> : <FaTrash size={14} />}
+                label={armed ? 'Confirm remove' : `Remove downloaded${downloaded ? ` (${downloaded})` : ''}`}
+                danger disabled={removeDisabled}
+                onSelect={() => {
+                  if (removeDisabled) return;
+                  if (!armed) { setArmed(true); return; }
+                  setArmed(false); closeModal?.(); onRemove();
+                }} />
+            </>
+          )}
+        </Focusable>
+      </Focusable>
+    </ModalRoot>
+  );
+}
+
+// The account menu pill. Click/A opens the RomM-styled account dropdown.
+function UserPill({ username, role, avatar }: { username: string; role: string; avatar: string | null }) {
+  const [active, setActive] = useState(false);
+  const openMenu = () => showModal(
+    <UserMenuModal username={username} role={role} avatar={avatar} />,
+  );
+  return (
+    <Focusable noFocusRing onActivate={openMenu} onClick={openMenu}
+      onFocus={() => setActive(true)} onBlur={() => setActive(false)}
+      onMouseEnter={() => setActive(true)} onMouseLeave={() => setActive(false)}
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: '8px',
+        background: active ? V2.surfaceHover : V2.surface,
+        border: `1px solid ${V2.borderStrong}`,
+        borderRadius: V2.radiusPill, padding: '3px 12px 3px 3px',
+        color: V2.fg, cursor: 'pointer', transition: 'background 0.15s ease',
+      }}>
+      <UserAvatar username={username} avatar={avatar} size={30} />
+      <span style={{ fontSize: '13px', fontWeight: 500, whiteSpace: 'nowrap' }}>{username}</span>
+      <FaChevronDown size={11} style={{ color: V2.fgMuted }} />
+    </Focusable>
   );
 }
 
@@ -1415,9 +1748,9 @@ function V2Button({ children, onClick, variant = 'tonal', color, disabled }:
   };
   const tone =
     variant === 'primary' ? { background: V2.brand, color: '#fff' }
-    : variant === 'danger' ? { background: V2.danger, color: '#fff' }
-    : variant === 'tonal' ? { background: V2.surface, color: color || V2.fg, border: `1px solid ${V2.border}` }
-    : { background: 'transparent', color: color || V2.fg2 };
+      : variant === 'danger' ? { background: V2.danger, color: '#fff' }
+        : variant === 'tonal' ? { background: V2.surface, color: color || V2.fg, border: `1px solid ${V2.border}` }
+          : { background: 'transparent', color: color || V2.fg2 };
   const glow = active && !disabled
     ? { boxShadow: `0 0 0 2px ${V2.brand}`, filter: 'brightness(1.12)' }
     : {};
@@ -1445,9 +1778,11 @@ function V2Button({ children, onClick, variant = 'tonal', color, disabled }:
 // throughout; controller focus paints a brand ring + slight scale.
 function GameActionButton({ icon, label, onClick, variant = 'surface', accent, disabled, progress,
   onOptionsButton, optionsHint }:
-  { icon: any; label?: string; onClick: () => void;
+  {
+    icon: any; label?: string; onClick: () => void;
     variant?: 'emphasized' | 'surface' | 'danger'; accent?: 'danger'; disabled?: boolean;
-    progress?: number | null; onOptionsButton?: () => void; optionsHint?: boolean }) {
+    progress?: number | null; onOptionsButton?: () => void; optionsHint?: boolean
+  }) {
   const [active, setActive] = useState(false);
   const labelled = !!label;
   const hasProgress = typeof progress === 'number';
@@ -1482,13 +1817,17 @@ function GameActionButton({ icon, label, onClick, variant = 'surface', accent, d
   const tone =
     variant === 'emphasized'
       ? { background: active ? '#e6e6e6' : '#ffffff', color: '#111117', borderColor: '#ffffff' }
-    : variant === 'danger'
-      ? { background: V2.danger, color: '#fff', borderColor: V2.danger }
-    : dangerSurface
-      ? { background: active ? 'rgba(255,80,80,0.18)' : 'rgba(255,80,80,0.10)',
-          color: V2.danger, borderColor: active ? V2.danger : 'rgba(255,80,80,0.40)' }
-    : { background: active ? V2.surfaceHover : V2.surface,
-        color: active ? V2.fg : V2.fg2, borderColor: V2.borderStrong };
+      : variant === 'danger'
+        ? { background: V2.danger, color: '#fff', borderColor: V2.danger }
+        : dangerSurface
+          ? {
+            background: active ? 'rgba(255,80,80,0.18)' : 'rgba(255,80,80,0.10)',
+            color: V2.danger, borderColor: active ? V2.danger : 'rgba(255,80,80,0.40)'
+          }
+          : {
+            background: active ? V2.surfaceHover : V2.surface,
+            color: active ? V2.fg : V2.fg2, borderColor: V2.borderStrong
+          };
   const ring = dangerSurface ? V2.danger : V2.brand;
   const glow = active && !disabled ? { boxShadow: `0 0 0 2px ${ring}` } : {};
   return (
@@ -1577,8 +1916,10 @@ function AgeRatingBadge({ item }: { item: { category: string; rating: string; ic
   if (item.icon_url && !failed) {
     return <img src={item.icon_url} alt={label} title={label} loading="lazy"
       onError={() => setFailed(true)}
-      style={{ width: '44px', height: '44px', objectFit: 'contain', borderRadius: V2.radiusSm,
-        background: V2.surface, padding: '3px', border: `1px solid ${V2.border}` }} />;
+      style={{
+        width: '44px', height: '44px', objectFit: 'contain', borderRadius: V2.radiusSm,
+        background: V2.surface, padding: '3px', border: `1px solid ${V2.border}`
+      }} />;
   }
   return (
     <span title={label} style={{
@@ -1869,18 +2210,18 @@ const _lsAvail = (() => { try { return typeof localStorage !== 'undefined'; } ca
 
 function _persistLibGroup(key: string, list: LibGame[]) {
   if (!_lsAvail) return;
-  try { localStorage.setItem(_LS_LIB_PREFIX + key, JSON.stringify({ t: Date.now(), v: list })); } catch {}
+  try { localStorage.setItem(_LS_LIB_PREFIX + key, JSON.stringify({ t: Date.now(), v: list })); } catch { }
 }
 function _dropLibGroup(key: string) {
   if (!_lsAvail) return;
-  try { localStorage.removeItem(_LS_LIB_PREFIX + key); } catch {}
+  try { localStorage.removeItem(_LS_LIB_PREFIX + key); } catch { }
 }
 // Write-through helpers — use these instead of touching _libGamesCache directly.
 function libCacheSet(key: string, list: LibGame[]) { _libGamesCache.set(key, list); _persistLibGroup(key, list); }
 function libCacheDelete(key: string) { _libGamesCache.delete(key); _dropLibGroup(key); }
 function persistHomeCache() {
   if (!_lsAvail || !_homeCache) return;
-  try { localStorage.setItem(_LS_HOME_KEY, JSON.stringify({ t: Date.now(), v: _homeCache })); } catch {}
+  try { localStorage.setItem(_LS_HOME_KEY, JSON.stringify({ t: Date.now(), v: _homeCache })); } catch { }
 }
 
 // Hydrate both caches once at module load from any non-expired localStorage data.
@@ -1899,18 +2240,18 @@ function persistHomeCache() {
         else stale.push(k);
       } catch { stale.push(k); }
     }
-    stale.forEach((k) => { try { localStorage.removeItem(k); } catch {} });
-  } catch {}
+    stale.forEach((k) => { try { localStorage.removeItem(k); } catch { } });
+  } catch { }
   try {
     const o = JSON.parse(localStorage.getItem(_LS_HOME_KEY) || 'null');
     if (o && o.v && (now - (o.t || 0)) < _LS_TTL_MS) _homeCache = o.v;
     else if (o) localStorage.removeItem(_LS_HOME_KEY);
-  } catch {}
+  } catch { }
   try {
     const o = JSON.parse(localStorage.getItem(_LS_PLATICON) || 'null');
     if (o && typeof o === 'object')
       for (const k of Object.keys(o)) _platIconCache.set(k, o[k]);
-  } catch {}
+  } catch { }
 })();
 
 const formatSpeed = (bytesPerSec: number): string => {
@@ -2476,7 +2817,7 @@ function V2TextField({ label, value, onChange, password, placeholder, icon, mono
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%' }}>
       {label && <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: V2.fgMuted, textAlign: 'center' }}>{label}</div>}
-      <style>{`.${uid} label{display:none!important}.${uid}>div{background:transparent!important;border:none!important;box-shadow:none!important;padding:0!important;margin:0!important}.${uid}>div>div{background:transparent!important;border:none!important;box-shadow:none!important;padding:0!important}.${uid} input{background:transparent!important;border:none!important;outline:none!important;box-shadow:none!important;color:${V2.fg}!important;font-size:${mono?'20px':'14px'}!important;font-weight:${mono?'700':'400'}!important;font-family:${mono?'monospace':'inherit'}!important;padding:0!important;margin:0!important;height:auto!important;min-height:0!important;caret-color:${V2.brand}!important;text-align:center!important;letter-spacing:${mono?'.3em':'normal'}!important;text-indent:${mono?'.3em':0}!important;text-transform:${mono?'uppercase':'none'}!important}.${uid} input::placeholder{color:rgba(255,255,255,0.40)!important}`}</style>
+      <style>{`.${uid} label{display:none!important}.${uid}>div{background:transparent!important;border:none!important;box-shadow:none!important;padding:0!important;margin:0!important}.${uid}>div>div{background:transparent!important;border:none!important;box-shadow:none!important;padding:0!important}.${uid} input{background:transparent!important;border:none!important;outline:none!important;box-shadow:none!important;color:${V2.fg}!important;font-size:${mono ? '20px' : '14px'}!important;font-weight:${mono ? '700' : '400'}!important;font-family:${mono ? 'monospace' : 'inherit'}!important;padding:0!important;margin:0!important;height:auto!important;min-height:0!important;caret-color:${V2.brand}!important;text-align:center!important;letter-spacing:${mono ? '.3em' : 'normal'}!important;text-indent:${mono ? '.3em' : 0}!important;text-transform:${mono ? 'uppercase' : 'none'}!important}.${uid} input::placeholder{color:rgba(255,255,255,0.40)!important}`}</style>
       <div ref={wrapperRef} className={uid} style={{
         display: 'flex', alignItems: 'center', gap: '10px', height: '40px', padding: '0 12px',
         borderRadius: V2.radiusMd,
@@ -2548,42 +2889,96 @@ function PairCodeField({ label, value, onChange }:
 // Search tab — debounced text filter over the whole library, results as a
 // cover-art grid (the nav 'Search' destination).
 function SearchPanel({ onOpen, onBg }: { onOpen: (g: LibGame) => void; onBg: (uri: string | null) => void }) {
+  // Minimum characters before we hit the backend. Browsing the whole library
+  // (empty query) renders every cover tile, which tanks performance on big
+  // collections — so search is gated until the user starts typing.
+  const MIN_CHARS = 2;
   const [q, setQ] = useState('');
   const [results, setResults] = useState<LibGame[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const query = q.trim();
+  const tooShort = query.length < MIN_CHARS;
   useEffect(() => {
-    // Enter the loading state synchronously so the debounce window shows
-    // "Searching…" rather than briefly flashing the "no match" empty state.
+    // Below the threshold: don't search, clear any prior results.
+    if (tooShort) { setResults([]); setLoading(false); return; }
+    // Keep the current results on screen while the new query debounces/fetches
+    // — refining "syph" → "sypho" shouldn't blow the grid away and flash
+    // "Searching…" on every keystroke. The full-screen loading state is only
+    // shown when there's nothing to display yet (see render below).
     setLoading(true);
-    // Empty query browses the whole library (mirrors RomM's Search default),
-    // so it resolves instantly with no debounce; typed queries debounce.
-    const delay = q.trim() ? 250 : 0;
     const t = setTimeout(async () => {
       try { const r = await searchGames(q); setResults(r?.success ? (r.games || []) : []); }
       catch { setResults([]); }
       finally { setLoading(false); }
-    }, delay);
+    }, 250);
     return () => clearTimeout(t);
   }, [q]);
+
+  // On-demand windowed mount — same scheme as the platform/collection games
+  // page (visN + focus-driven growth + IO sentinel). A broad query (e.g. "ma")
+  // can match hundreds of ROMs; mounting every Focusable tree at once stutters,
+  // so render the first screenful and grow as the user scrolls toward the end.
+  const GRID_FIRST = 30, GRID_CHUNK = 30;
+  const [visN, setVisN] = useState(GRID_FIRST);
+  useEffect(() => { setVisN(Math.min(results.length, GRID_FIRST)); }, [results]);
+  const visNRef = useRef(visN); visNRef.current = visN;
+  const resultsLenRef = useRef(results.length); resultsLenRef.current = results.length;
+  const onTileFocus = useRef((i: number) => {
+    if (i >= visNRef.current - 12)
+      setVisN((n) => Math.min(resultsLenRef.current, Math.max(n, i + 1 + GRID_CHUNK)));
+  }).current;
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (visN >= results.length) return;
+    const el = sentinelRef.current;
+    const bump = () => setVisN((n) => Math.min(results.length, n + GRID_CHUNK));
+    if (!el || typeof IntersectionObserver === 'undefined') { bump(); return; }
+    let io: IntersectionObserver | null = null;
+    try {
+      io = new IntersectionObserver((es) => { if (es.some((e) => e.isIntersecting)) bump(); },
+        { rootMargin: '400px' });
+      io.observe(el);
+    } catch { bump(); }
+    return () => { try { io?.disconnect(); } catch { } };
+  }, [visN, results.length]);
+
+  // Stable callback identity so memo(GameTile) isn't invalidated each render.
+  const onOpenRef = useRef(onOpen); onOpenRef.current = onOpen;
+  const openGame = useRef((g: LibGame) => onOpenRef.current(g)).current;
+  const onBgRef = useRef(onBg); onBgRef.current = onBg;
+  const setBg = useRef((uri: string | null) => onBgRef.current(uri)).current;
+
+  const gridTiles = useMemo(() => results.slice(0, visN).map((g, i) => (
+    <GameTile key={g.rom_id} game={g} onOpen={openGame} onActiveCover={setBg}
+      index={i} onFocusIdx={onTileFocus} />
+  )), [results, visN]);
+
   return (
     <div style={{ padding: '0 16px' }}>
       <div style={{ maxWidth: '520px', margin: '0 auto 16px' }}>
         <V2SearchField value={q} onChange={setQ} />
       </div>
-      {loading ? (
-        <div style={{ padding: '16px', color: V2.fgMuted, fontSize: '13px', textAlign: 'center' }}>
-          {q.trim() ? 'Searching…' : 'Loading library…'}
+      {tooShort ? (
+        <div style={{ padding: '24px', color: V2.fgMuted, fontSize: '13px', textAlign: 'center' }}>
+          {`Type at least ${MIN_CHARS} characters to search your library.`}
         </div>
       ) : results.length === 0 ? (
-        <div style={{ padding: '24px', color: V2.fgMuted, fontSize: '13px', textAlign: 'center' }}>
-          {q.trim() ? `No games match "${q.trim()}".` : 'No games in your library yet.'}
+        // Only the empty grid swaps to a text state: loading on first fetch,
+        // "no match" once a fetch has resolved with nothing.
+        <div style={{ padding: loading ? '16px' : '24px', color: V2.fgMuted, fontSize: '13px', textAlign: 'center' }}>
+          {loading ? 'Searching…' : `No games match "${query}".`}
         </div>
       ) : (
+        // Results present: keep the grid mounted even while a refined query is
+        // in flight, so typing another letter doesn't flash "Searching…".
         <Focusable noFocusRing style={{
           display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(132px, 1fr))',
           gap: '18px 16px', padding: '6px 0',
         }}>
-          {results.map((g) => <GameTile key={g.rom_id} game={g} onOpen={onOpen} onActiveCover={onBg} />)}
+          {gridTiles}
+          {visN < results.length && (
+            <div ref={sentinelRef} style={{ gridColumn: '1 / -1', height: '1px' }} />
+          )}
         </Focusable>
       )}
     </div>
@@ -2980,7 +3375,7 @@ function LibraryGamesPage() {
       const i = siblings.findIndex((s) => s.key === group.key);
       if (i >= 0) {
         const nbrs = [siblings[i - 1], siblings[i + 1],
-          siblings[(i + 1) % siblings.length], siblings[(i - 1 + siblings.length) % siblings.length]];
+        siblings[(i + 1) % siblings.length], siblings[(i - 1 + siblings.length) % siblings.length]];
         for (const n of nbrs) if (n) prefetch(n.key);
       }
     })();
@@ -3030,7 +3425,7 @@ function LibraryGamesPage() {
         { rootMargin: '400px' });
       io.observe(el);
     } catch { bump(); }
-    return () => { try { io?.disconnect(); } catch {} };
+    return () => { try { io?.disconnect(); } catch { } };
   }, [visN, games.length]);
 
   // Stable identity across renders so memo(GameTile) isn't invalidated every
@@ -3066,6 +3461,14 @@ function LibraryGamesPage() {
   // real width so the track translate keeps it perfectly centred.
   const selSlotRef = useRef<HTMLDivElement | null>(null);
   const [selW, setSelW] = useState(120);
+  // Right-hand status column (count + synced dot, or live sync progress). It's
+  // content-sized so the count never clips on smaller screens; we measure its
+  // real width and mirror it to the left spacer so the carousel stays centred.
+  const railRef = useRef<HTMLDivElement | null>(null);
+  const [railW, setRailW] = useState(64);
+  // Focus/hover state for the games-count action trigger, so it reads as a
+  // pressable control rather than a static label.
+  const [actHot, setActHot] = useState(false);
   // Direction of the last group change, so the games grid slides in from the same
   // side as the carousel — making the header + covers read as one moving surface.
   const [slideDir, setSlideDir] = useState<1 | -1>(1);
@@ -3207,8 +3610,9 @@ function LibraryGamesPage() {
 
   // Remove this collection's downloaded ROMs. Per the chosen UX: turn auto-sync
   // OFF first (so the worker doesn't immediately re-download), then delete the
-  // local files. Bumps reloadTick to remount the grid so download dots clear.
-  const [reloadTick, setReloadTick] = useState(0);
+  // local files. The dots clear via the setGames update below; we deliberately
+  // do NOT remount the grid (that would replay the slide/fade animation).
+  const [reloadTick] = useState(0);
   const doRemove = async () => {
     if (!group) return;
     const name = group.key;
@@ -3217,46 +3621,27 @@ function LibraryGamesPage() {
         await toggleCollectionSync(name, false);
         setSyncOverrides((m) => ({ ...m, [name]: false }));
       }
-      const ok = await deleteCollectionRoms(name);
+      const ok = await deleteCollectionRoms(name, mode);
       if (ok === false) throw new Error('backend declined');
       setGames((gs) => gs.map((g) => ({ ...g, is_downloaded: false })));
       libCacheDelete(cacheKey(name));
-      setReloadTick((n) => n + 1);
     } catch (e) {
       toaster.toast({ title: 'Remove failed', body: String(e) });
     }
   };
 
-  // Press A / activate on the games-count opens the collection action menu.
-  // The destructive "Remove downloaded" arms on first select (re-opening the
-  // menu as "Confirm remove") and commits on the second — matching the game-tile
-  // delete affordance. Disarms after 4s.
-  const removeArmedRef = useRef(false);
+  // Press A / activate on the games-count opens the collection action menu,
+  // styled in the v2 glass chrome (matching the account dropdown). The
+  // destructive "Remove downloaded" arms on first select then commits on the
+  // second — matching the game-tile delete affordance.
   const openActions = () => {
     const missing = games.filter((g) => !g.is_downloaded).length;
     const downloaded = games.filter((g) => g.is_downloaded).length;
-    const armed = removeArmedRef.current;
-    showContextMenu(
-      <Menu label={group?.label || 'Library'} onCancel={() => { removeArmedRef.current = false; }}>
-        <MenuItem disabled={!!syncJob || missing === 0} onSelected={syncMissing}>
-          {`${isVirtual ? 'Download' : 'Sync'} missing${missing ? ` (${missing})` : ''}`}
-        </MenuItem>
-        {!isVirtual && (
-          <MenuItem tone="destructive" disabled={downloaded === 0}
-            onSelected={() => {
-              if (!armed) {
-                removeArmedRef.current = true;
-                setTimeout(() => { removeArmedRef.current = false; }, 4000);
-                requestAnimationFrame(openActions); // reopen showing the confirm label
-              } else {
-                removeArmedRef.current = false;
-                doRemove();
-              }
-            }}>
-            {armed ? 'Confirm remove' : `Remove downloaded${downloaded ? ` (${downloaded})` : ''}`}
-          </MenuItem>
-        )}
-      </Menu>,
+    showModal(
+      <CollectionActionsModal
+        title={group?.label || 'Library'} isCollection={isCollection} isVirtual={isVirtual} isSynced={isSynced}
+        missing={missing} downloaded={downloaded} syncing={!!syncJob}
+        onSyncMissing={syncMissing} onToggleSync={toggleSync} onRemove={doRemove} />,
     );
   };
 
@@ -3299,9 +3684,14 @@ function LibraryGamesPage() {
   }, [group?.key, siblings.length]);
 
   // Width reserved for the right-hand status column (and mirrored by the left
-  // spacer so the carousel stays screen-centred). Fixed while syncing so the
-  // per-second speed/ETA text fills a constant box instead of resizing it.
-  const railW = prog ? 188 : 64;
+  // spacer so the carousel stays screen-centred). While syncing it's a fixed
+  // box so the per-second speed/ETA text doesn't resize it; otherwise we let it
+  // size to its content and measure that real width so the count never clips.
+  useLayoutEffect(() => {
+    if (prog) { setRailW(188); return; }
+    const el = railRef.current;
+    if (el) setRailW(el.offsetWidth + 16); // + outer box's 12+4px horizontal padding
+  }, [prog, games.length, isSynced, loading, group?.key]);
 
   return v2Page(
     <Focusable noFocusRing onButtonDown={onButtonDown} onCancelButton={onBack}
@@ -3318,7 +3708,7 @@ function LibraryGamesPage() {
         }}>
           {/* Spacer mirrors the games-count column on the right so the carousel
               stays centred on the screen, not just within the flex row. */}
-          <div style={{ flexShrink: 0, width: `${railW}px`, padding: '0 4px 0 12px', boxSizing: 'border-box', transition: 'width 0.2s ease' }} />
+          <div style={{ flexShrink: 0, width: `${railW}px`, padding: '0 4px 0 12px', boxSizing: 'border-box', transition: 'width 0.32s cubic-bezier(0.22, 1, 0.36, 1)' }} />
           {canPage && <div style={{ flexShrink: 0, padding: '0 4px', zIndex: 2, display: 'flex', alignItems: 'center' }}><Bumper label="L1" /></div>}
           <div style={{
             position: 'relative', overflow: 'hidden', height: '100%', flex: 1,
@@ -3365,25 +3755,49 @@ function LibraryGamesPage() {
           {/* Games count doubles as the collection action trigger: focus it and
               press A to open the actions menu (Sync missing). While a sync job is
               running it shows live progress instead of the static count. */}
+          {/* Outer box owns the animated px width (and clips during the slide);
+              the inner node keeps its natural width so we can measure the real
+              content size without a feedback loop. Width changes — entering or
+              leaving sync, or the count growing after a sync — glide instead of
+              snapping, in step with the left spacer. */}
           <Focusable noFocusRing onActivate={openActions} onClick={openActions}
+            onFocus={() => setActHot(true)} onBlur={() => setActHot(false)}
+            onMouseEnter={() => setActHot(true)} onMouseLeave={() => setActHot(false)}
             style={{
               flexShrink: 0, width: `${railW}px`, boxSizing: 'border-box',
               padding: '0 12px 0 4px', overflow: 'hidden',
-              textAlign: 'right', fontSize: '11px', whiteSpace: 'nowrap',
-              cursor: 'pointer', transition: 'width 0.2s ease',
+              fontSize: '11px',
+              cursor: 'pointer', transition: 'width 0.32s cubic-bezier(0.22, 1, 0.36, 1)',
               color: V2.fgMuted,
-              display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '5px',
+              display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
             }}>
-            {/* Synced indicator — same green dot as downloaded games/tiles. */}
-            {isSynced && !prog && (
-              <span style={{
-                width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0,
-                background: V2.success, boxShadow: '0 0 0 2px rgba(0,0,0,0.45)',
-              }} />
-            )}
-            {!loading && (prog
-              ? `${progPct}%${prog.speed ? `   ·   ${formatSpeed(prog.speed)}` : ''}${formatEta(progEta) ? `   ·   ${formatEta(progEta)} left` : ''}`
-              : `${games.length} ${games.length === 1 ? 'game' : 'games'}`)}
+            {/* The inner node reads as a pressable pill: subtle border + a
+                trailing kebab so it's clearly a control, not a static count.
+                Highlights on focus/hover. */}
+            <div ref={railRef} style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
+              gap: '6px', whiteSpace: 'nowrap', flexShrink: 0, textAlign: 'right',
+              padding: '4px 8px', borderRadius: V2.radiusPill, boxSizing: 'border-box',
+              border: `1px solid ${actHot ? V2.borderStrong : V2.border}`,
+              background: actHot ? V2.surfaceHover : V2.surface,
+              color: actHot ? V2.fg : V2.fgMuted,
+              transition: 'background 0.15s ease, border-color 0.15s ease, color 0.15s ease',
+            }}>
+              {/* Synced indicator — same green dot as downloaded games/tiles. */}
+              {isSynced && !prog && (
+                <span style={{
+                  width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0,
+                  background: V2.success, boxShadow: '0 0 0 2px rgba(0,0,0,0.45)',
+                }} />
+              )}
+              {!loading && (prog
+                ? `${progPct}%${prog.speed ? `   ·   ${formatSpeed(prog.speed)}` : ''}${formatEta(progEta) ? `   ·   ${formatEta(progEta)} left` : ''}`
+                : `${games.length} ${games.length === 1 ? 'game' : 'games'}`)}
+              {/* Kebab affordance — signals the count opens an actions menu. */}
+              {!loading && !prog && (
+                <FaEllipsisH size={10} style={{ flexShrink: 0, opacity: actHot ? 0.9 : 0.55 }} />
+              )}
+            </div>
           </Focusable>
         </Focusable>
         {/* Determinate sync bar — pinned to the header's bottom border, like
@@ -3715,7 +4129,7 @@ function AchievementsTab({ achievements }: { achievements: Achievement[] }) {
         {achievements.filter(isVisible).map((a, i) => {
           const src = a.earned ? a.badge_url : a.badge_url_lock;
           return (
-            <Focusable noFocusRing key={a.ra_id ?? i} onActivate={() => {}} className="romm-row ach-fade" style={{
+            <Focusable noFocusRing key={a.ra_id ?? i} onActivate={() => { }} className="romm-row ach-fade" style={{
               display: 'grid', gridTemplateColumns: '52px 1fr auto', gap: '14px', alignItems: 'center',
               padding: '10px 14px', borderRadius: V2.radiusMd, opacity: a.earned ? 1 : 0.55,
               '--ach-i': Math.min(i, 12) + 2,
@@ -3793,18 +4207,18 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
   return (
     <ModalRoot bHideCloseIcon onCancel={closeModal} onEscKeypress={closeModal}
       className="romm-modal-collapse" modalClassName="romm-modal-collapse">
-    <Focusable noFocusRing
-      className="romm-ui"
-      onCancelButton={() => closeModal?.()}
-      onButtonDown={(e: any) => { if (e?.detail?.button === GamepadButton.CANCEL) closeModal?.(); }}
-      style={{
-        position: 'fixed', inset: 0, zIndex: 9999,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        background: 'rgba(7,7,15,0.45)',
-        WebkitBackdropFilter: 'blur(8px)', backdropFilter: 'blur(8px)',
-      }}
-    >
-      <style>{`
+      <Focusable noFocusRing
+        className="romm-ui"
+        onCancelButton={() => closeModal?.()}
+        onButtonDown={(e: any) => { if (e?.detail?.button === GamepadButton.CANCEL) closeModal?.(); }}
+        style={{
+          position: 'fixed', inset: 0, zIndex: 9999,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: 'rgba(7,7,15,0.45)',
+          WebkitBackdropFilter: 'blur(8px)', backdropFilter: 'blur(8px)',
+        }}
+      >
+        <style>{`
         @keyframes sdShimmer { 0% { background-position: -150% 0; } 100% { background-position: 150% 0; } }
         .sd-shimmer { background-image: linear-gradient(100deg, transparent 20%, rgba(255,255,255,0.22) 50%, transparent 80%) !important; background-size: 200% 100% !important; background-repeat: no-repeat; animation: sdShimmer 1.1s linear infinite; }
         ${V2_FOCUS_STYLE}
@@ -3813,62 +4227,62 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
           background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important;
         }
       `}</style>
-      <Focusable noFocusRing autoFocus ref={cardRef} flow-children="vertical" style={{
-        fontFamily: V2.font, color: V2.fg, width: '520px', maxWidth: '90vw', boxSizing: 'border-box',
-        padding: '18px', display: 'flex', flexDirection: 'column', gap: '12px',
-        maxHeight: '82vh', overflowY: 'auto',
-        background: 'linear-gradient(180deg, rgba(20,20,30,0.7) 0%, rgba(10,10,18,0.78) 100%)',
-        WebkitBackdropFilter: 'blur(28px) saturate(1.1)', backdropFilter: 'blur(28px) saturate(1.1)',
-        border: `1px solid rgba(255,255,255,0.12)`, borderRadius: V2.radiusCard,
-        boxShadow: '0 16px 48px rgba(0,0,0,0.55)',
-      }}>
-        <div>
-          <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: V2.brand }}>
-            Restore {isState ? 'state' : 'save'}
-          </div>
-          <div style={{ fontSize: '20px', fontWeight: 800, marginTop: '4px' }}>{fmtHistTs(entry.updated_at)}</div>
-          {meta && <div style={{ fontSize: '13px', color: V2.fg2, marginTop: '4px' }}>{meta}</div>}
-        </div>
-
-        <div className={loadingShot ? 'sd-shimmer' : ''} style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          minHeight: loadingShot || !shot ? '120px' : undefined,
-          backgroundColor: (loadingShot || !shot) ? V2.coverPlaceholder : 'transparent',
-          borderRadius: V2.radiusLg, overflow: 'hidden',
-          border: (loadingShot || !shot) ? `1px solid ${V2.border}` : 'none',
+        <Focusable noFocusRing autoFocus ref={cardRef} flow-children="vertical" style={{
+          fontFamily: V2.font, color: V2.fg, width: '520px', maxWidth: '90vw', boxSizing: 'border-box',
+          padding: '18px', display: 'flex', flexDirection: 'column', gap: '12px',
+          maxHeight: '82vh', overflowY: 'auto',
+          background: 'linear-gradient(180deg, rgba(20,20,30,0.7) 0%, rgba(10,10,18,0.78) 100%)',
+          WebkitBackdropFilter: 'blur(28px) saturate(1.1)', backdropFilter: 'blur(28px) saturate(1.1)',
+          border: `1px solid rgba(255,255,255,0.12)`, borderRadius: V2.radiusCard,
+          boxShadow: '0 16px 48px rgba(0,0,0,0.55)',
         }}>
-          {loadingShot ? (
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', color: V2.fgMuted }}>
-              <FaSync size={16} style={{ animation: 'spin 1s linear infinite' }} />
-              <span style={{ fontSize: '12px' }}>Loading preview…</span>
+          <div>
+            <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: V2.brand }}>
+              Restore {isState ? 'state' : 'save'}
             </div>
-          ) : shot ? (
-            <img src={shot} style={{ maxWidth: '100%', maxHeight: '210px', width: 'auto', display: 'block', borderRadius: V2.radiusLg }} />
-          ) : (
-            <span style={{ fontSize: '12px', color: V2.fgMuted }}>No preview available</span>
-          )}
-        </div>
+            <div style={{ fontSize: '20px', fontWeight: 800, marginTop: '4px' }}>{fmtHistTs(entry.updated_at)}</div>
+            {meta && <div style={{ fontSize: '13px', color: V2.fg2, marginTop: '4px' }}>{meta}</div>}
+          </div>
 
-        <div style={{ fontSize: '12.5px', color: V2.fg2, lineHeight: 1.55, background: V2.surface, border: `1px solid ${V2.border}`, borderRadius: V2.radiusMd, padding: '10px 12px' }}>
-          <span style={{ color: V2.fg, fontWeight: 600 }}>Restore (overwrite)</span> replaces the current file with this version. The current file is backed up first.
-          {isState && <><br /><span style={{ color: V2.fg, fontWeight: 600 }}>Restore as copy</span> writes this version into a new free slot, leaving your current slots untouched.</>}
-        </div>
+          <div className={loadingShot ? 'sd-shimmer' : ''} style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            minHeight: loadingShot || !shot ? '120px' : undefined,
+            backgroundColor: (loadingShot || !shot) ? V2.coverPlaceholder : 'transparent',
+            borderRadius: V2.radiusLg, overflow: 'hidden',
+            border: (loadingShot || !shot) ? `1px solid ${V2.border}` : 'none',
+          }}>
+            {loadingShot ? (
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', color: V2.fgMuted }}>
+                <FaSync size={16} style={{ animation: 'spin 1s linear infinite' }} />
+                <span style={{ fontSize: '12px' }}>Loading preview…</span>
+              </div>
+            ) : shot ? (
+              <img src={shot} style={{ maxWidth: '100%', maxHeight: '210px', width: 'auto', display: 'block', borderRadius: V2.radiusLg }} />
+            ) : (
+              <span style={{ fontSize: '12px', color: V2.fgMuted }}>No preview available</span>
+            )}
+          </div>
 
-        <Focusable noFocusRing flow-children="horizontal" style={{ display: 'flex', gap: '8px', flexWrap: 'nowrap', justifyContent: 'flex-end', alignItems: 'center' }}>
-          <V2Button variant="text" disabled={!!busy} onClick={() => closeModal?.()}>Cancel</V2Button>
-          {isState && (
-            <V2Button variant="tonal" disabled={!!busy} onClick={() => run(true)}>
-              {busy === 'copy' ? <FaSync size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <FaCopy size={12} />}
-              <span>Restore as copy</span>
+          <div style={{ fontSize: '12.5px', color: V2.fg2, lineHeight: 1.55, background: V2.surface, border: `1px solid ${V2.border}`, borderRadius: V2.radiusMd, padding: '10px 12px' }}>
+            <span style={{ color: V2.fg, fontWeight: 600 }}>Restore (overwrite)</span> replaces the current file with this version. The current file is backed up first.
+            {isState && <><br /><span style={{ color: V2.fg, fontWeight: 600 }}>Restore as copy</span> writes this version into a new free slot, leaving your current slots untouched.</>}
+          </div>
+
+          <Focusable noFocusRing flow-children="horizontal" style={{ display: 'flex', gap: '8px', flexWrap: 'nowrap', justifyContent: 'flex-end', alignItems: 'center' }}>
+            <V2Button variant="text" disabled={!!busy} onClick={() => closeModal?.()}>Cancel</V2Button>
+            {isState && (
+              <V2Button variant="tonal" disabled={!!busy} onClick={() => run(true)}>
+                {busy === 'copy' ? <FaSync size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <FaCopy size={12} />}
+                <span>Restore as copy</span>
+              </V2Button>
+            )}
+            <V2Button variant="danger" disabled={!!busy} onClick={() => run(false)}>
+              {busy === 'restore' ? <FaSync size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <FaUndo size={12} />}
+              <span>Restore (overwrite)</span>
             </V2Button>
-          )}
-          <V2Button variant="danger" disabled={!!busy} onClick={() => run(false)}>
-            {busy === 'restore' ? <FaSync size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <FaUndo size={12} />}
-            <span>Restore (overwrite)</span>
-          </V2Button>
+          </Focusable>
         </Focusable>
       </Focusable>
-    </Focusable>
     </ModalRoot>
   );
 }
@@ -4205,7 +4619,7 @@ async function launchGameSmart(romId: number, disc: string | null = null,
           console.error('[RomM] RunGame', e);
         }
       } else if (prep && prep.success === false && prep.steam_host === false
-                 && prep.message && prep.message !== 'Not running under gamescope') {
+        && prep.message && prep.message !== 'Not running under gamescope') {
         // A real failure (e.g. game not downloaded) — surface it rather than
         // silently falling back to a direct launch that would fail the same way.
         return prep;
@@ -4332,11 +4746,25 @@ function GameDetailPage() {
   const load = async () => {
     if (!game) { setLoading(false); return; }
     setLoading(true);
+    const rid = game.rom_id;
     try {
-      const res = await getGameDetail(game.rom_id);
+      const res = await getGameDetail(rid);
       if (res?.success) {
         setDetail(res);
         setIsDownloaded(!!res.is_downloaded);
+        // Earned achievements are fetched separately so nothing blocks on the
+        // extra /users/me round-trip; patch earned flags in once they arrive.
+        if (res.ra_id && (res.achievements?.length)) {
+          getRaEarned(res.ra_id).then((r: any) => {
+            const earned = new Set<string>(r?.earned || []);
+            if (!earned.size) return;
+            setDetail((prev: any) => prev && prev.rom_id === rid ? {
+              ...prev,
+              achievements: prev.achievements.map((a: any) =>
+                ({ ...a, earned: a.badge_id != null && earned.has(String(a.badge_id)) })),
+            } : prev);
+          }).catch(() => { });
+        }
       }
     } catch (e) {
       console.error('get_game_detail failed', e);
@@ -4535,8 +4963,8 @@ function GameDetailPage() {
                     {headerTags.map((tg, i) => {
                       const palette =
                         tg.tone === 'info' ? { c: '#93c5fd', b: 'rgba(147,197,253,0.14)', br: 'rgba(147,197,253,0.30)' }
-                        : tg.tone === 'brand' ? { c: V2.brandHover, b: 'rgba(139,116,232,0.16)', br: 'rgba(139,116,232,0.30)' }
-                        : { c: V2.fg2, b: V2.surface, br: V2.border };
+                          : tg.tone === 'brand' ? { c: V2.brandHover, b: 'rgba(139,116,232,0.16)', br: 'rgba(139,116,232,0.30)' }
+                            : { c: V2.fg2, b: V2.surface, br: V2.border };
                       return (
                         <span key={i} style={{
                           fontSize: '11px', fontWeight: 600, lineHeight: 1.6, padding: '1px 8px',
@@ -4591,8 +5019,10 @@ function GameDetailPage() {
             {/* Live transfer readout — speed · ETA, shown beside the button only
                 while a download is in flight (kept off the cover tiles by design). */}
             {downloading && dlProg && (dlProg.speed > 0 || dlProg.eta > 0) && (
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: V2.fg2,
-                animation: 'dlValIn 0.35s ease' }}>
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: V2.fg2,
+                animation: 'dlValIn 0.35s ease'
+              }}>
                 <span style={{ opacity: 0.3 }}>·</span>
                 {dlProg.speed > 0 && <span>{formatSpeed(dlProg.speed)}</span>}
                 {dlProg.speed > 0 && formatEta(dlProg.eta) && <span style={{ opacity: 0.3 }}>·</span>}
@@ -4801,27 +5231,232 @@ function V2Switch({ checked }: { checked: boolean }) {
   );
 }
 
+// Stats page — 1:1 port of RomM's ServerStats.vue: a section stack of
+// SummaryStatsSection (card grid in SettingsSection chrome) + PlatformsStatsSection
+// (toolbar + per-platform rows with size/percentage and a progress bar that
+// doubles as the row divider). Scope is plugin-local (this device).
+
+// RomM SettingsSection chrome: a header bar (surface bg, rounded-top only) over
+// a body box (bg-elevated, rounded-bottom).
+function V2StatsSectionBox({ title, icon, children }: { title: string; icon?: any; children: any }) {
+  return (
+    <section>
+      <header style={{
+        display: 'flex', alignItems: 'center', gap: '10px', padding: '12px 16px',
+        background: V2.surface, border: `1px solid ${V2.border}`, borderBottom: 'none',
+        borderRadius: '10px 10px 0 0', color: V2.fgMuted,
+      }}>
+        {icon}
+        <span style={{
+          fontSize: '11px', fontWeight: 700, letterSpacing: '0.1em',
+          textTransform: 'uppercase', color: V2.fg2,
+        }}>{title}</span>
+      </header>
+      <div style={{
+        border: `1px solid ${V2.border}`, borderRadius: '0 0 10px 10px',
+        overflow: 'hidden', background: V2.bgElevated,
+      }}>{children}</div>
+    </section>
+  );
+}
+
+// SummaryStatsSection card: leading icon + big tabular number + uppercase label.
+function V2StatCard({ icon, value, label }: { icon: any; value: string; label: string }) {
+  return (
+    <div style={{
+      display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '4px',
+      padding: '16px', background: V2.surface, border: `1px solid ${V2.border}`,
+      borderRadius: V2.radiusLg, color: V2.fgMuted,
+    }}>
+      <div style={{ color: V2.brandHover }}>{icon}</div>
+      <div style={{
+        fontSize: '28px', fontWeight: 800, lineHeight: 1.1, color: V2.fg,
+        fontVariantNumeric: 'tabular-nums',
+      }}>{value}</div>
+      <div style={{
+        fontSize: '11px', fontWeight: 600, letterSpacing: '0.08em',
+        textTransform: 'uppercase', color: V2.fgMuted,
+      }}>{label}</div>
+    </div>
+  );
+}
+
+type PlatStat = { slug: string; fs_slug?: string; name: string; rom_count: number; downloaded: number; fs_size_bytes: number };
+
+// PlatformsStatsSection row: icon · name + meta · size + pct · progress bar
+// (spans full width, doubles as the divider; hidden on the last row).
+function PlatformStatRow({ p, total, last }: { p: PlatStat; total: number; last: boolean }) {
+  const pct = total > 0 ? (p.fs_size_bytes / total) * 100 : 0;
+  return (
+    <div style={{
+      display: 'grid', gridTemplateColumns: 'auto 1fr auto', columnGap: '14px', rowGap: '12px',
+      alignItems: 'center', paddingTop: last ? undefined : '14px',
+    }}>
+      <div style={{
+        flexShrink: 0, width: '32px', height: '32px',
+        display: 'flex', alignItems: 'center', justifyContent: 'center', color: V2.fg2,
+      }}><PlatformIcon slug={p.slug} fsSlug={p.fs_slug} size={32} /></div>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: '14px', fontWeight: 600, color: V2.fg }}>{p.name}</div>
+        <div style={{
+          marginTop: '4px', display: 'flex', flexWrap: 'wrap', alignItems: 'center',
+          gap: '6px', fontSize: '12px', color: V2.fgMuted,
+        }}>
+          <span style={{ fontWeight: 500, color: V2.fg2 }}>{p.rom_count} game{p.rom_count === 1 ? '' : 's'}</span>
+          <span style={{ color: V2.fgFaint }}>·</span>
+          <span style={{
+            display: 'inline-flex', alignItems: 'center', gap: '4px', padding: '1px 6px',
+            borderRadius: V2.radiusSm, background: V2.surface, border: `1px solid ${V2.border}`,
+            fontSize: '11px', fontWeight: 500, color: V2.fg2,
+          }}>{p.downloaded} downloaded</span>
+        </div>
+      </div>
+      <div style={{ textAlign: 'right', flexShrink: 0 }}>
+        <div style={{ fontSize: '13px', fontWeight: 700, color: V2.brand, fontVariantNumeric: 'tabular-nums' }}>
+          {fmtBytes(p.fs_size_bytes) || '0 B'}
+        </div>
+        <div style={{ fontSize: '11px', color: V2.fgFaint }}>{pct.toFixed(1)}%</div>
+      </div>
+      {!last && (
+        <div style={{ gridColumn: '1 / -1', height: '3px', background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
+          <div style={{ height: '100%', width: `${pct}%`, background: V2.brand }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StatsPage() {
+  const [stats, setStats] = useState<any | null>(null);
+  const [query, setQuery] = useState('');
+  const [sort, setSort] = useState<'name' | 'size' | 'count'>('size');
+  useEffect(() => {
+    (async () => {
+      try { setStats(await getPluginStats()); } catch { setStats({}); }
+    })();
+  }, []);
+
+  const s = stats || {};
+  const cards = [
+    { icon: <FaGamepad size={22} />, value: (s.platforms ?? 0).toLocaleString(), label: 'Platforms' },
+    { icon: <FaLayerGroup size={22} />, value: (s.games_total ?? 0).toLocaleString(), label: 'Library games' },
+    { icon: <FaDownload size={22} />, value: (s.games_downloaded ?? 0).toLocaleString(), label: 'Downloaded' },
+    { icon: <FaHome size={22} />, value: fmtBytes(s.size_on_disk) || '0 B', label: 'Size on disk' },
+    { icon: <FaBookmark size={22} />, value: (s.collections_total ?? 0).toLocaleString(), label: 'Collections' },
+    { icon: <FaCheckCircle size={22} />, value: (s.collections_synced ?? 0).toLocaleString(), label: 'Synced' },
+  ];
+
+  const plats: PlatStat[] = (s.platforms_breakdown || []);
+  const total = Number(s.size_on_disk || 0);
+  const q = query.trim().toLowerCase();
+  const filtered = plats
+    .filter((p) => !q || p.name.toLowerCase().includes(q) || p.slug.toLowerCase().includes(q))
+    .sort((a, b) =>
+      sort === 'name' ? a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+        : sort === 'count' ? b.rom_count - a.rom_count
+          : b.fs_size_bytes - a.fs_size_bytes);
+
+  const sortItems: { id: 'name' | 'size' | 'count'; label: string }[] = [
+    { id: 'name', label: 'Name' }, { id: 'size', label: 'Size' }, { id: 'count', label: 'Games' },
+  ];
+
+  return v2Page(
+    <Focusable noFocusRing
+      onButtonDown={(e: any) => { if (e?.detail?.button === GamepadButton.CANCEL) Navigation.NavigateBack(); }}
+      style={{ maxWidth: '760px', margin: '0 auto', padding: '20px 20px 0' }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '24px' }}>
+        <GameActionButton icon={<FaChevronLeft size={16} />} onClick={() => Navigation.NavigateBack()} />
+        <div style={{ fontSize: '24px', fontWeight: 800, letterSpacing: '-0.01em' }}>Stats</div>
+      </div>
+
+      {/* Section stack */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+        {/* Summary */}
+        <V2StatsSectionBox title="Summary" icon={<FaInfoCircle size={14} />}>
+          <div style={{
+            display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '12px', padding: '16px',
+          }}>
+            {cards.map((c) => <V2StatCard key={c.label} {...c} />)}
+          </div>
+        </V2StatsSectionBox>
+
+        {/* Platforms breakdown — flush, no card chrome (matches RomM). */}
+        <section style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <div style={{ flex: '0 1 360px', minWidth: 0 }}>
+              <V2SearchField value={query} onChange={setQuery} />
+            </div>
+            {/* Segmented sort (RSliderBtnGroup) */}
+            <Focusable noFocusRing flow-children="horizontal" style={{
+              marginLeft: 'auto', display: 'flex', gap: '2px', padding: '4px',
+              background: V2.surface, border: `1px solid ${V2.borderStrong}`, borderRadius: V2.radiusPill,
+            }}>
+              {sortItems.map((it) => {
+                const on = sort === it.id;
+                return (
+                  <Focusable noFocusRing key={it.id} onActivate={() => setSort(it.id)} onClick={() => setSort(it.id)}
+                    style={{
+                      padding: '6px 14px', borderRadius: V2.radiusPill, fontSize: '12.5px', cursor: 'pointer',
+                      fontWeight: on ? 600 : 500, color: on ? V2.bg : V2.fg2,
+                      background: on ? V2.fg : 'transparent', transition: 'background 0.2s, color 0.2s',
+                    }}>{it.label}</Focusable>
+                );
+              })}
+            </Focusable>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column' }}>
+            {filtered.length === 0 ? (
+              <div style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
+                padding: '24px', color: V2.fgMuted, fontSize: '13px',
+              }}>
+                <FaBoxOpen size={22} /><span>{q ? 'No matching platforms' : 'No platforms'}</span>
+              </div>
+            ) : filtered.map((p, i) => (
+              <PlatformStatRow key={p.slug} p={p} total={total} last={i === filtered.length - 1} />
+            ))}
+          </div>
+        </section>
+      </div>
+    </Focusable>,
+  );
+}
+
 function SettingsPage() {
   const [loggingEnabled, setLoggingEnabled] = useState<boolean>(true);
   const [loading, setLoading] = useState<boolean>(true);
   const [confirmLogout, setConfirmLogout] = useState<boolean>(false);
   const [loggingOut, setLoggingOut] = useState<boolean>(false);
   const [serverInfo, setServerInfo] = useState<string>('');
+  const [rdDetected, setRdDetected] = useState<boolean>(false);
+  const [rdButton, setRdButton] = useState<boolean>(false);
 
-  useEffect(() => { (async () => {
-    // The "RomM" tile is mandatory and auto-created at plugin load. Reconcile
-    // here too (the shortcut store is reliably ready by the time Settings opens)
-    // to sweep duplicates and repair the survivor's exe/name/art after updates.
-    try { await reconcileRommTile(); } catch { /* ignore */ }
-    try {
-      const cfg = await getConfig();
-      const url = cfg?.url || '';
-      // Prefer the live RomM account name; never show the stored credential/token.
-      let name = '';
-      try { name = (await getAccountUsername())?.username || ''; } catch { /* ignore */ }
-      setServerInfo(name && url ? `${name} · ${url}` : (name || url || ''));
-    } catch { /* ignore */ }
-  })(); }, []);
+  useEffect(() => {
+    (async () => {
+      // The "RomM" tile is mandatory and auto-created at plugin load. Reconcile
+      // here too (the shortcut store is reliably ready by the time Settings opens)
+      // to sweep duplicates and repair the survivor's exe/name/art after updates.
+      try { await reconcileRommTile(); } catch { /* ignore */ }
+      try {
+        const cfg = await getConfig();
+        const url = cfg?.url || '';
+        // Prefer the live RomM account name; never show the stored credential/token.
+        let name = '';
+        try { name = (await getAccountUsername())?.username || ''; } catch { /* ignore */ }
+        setServerInfo(name && url ? `${name} · ${url}` : (name || url || ''));
+        setRdDetected(!!cfg?.retrodeck_detected);
+      } catch { /* ignore */ }
+      try { setRdButton(await getRetrodeckButtonEnabled()); } catch { /* ignore */ }
+    })();
+  }, []);
+
+  const handleRdButtonToggle = async (enabled: boolean) => {
+    setRdButton(enabled);
+    try { await setRetrodeckButtonEnabled(enabled); }
+    catch { setRdButton(!enabled); }
+  };
 
   useEffect(() => {
     // Load initial logging preference
@@ -4882,6 +5517,18 @@ function SettingsPage() {
         <GameActionButton icon={<FaChevronLeft size={16} />} onClick={() => Navigation.NavigateBack()} />
         <div style={{ fontSize: '24px', fontWeight: 800, letterSpacing: '-0.01em' }}>Settings</div>
       </div>
+
+      {rdDetected && (
+        <V2SettingsSection title="RetroDECK">
+          <V2SettingsRow
+            icon={<FaExternalLinkAlt size={16} />}
+            title="Show RetroDECK launch button"
+            subtitle="Adds a button in the top bar to launch the RetroDECK frontend."
+            onClick={() => handleRdButtonToggle(!rdButton)}
+            right={<V2Switch checked={rdButton} />}
+          />
+        </V2SettingsSection>
+      )}
 
       <V2SettingsSection title="Debug">
         <V2SettingsRow
@@ -5314,92 +5961,92 @@ function SetupWizard() {
         </div>
 
         <div key={step} className="wiz-step" style={{ width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '22px' }}>
-        {step === 0 && (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px', textAlign: 'center' }}>
-            {logo && <img className="wiz-logo" src={logo} style={{ width: '96px', height: '96px', objectFit: 'contain' }} />}
-            <div style={{ fontSize: '28px', fontWeight: 800, letterSpacing: '-0.01em' }}>Welcome to RomM Sync</div>
-            <div style={{ fontSize: '14px', color: V2.fg2, lineHeight: 1.6, maxWidth: '420px' }}>
-              Connect this device to your RomM server to browse your library, download games, and sync saves across devices.
+          {step === 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px', textAlign: 'center' }}>
+              {logo && <img className="wiz-logo" src={logo} style={{ width: '96px', height: '96px', objectFit: 'contain' }} />}
+              <div style={{ fontSize: '28px', fontWeight: 800, letterSpacing: '-0.01em' }}>Welcome to RomM Sync</div>
+              <div style={{ fontSize: '14px', color: V2.fg2, lineHeight: 1.6, maxWidth: '420px' }}>
+                Connect this device to your RomM server to browse your library, download games, and sync saves across devices.
+              </div>
+              <div style={{ marginTop: '8px' }}>
+                <GameActionButton variant="emphasized" label="Get started" icon={<FaPlay size={13} style={{ marginLeft: '2px' }} />} onClick={next} />
+              </div>
             </div>
-            <div style={{ marginTop: '8px' }}>
-              <GameActionButton variant="emphasized" label="Get started" icon={<FaPlay size={13} style={{ marginLeft: '2px' }} />} onClick={next} />
-            </div>
-          </div>
-        )}
+          )}
 
-        {step === 1 && (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '14px', width: '100%' }}>
-            <div style={{ fontSize: '20px', fontWeight: 700 }}>Connect to RomM</div>
-            {/* Login / Pair toggle — emphasized when active, surface when not. */}
-            <Focusable noFocusRing flow-children="horizontal" style={{ display: 'flex', justifyContent: 'center', gap: '8px' }}>
-              {(['login', 'pair'] as const).map((m) => (
-                <GameActionButton key={m} variant={mode === m ? 'emphasized' : 'surface'}
-                  label={m === 'login' ? 'Username & password' : 'Pair code'} icon={null}
-                  onClick={() => { setMode(m); setTestResult(null); }} />
-              ))}
-            </Focusable>
-            <V2TextField label="RomM URL" value={url} onChange={onField(setUrl)} placeholder="https://romm.example.com" />
-            {mode === 'login' ? (
-              <>
-                <V2TextField label="Username" value={username} onChange={onField(setUsername)} />
-                <V2TextField label="Password" value={password} onChange={onField(setPassword)} password
-                  placeholder={hasPassword && !password ? 'Leave blank to keep saved' : undefined} />
-                {testResult && (
-                  <div style={{ fontSize: '13px', color: testResult.success ? V2.success : V2.danger }}>
-                    {testResult.success ? '✅' : '❌'} {testResult.message}
-                  </div>
-                )}
-                <GameActionButton variant="surface" label={testing ? 'Testing…' : 'Test connection'} icon={null}
-                  disabled={testing || !url.trim() || !username.trim()} onClick={doTest} />
-              </>
-            ) : (
-              <>
-                <PairCodeField label="Pairing code" value={pairCode}
-                  onChange={(v) => setPairCode(formatPairCode(v))} />
-              </>
-            )}
-            {footer(
-              <GameActionButton variant="emphasized" label="Next" icon={<FaChevronRight size={13} />} disabled={!canConnect} onClick={next} />
-            )}
-          </div>
-        )}
-
-        {step === 2 && (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px', width: '100%' }}>
-            <div style={{ fontSize: '20px', fontWeight: 700 }}>Folders</div>
-            <div style={{ fontSize: '13px', color: V2.fg2, lineHeight: 1.6, maxWidth: '420px' }}>
-              <div>Where ROMs, saves and BIOS files live on this device.</div>
+          {step === 1 && (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '14px', width: '100%' }}>
+              <div style={{ fontSize: '20px', fontWeight: 700 }}>Connect to RomM</div>
+              {/* Login / Pair toggle — emphasized when active, surface when not. */}
+              <Focusable noFocusRing flow-children="horizontal" style={{ display: 'flex', justifyContent: 'center', gap: '8px' }}>
+                {(['login', 'pair'] as const).map((m) => (
+                  <GameActionButton key={m} variant={mode === m ? 'emphasized' : 'surface'}
+                    label={m === 'login' ? 'Username & password' : 'Pair code'} icon={null}
+                    onClick={() => { setMode(m); setTestResult(null); }} />
+                ))}
+              </Focusable>
+              <V2TextField label="RomM URL" value={url} onChange={onField(setUrl)} placeholder="https://romm.example.com" />
+              {mode === 'login' ? (
+                <>
+                  <V2TextField label="Username" value={username} onChange={onField(setUsername)} />
+                  <V2TextField label="Password" value={password} onChange={onField(setPassword)} password
+                    placeholder={hasPassword && !password ? 'Leave blank to keep saved' : undefined} />
+                  {testResult && (
+                    <div style={{ fontSize: '13px', color: testResult.success ? V2.success : V2.danger }}>
+                      {testResult.success ? '✅' : '❌'} {testResult.message}
+                    </div>
+                  )}
+                  <GameActionButton variant="surface" label={testing ? 'Testing…' : 'Test connection'} icon={null}
+                    disabled={testing || !url.trim() || !username.trim()} onClick={doTest} />
+                </>
+              ) : (
+                <>
+                  <PairCodeField label="Pairing code" value={pairCode}
+                    onChange={(v) => setPairCode(formatPairCode(v))} />
+                </>
+              )}
+              {footer(
+                <GameActionButton variant="emphasized" label="Next" icon={<FaChevronRight size={13} />} disabled={!canConnect} onClick={next} />
+              )}
             </div>
-            <V2TextField label="ROM directory" value={romDir} onChange={setRomDir} />
-            <GameActionButton variant="surface" label="Browse…" icon={null} onClick={browse(romDir, setRomDir)} />
-            <V2TextField label="Save directory" value={saveDir} onChange={setSaveDir} />
-            <GameActionButton variant="surface" label="Browse…" icon={null} onClick={browse(saveDir, setSaveDir)} />
-            <V2TextField label="BIOS directory" value={biosDir} onChange={setBiosDir} />
-            <GameActionButton variant="surface" label="Browse…" icon={null} onClick={browse(biosDir, setBiosDir)} />
-            <V2TextField label="Device name" value={deviceName} onChange={setDeviceName} placeholder={deviceNameDefault} />
-            {footer(
-              <GameActionButton variant="emphasized" label="Next" icon={<FaChevronRight size={13} />} onClick={next} />
-            )}
-          </div>
-        )}
+          )}
 
-        {step === 3 && (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px', textAlign: 'center', width: '100%' }}>
-            <div className="wiz-check"><FaCheckCircle size={56} color={V2.success} /></div>
-            <div style={{ fontSize: '24px', fontWeight: 800 }}>Ready to go</div>
-            <div style={{ fontSize: '14px', color: V2.fg2, lineHeight: 1.6, maxWidth: '420px' }}>
-              {mode === 'pair'
-                ? 'We\'ll pair this device with your RomM server and open your library.'
-                : 'We\'ll save your connection and open your library.'}
+          {step === 2 && (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px', width: '100%' }}>
+              <div style={{ fontSize: '20px', fontWeight: 700 }}>Folders</div>
+              <div style={{ fontSize: '13px', color: V2.fg2, lineHeight: 1.6, maxWidth: '420px' }}>
+                <div>Where ROMs, saves and BIOS files live on this device.</div>
+              </div>
+              <V2TextField label="ROM directory" value={romDir} onChange={setRomDir} />
+              <GameActionButton variant="surface" label="Browse…" icon={null} onClick={browse(romDir, setRomDir)} />
+              <V2TextField label="Save directory" value={saveDir} onChange={setSaveDir} />
+              <GameActionButton variant="surface" label="Browse…" icon={null} onClick={browse(saveDir, setSaveDir)} />
+              <V2TextField label="BIOS directory" value={biosDir} onChange={setBiosDir} />
+              <GameActionButton variant="surface" label="Browse…" icon={null} onClick={browse(biosDir, setBiosDir)} />
+              <V2TextField label="Device name" value={deviceName} onChange={setDeviceName} placeholder={deviceNameDefault} />
+              {footer(
+                <GameActionButton variant="emphasized" label="Next" icon={<FaChevronRight size={13} />} onClick={next} />
+              )}
             </div>
-            {footer(
-              <GameActionButton variant="emphasized" disabled={busy}
-                label={busy ? 'Connecting…' : 'Finish & open library'}
-                icon={busy ? <FaSync size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <FaPlay size={13} style={{ marginLeft: '2px' }} />}
-                onClick={doFinish} />
-            )}
-          </div>
-        )}
+          )}
+
+          {step === 3 && (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px', textAlign: 'center', width: '100%' }}>
+              <div className="wiz-check"><FaCheckCircle size={56} color={V2.success} /></div>
+              <div style={{ fontSize: '24px', fontWeight: 800 }}>Ready to go</div>
+              <div style={{ fontSize: '14px', color: V2.fg2, lineHeight: 1.6, maxWidth: '420px' }}>
+                {mode === 'pair'
+                  ? 'We\'ll pair this device with your RomM server and open your library.'
+                  : 'We\'ll save your connection and open your library.'}
+              </div>
+              {footer(
+                <GameActionButton variant="emphasized" disabled={busy}
+                  label={busy ? 'Connecting…' : 'Finish & open library'}
+                  icon={busy ? <FaSync size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <FaPlay size={13} style={{ marginLeft: '2px' }} />}
+                  onClick={doFinish} />
+              )}
+            </div>
+          )}
         </div>
       </Focusable>
     </div>
@@ -5478,6 +6125,40 @@ function _isRommName(nm: string): boolean {
 
 function _rommAppIds(): number[] {
   return _shortcutAppIds().filter((aid) => _isRommName(_appName(aid)));
+}
+
+// Every app overview Steam knows about (installed games + non-Steam shortcuts),
+// used to locate RetroDECK's library entry by name.
+function _allAppOverviews(): any[] {
+  try { return (window as any).collectionStore?.allAppsCollection?.allApps ?? []; }
+  catch { return []; }
+}
+
+// Launch RetroDECK via its Steam library entry instead of spawning the flatpak
+// ourselves. Steam runs it inside the real graphical session (correct display/
+// dbus/env + overlay), sidestepping the env contamination that makes a
+// daemon-spawned `flatpak run` crash. RetroDECK's installer adds a non-Steam
+// shortcut named "RetroDECK"; we also scan installed apps as a fallback.
+async function launchRetrodeckViaSteam(): Promise<{ ok: boolean; reason?: string }> {
+  const apps = _sc()?.Apps;
+  if (!apps?.RunGame) return { ok: false, reason: 'Steam launch API unavailable on this build' };
+  const isRd = (nm: string) => /retrodeck/i.test(nm || '');
+  const shortcutIds = _shortcutAppIds();
+  let appId: number | null = null;
+  for (const aid of shortcutIds) { if (isRd(_appName(aid))) { appId = aid; break; } }
+  if (appId == null) {
+    for (const ov of _allAppOverviews()) {
+      if (isRd(ov?.display_name)) { appId = Number(ov.appid); break; }
+    }
+  }
+  if (appId == null) return { ok: false, reason: 'RetroDECK not found in your Steam library' };
+  // A non-Steam shortcut launches by its 64-bit gameID ((appid<<32)|0x02000000);
+  // a real Steam app launches by its bare appid.
+  const gid = shortcutIds.includes(appId)
+    ? ((BigInt(appId) << 32n) | 0x2000000n).toString()
+    : String(appId);
+  await apps.RunGame(gid, "", -1, 100);
+  return { ok: true };
 }
 
 async function findRommShortcut(): Promise<number | null> {
@@ -5683,6 +6364,7 @@ function registerRommSessionEndWatch() {
 export default definePlugin(() => {
   routerHook.addRoute("/romm-sync-setup", () => <SetupWizard />, { exact: true });
   routerHook.addRoute("/romm-sync-settings", () => <SettingsPage />, { exact: true });
+  routerHook.addRoute("/romm-sync-stats", () => <StatsPage />, { exact: true });
   routerHook.addRoute("/romm-sync-config", () => <ConfigPage />, { exact: true });
   routerHook.addRoute("/romm-sync-library", () => <LibraryGroupsPage />, { exact: true });
   routerHook.addRoute("/romm-sync-library/:key", () => <LibraryGamesPage />, { exact: true });
@@ -5741,6 +6423,7 @@ export default definePlugin(() => {
 
       routerHook.removeRoute("/romm-sync-setup");
       routerHook.removeRoute("/romm-sync-settings");
+      routerHook.removeRoute("/romm-sync-stats");
       routerHook.removeRoute("/romm-sync-config");
       routerHook.removeRoute("/romm-sync-library");
       routerHook.removeRoute("/romm-sync-library/:key");
