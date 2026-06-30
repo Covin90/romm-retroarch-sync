@@ -25,7 +25,7 @@ import re
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import queue
-from collections import defaultdict
+from collections import defaultdict, deque
 
 # PIL is optional - used for Steam grid image generation
 try:
@@ -4887,39 +4887,84 @@ class RetroArchInterface:
         ES-DE isn't installed."""
         if self._retrodeck_core_map_cache is not None:
             return self._retrodeck_core_map_cache
-        import xml.etree.ElementTree as ET
+        # Prefer ElementTree, but Decky Loader's stripped Python AppImage can ship
+        # without the xml package — fall back to a regex parse so the feature
+        # still works there.
+        try:
+            import xml.etree.ElementTree as ET
+        except Exception:
+            ET = None
         mapping = {}
         for path in self._es_systems_paths():
             try:
-                root = ET.parse(str(path)).getroot()
+                if ET is not None:
+                    root = ET.parse(str(path)).getroot()
+                    for sysel in root.findall('system'):
+                        name = (sysel.findtext('name') or '').strip()
+                        if not name:
+                            continue
+                        cores = []
+                        for cmd in sysel.findall('command'):
+                            m = re.search(r'%CORE_RETROARCH%/(\S+?)_libretro\.so', cmd.text or '')
+                            if m:
+                                cores.append(((cmd.get('label') or '').strip(), m.group(1)))
+                        if cores:
+                            mapping[name] = cores  # later file (custom) overrides default
+                else:
+                    for name, cores in self._parse_es_systems_regex(path):
+                        mapping[name] = cores
             except Exception:
                 continue
-            for sysel in root.findall('system'):
-                name = (sysel.findtext('name') or '').strip()
-                if not name:
-                    continue
-                cores = []
-                for cmd in sysel.findall('command'):
-                    m = re.search(r'%CORE_RETROARCH%/(\S+?)_libretro\.so', cmd.text or '')
-                    if m:
-                        cores.append(((cmd.get('label') or '').strip(), m.group(1)))
-                if cores:
-                    mapping[name] = cores  # later file (custom) overrides default
         self._retrodeck_core_map_cache = mapping
         return mapping
+
+    @staticmethod
+    def _parse_es_systems_regex(path):
+        """Regex fallback for es_systems.xml when xml.etree is unavailable.
+        Yields (system_name, [(label, core_key), ...]) in document order, with
+        commented-out <!-- ... --> blocks stripped first (mirroring ElementTree,
+        which ignores XML comments)."""
+        try:
+            text = Path(path).read_text(encoding='utf-8', errors='ignore')
+        except Exception:
+            return
+        text = re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL)
+        for sysblock in re.findall(r'<system\b.*?</system>', text, flags=re.DOTALL):
+            nm = re.search(r'<name>\s*(.*?)\s*</name>', sysblock, flags=re.DOTALL)
+            name = (nm.group(1).strip() if nm else '')
+            if not name:
+                continue
+            cores = []
+            for cmd in re.findall(r'<command\b([^>]*)>(.*?)</command>', sysblock, flags=re.DOTALL):
+                attrs, body = cmd
+                m = re.search(r'%CORE_RETROARCH%/(\S+?)_libretro\.so', body)
+                if m:
+                    lm = re.search(r'label\s*=\s*"([^"]*)"', attrs)
+                    cores.append(((lm.group(1).strip() if lm else ''), m.group(1)))
+            if cores:
+                yield name, cores
 
     def _retrodeck_alt_emulator(self, slug):
         """The user's per-system emulator override label (ES-DE stores it as
         <alternativeEmulator><label> at the top of gamelists/<slug>/gamelist.xml),
         or None."""
-        import xml.etree.ElementTree as ET
+        try:
+            import xml.etree.ElementTree as ET
+        except Exception:
+            ET = None
         for base in (Path.home() / 'retrodeck' / 'ES-DE' / 'gamelists',
                      Path.home() / '.var' / 'app' / 'net.retrodeck.retrodeck' / 'config'
                      / 'ES-DE' / 'gamelists'):
             gl = base / slug / 'gamelist.xml'
             if gl.is_file():
                 try:
-                    label = ET.parse(str(gl)).getroot().findtext('alternativeEmulator/label')
+                    if ET is not None:
+                        label = ET.parse(str(gl)).getroot().findtext('alternativeEmulator/label')
+                    else:
+                        txt = gl.read_text(encoding='utf-8', errors='ignore')
+                        m = re.search(r'<alternativeEmulator>\s*<label>\s*(.*?)\s*</label>',
+                                      txt, flags=re.DOTALL)
+                        label = m.group(1) if m else None
                     if label and label.strip():
                         return label.strip()
                 except Exception:
@@ -4958,13 +5003,66 @@ class RetroArchInterface:
             pass
         return None
 
+    # ─── User core overrides ─────────────────────────────────────────────────
+    # The user can pin a specific core per system (keyed by the ES-DE/RomM
+    # platform slug — the folder under roms/) from the Decky settings page.
+    # Stored in our own settings under [CoreOverrides]; takes precedence over
+    # RetroDECK's choice and our guesses. Empty/cleared = fall back to auto.
+    def get_core_override(self, system_slug):
+        if not system_slug:
+            return ''
+        return (self.settings.get('CoreOverrides', system_slug, '') or '').strip()
+
+    def set_core_override(self, system_slug, core_key):
+        """Pin (or clear, when core_key is falsy) the core for a system slug."""
+        if not system_slug:
+            return
+        section = 'CoreOverrides'
+        if core_key:
+            self.settings.set(section, system_slug, str(core_key))
+        else:
+            # Clear → revert to auto-resolution.
+            cfg = self.settings.config
+            if section in cfg and system_slug in cfg[section]:
+                cfg.remove_option(section, system_slug)
+                self.settings.save_settings()
+
+    def describe_core_resolution(self, platform_name, system_slug=None):
+        """Return how the core resolves for a system, for the settings UI:
+        {resolved_core, source, override, retrodeck_default, retrodeck_choices}.
+        source ∈ {'override','retrodeck','guess','none'}."""
+        available_cores = self.get_available_cores()
+        override = self.get_core_override(system_slug)
+        rd_choices = self._retrodeck_core_map().get(system_slug, []) if system_slug else []
+        rd_default = self._retrodeck_core_for_slug(system_slug, available_cores) if system_slug else None
+        if override and override in available_cores:
+            resolved, source = override, 'override'
+        elif rd_default:
+            resolved, source = rd_default, 'retrodeck'
+        else:
+            guess, _ = self._guess_core_for_platform(platform_name, available_cores)
+            resolved, source = (guess, 'guess') if guess else (None, 'none')
+        return {
+            'resolved_core': resolved,
+            'source': source,
+            'override': override,
+            'retrodeck_default': rd_default,
+            'retrodeck_choices': [c for _, c in rd_choices],
+        }
+
     def suggest_core_for_platform(self, platform_name, system_slug=None):
         """Suggest best core for a platform"""
         available_cores = self.get_available_cores()
 
         print(f"🎮 Looking for core for platform: '{platform_name}'")
 
-        # Prefer the core RetroDECK/ES-DE itself would use for this system (its
+        # 1) Explicit user override wins over everything.
+        override = self.get_core_override(system_slug)
+        if override and override in available_cores:
+            print(f"✅ Using user core override for '{system_slug}': {override}")
+            return override, available_cores[override]
+
+        # 2) Prefer the core RetroDECK/ES-DE itself would use for this system (its
         # configured default, or the user's per-system override) over our guesses.
         if system_slug:
             rd_core = self._retrodeck_core_for_slug(system_slug, available_cores)
@@ -4972,6 +5070,13 @@ class RetroArchInterface:
                 print(f"✅ Using RetroDECK/ES-DE core for '{system_slug}': {rd_core}")
                 return rd_core, available_cores[rd_core]
 
+        # 3) Fall back to our hand-tuned exact/keyword guess map.
+        return self._guess_core_for_platform(platform_name, available_cores)
+
+    def _guess_core_for_platform(self, platform_name, available_cores):
+        """Hand-tuned exact + keyword core guessing (the last-resort fallback,
+        used when there's no user override and no RetroDECK choice). Returns
+        (core_key, core_path) or (None, None)."""
         # Try exact match first
         suggested_cores = self.platform_core_map.get(platform_name, [])
 
@@ -4982,7 +5087,7 @@ class RetroArchInterface:
                 return core, available_cores[core]
 
         # Try fuzzy matching if exact match fails
-        platform_lower = platform_name.lower()
+        platform_lower = (platform_name or '').lower()
 
         # Enhanced keyword mapping for better platform detection
         platform_keywords = {
@@ -5501,22 +5606,35 @@ class RetroArchInterface:
         }
 
     def find_cores_directory(self):
-        """Find RetroArch cores directory with comprehensive installation support"""
-        possible_dirs = [
-            # Flatpak
-            Path.home() / '.var/app/org.libretro.RetroArch/config/retroarch/cores',
+        """Find RetroArch cores directory with comprehensive installation support.
 
-            # RetroDECK: cores ship read-only inside the flatpak (rd_extras), not
-            # in the user config dir. The in-sandbox libretro_directory is
-            # /app/retrodeck/components/retroarch/rd_extras/cores; from the host
-            # that is .../current/active/files/retrodeck/... (system or user
-            # flatpak install). _retrodeck_sandbox_core() maps these back to /app.
-            Path('/var/lib/flatpak/app/net.retrodeck.retrodeck/current/active/files/retrodeck/components/retroarch/rd_extras/cores'),
-            Path.home() / '.local/share/flatpak/app/net.retrodeck.retrodeck/current/active/files/retrodeck/components/retroarch/rd_extras/cores',
-
-            # RetroDECK (user-config cores; usually empty but kept for overrides)
+        Must stay consistent with the chosen executable: when we're launching via
+        RetroDECK, its bundled rd_extras/cores has to win over a separately
+        installed plain RetroArch flatpak (which may carry only a handful of
+        cores) — otherwise we'd launch RetroDECK but read the wrong, smaller core
+        set and report most cores "missing"."""
+        # RetroDECK: cores ship read-only inside the flatpak (rd_extras), not in
+        # the user config dir. The in-sandbox libretro_directory is
+        # /app/retrodeck/components/retroarch/rd_extras/cores; from the host that
+        # is .../current/active/files/retrodeck/... (system or user flatpak
+        # install). _retrodeck_sandbox_core() maps these back to /app.
+        rd_rel = ('app/net.retrodeck.retrodeck/current/active/files/retrodeck'
+                  '/components/retroarch/rd_extras/cores')
+        retrodeck_dirs = [
+            # Probe every flatpak root, INCLUDING /run/host — on immutable/atomic
+            # distros (and inside the Decky plugin host) the system flatpak tree
+            # is only reachable via /run/host/var/lib/flatpak, not /var/lib/flatpak.
+            # Same set of bases as _es_systems_paths(), so cores and the core map
+            # come from the same install.
+            Path.home() / '.local/share/flatpak' / rd_rel,
+            Path('/var/lib/flatpak') / rd_rel,
+            Path('/run/host/var/lib/flatpak') / rd_rel,
+            # RetroDECK user-config cores (usually empty but kept for overrides)
             Path.home() / '.var/app/net.retrodeck.retrodeck/config/retroarch/cores',
-
+        ]
+        other_dirs = [
+            # Plain RetroArch flatpak
+            Path.home() / '.var/app/org.libretro.RetroArch/config/retroarch/cores',
             # Native installations
             Path.home() / '.config/retroarch/cores',
             Path('/usr/lib/libretro'),
@@ -5537,10 +5655,20 @@ class RetroArchInterface:
             Path.home() / '.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/RetroArch/info',
         ]
 
+        # When the chosen executable is RetroDECK, search its bundled cores first
+        # so its large rd_extras set wins over a separately installed plain
+        # RetroArch flatpak; otherwise keep RetroDECK dirs as a later fallback.
+        exe = (self.retroarch_executable or '').lower()
+        if 'retrodeck' in exe:
+            possible_dirs = retrodeck_dirs + other_dirs
+        else:
+            possible_dirs = other_dirs + retrodeck_dirs
+
         for cores_dir in possible_dirs:
             if cores_dir.exists() and any(cores_dir.glob('*.so')):
+                print(f"🔧 Using cores directory: {cores_dir}")
                 return cores_dir
-        
+
         return None
 
     def send_command(self, command):
@@ -7289,6 +7417,43 @@ class AutoSyncManager:
 
         return inventory
 
+    def count_pending_saves(self):
+        """Count local save/state files whose on-disk fingerprint differs from the
+        last successfully-uploaded one — i.e. changes not yet pushed to the server.
+
+        Drives the offline "N saves will sync when you reconnect" indicator. Pure
+        read of local state + the persisted fingerprint cache; makes no network
+        calls, so it's safe to call from get_service_status while offline.
+        """
+        try:
+            pending = 0
+            save_files = self.retroarch.get_save_files()
+            for _save_type, files in save_files.items():
+                for file_info in files:
+                    file_path = Path(file_info['path'])
+                    if not file_path.exists():
+                        continue
+                    stat = file_path.stat()
+                    fingerprint = (stat.st_size, stat.st_mtime)
+                    if self.last_uploaded.get(str(file_path)) != fingerprint:
+                        pending += 1
+            return pending
+        except Exception as e:
+            logging.debug(f"count_pending_saves error: {e}")
+            return 0
+
+    def flush_after_reconnect(self):
+        """Flush local save changes accumulated while offline. Called when the
+        retry loop detects an offline→online transition (RomMClient.authenticated
+        is sticky and won't, on its own, signal a network drop/recovery).
+
+        Reuses the proven session model: one full-inventory negotiate that pushes
+        anything newer than the server. Idempotent and coalesced.
+        """
+        if not (self.romm_client and self.romm_client.authenticated):
+            return
+        self.trigger_session_save_sync("reconnect")
+
     def trigger_session_save_sync(self, reason=""):
         """Run a session-based save-sync in the background (coalesced).
 
@@ -8706,8 +8871,35 @@ class CollectionSyncManager:
         self.download_progress = {}  # {collection_name: {'downloaded': int, 'downloaded_pct': float, 'total': int, 'speed': float}}
         # Last removal event per collection — for frontend notification
         self.last_removals = {}  # {collection_name: {'removed_count': int, 'deleted_count': int, 'timestamp': float}}
+        # Notification event queue — emitted at the exact moment a sync/removal
+        # happens and drained by the frontend (see drain_notifications). Replaces
+        # the old approach of inferring "something finished" by polling and diffing
+        # collection sync_state on the frontend. Bounded so a frontend that never
+        # drains can't grow it unbounded (oldest events drop first).
+        self.notifications = deque(maxlen=50)
         # Steam shortcut manager (optional)
         self.steam_manager = steam_manager
+
+    def push_notification(self, kind, title, body):
+        """Queue a notification event for the frontend to drain and toast.
+
+        Called from the actual sync/removal code path so the event reflects
+        something that really happened — no inference, no missed/duplicate
+        transitions. `kind` is a free-form tag ('sync' | 'removal') the
+        frontend may use for styling.
+        """
+        self.notifications.append({
+            'kind':      kind,
+            'title':     title,
+            'body':      body,
+            'timestamp': time.time(),
+        })
+
+    def drain_notifications(self):
+        """Return all queued notification events and clear the queue."""
+        events = list(self.notifications)
+        self.notifications.clear()
+        return events
 
     def start(self):
         """Start collection monitoring"""
@@ -8746,6 +8938,14 @@ class CollectionSyncManager:
             'timestamp':     time.time(),
         }
         logging.info(f"[REMOVAL] Recorded for {collection_name}: {removed_count} removed, {deleted_count} deleted")
+
+        # Only toast when auto-delete actually removed local files — that's a real
+        # change to the user's disk. A server-side-only removal (deleted_count == 0)
+        # touched nothing on the device and the user didn't ask, so stay silent;
+        # last_removals above still records it for any UI that wants to surface it.
+        if deleted_count > 0:
+            body = f"{deleted_count} game{'s' if deleted_count != 1 else ''} removed locally"
+            self.push_notification('removal', f"🗑️ {collection_name} — Updated", body)
 
     def update_collections(self, new_collections):
         """Update the collection list without restarting - just add/remove caches"""
@@ -8999,6 +9199,14 @@ class CollectionSyncManager:
 
         if downloaded_count > 0:
             self.log(f"Auto-downloaded {downloaded_count} new games from '{collection_name}'")
+            # Emit a completion event at the real moment the download batch finished
+            # (existing + just-downloaded = current local total for this collection).
+            synced_total = existing_roms_count + downloaded_count
+            self.push_notification(
+                'sync',
+                f"✅ {collection_name} — Sync Complete",
+                f"{synced_total}/{total_collection_size} ROMs synced",
+            )
 
         # Sync Steam shortcuts if enabled for this collection
         self._sync_steam_if_enabled(collection_name, collection_roms, download_dir)

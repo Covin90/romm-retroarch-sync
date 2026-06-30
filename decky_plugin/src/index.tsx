@@ -16,18 +16,21 @@ import {
 } from "@decky/ui";
 import { callable, definePlugin, toaster, routerHook, openFilePicker, FileSelectionType } from "@decky/api";
 import { useState, useEffect, useLayoutEffect, useRef, useMemo, forwardRef, memo, type Ref, type ChangeEvent } from "react";
-import { FaSync, FaTrash, FaCog, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight, FaCheckCircle, FaUsers, FaExternalLinkAlt, FaPuzzlePiece, FaBoxOpen, FaClone, FaRedo, FaClock, FaCheck, FaEllipsisH, FaGlobe, FaChevronDown, FaChartBar, FaSignOutAlt } from "react-icons/fa";
+import { FaSync, FaTrash, FaCog, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaTimesCircle, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight, FaCheckCircle, FaUsers, FaExternalLinkAlt, FaPuzzlePiece, FaBoxOpen, FaClone, FaRedo, FaClock, FaCheck, FaEllipsisH, FaGlobe, FaChevronDown, FaChartBar, FaSignOutAlt } from "react-icons/fa";
 import { BsGearFill } from "react-icons/bs";
 import { MdVerified } from "react-icons/md";
 
 // Call backend methods
 const getServiceStatus = callable<[], any>("get_service_status");
+const drainNotifications = callable<[], { events: Array<{ kind: string, title: string, body: string, timestamp: number }> }>("drain_notifications");
 const refreshFromRomm = callable<[boolean], any>("refresh_from_romm");
 const getLoggingEnabled = callable<[], boolean>("get_logging_enabled");
 const updateLoggingEnabled = callable<[boolean], boolean>("set_logging_enabled");
 const getRetrodeckButtonEnabled = callable<[], boolean>("get_retrodeck_button_enabled");
 const setRetrodeckButtonEnabled = callable<[boolean], boolean>("set_retrodeck_button_enabled");
 const getRetrodeckLogo = callable<[], any>("get_retrodeck_logo");
+const getCoreMappings = callable<[], any>("get_core_mappings");
+const setCoreOverride = callable<[string, string], any>("set_core_override");
 const getConfig = callable<[], any>("get_config");
 const logout = callable<[boolean], any>("logout");
 const getAccountUsername = callable<[], any>("get_account_username");
@@ -567,6 +570,11 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
   const dlPct = useDownloadProgress(activeDlRomId, busy === 'download')?.percent ?? null;
   const globalDownloading = useIsDownloading(activeDlRomId);
   const downloading = busy === 'download' || globalDownloading;
+  // Offline: downloaded games still launch, but a fetch from the server can't
+  // succeed — so block + visually dim download on not-yet-downloaded tiles
+  // rather than letting the user trigger a guaranteed failure.
+  const offline = useOffline();
+  const downloadBlocked = offline && !dl;
   const [confirmDelete, setConfirmDelete] = useState(false);
   const confirmTimer = useRef<any>(null);
   const activate = () => { onActiveCover(uriRef.current); };
@@ -655,6 +663,10 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
   // present); X = details; Y = delete. Mouse: overlay buttons mirror these.
   const doDownload = async () => {
     if (busy) return;
+    if (downloadBlocked) {
+      toaster.toast({ title: 'Offline', body: 'Connect to RomM to download this game.' });
+      return;
+    }
     setBusy('download');
     setActiveDlRomId(game.rom_id);
     _setDlActive(game.rom_id, true);
@@ -662,7 +674,7 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
       const start = await downloadGame(game.rom_id);
       if (!start?.success) { toaster.toast({ title: 'Download failed', body: start?.message || 'Error' }); return; }
       const res = await awaitDownload(game.rom_id);
-      if (res.ok) { setDl(true); toaster.toast({ title: 'Downloaded', body: game.name }); }
+      if (res.ok) { setDl(true); libCacheSetDownloaded(game.rom_id, true); toaster.toast({ title: 'Downloaded', body: game.name }); }
       else toaster.toast({ title: 'Download failed', body: res.message || 'Error' });
     } catch (e) { toaster.toast({ title: 'Download failed', body: String(e) }); }
     finally { _setDlActive(game.rom_id, false); setBusy(null); }
@@ -672,8 +684,9 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
     setBusy('launch');
     try {
       const r = await launchGameSmart(game.rom_id);
-      if (r?.success) toaster.toast({ title: 'Launching', body: game.name });
-      else toaster.toast({ title: 'Launch failed', body: r?.message || 'Error' });
+      // No success toast — the screen transitions to the launch immediately, so
+      // the toast just races the thing it announces. Surface failures only.
+      if (!r?.success) toaster.toast({ title: 'Launch failed', body: r?.message || 'Error' });
     } catch (e) { toaster.toast({ title: 'Launch failed', body: String(e) }); }
     finally { setBusy(null); }
   };
@@ -683,6 +696,10 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
     const isAlreadyDownloaded = isMainRom ? dl : downloadedRegionIds.has(selectedRomId);
     if (!isAlreadyDownloaded) {
       if (busy) { toaster.toast({ title: 'Busy', body: 'Please wait for the current operation' }); return; }
+      if (offline) {
+        toaster.toast({ title: 'Offline', body: 'Connect to RomM to download this version.' });
+        return;
+      }
       setBusy('download');
       setActiveDlRomId(selectedRomId);
       _setDlActive(selectedRomId, true);
@@ -692,7 +709,7 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
         const res = await awaitDownload(selectedRomId);
         if (res.ok) {
           setDownloadedRegionIds(prev => new Set([...prev, selectedRomId]));
-          if (isMainRom) setDl(true);
+          if (isMainRom) { setDl(true); libCacheSetDownloaded(game.rom_id, true); }
           toaster.toast({ title: 'Downloaded', body: game.name });
         } else {
           toaster.toast({ title: 'Download failed', body: res.message || 'Error' });
@@ -720,7 +737,7 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
     setBusy('delete');
     try {
       const r = await deleteGame(game.rom_id);
-      if (r?.success) { setDl(false); }
+      if (r?.success) { setDl(false); libCacheSetDownloaded(game.rom_id, false); }
       else toaster.toast({ title: 'Delete failed', body: r?.message || 'Error' });
     } catch (e) { toaster.toast({ title: 'Delete failed', body: String(e) }); }
     finally { setConfirmDelete(false); setBusy(null); }
@@ -874,7 +891,9 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
             ...roundBtn(44, 'emphasized'), boxShadow: '0 2px 10px rgba(0,0,0,0.55)',
             // Stay visible while downloading so the fill ring is always shown,
             // even if focus moves away mid-download.
-            opacity: (focused || downloading) ? 1 : 0, transition: 'opacity 0.18s ease',
+            opacity: (focused || downloading) ? (downloadBlocked ? 0.4 : 1) : 0,
+            filter: downloadBlocked ? 'grayscale(1)' : 'none',
+            transition: 'opacity 0.18s ease',
           }}>
           {/* While downloading, the progress ring rides ON the button's border:
               the 44px button has radius 22, so a 48px ring with a 4px stroke has
@@ -986,9 +1005,14 @@ const _colSync = new Map<string, ColSyncState>();
 const _colSyncListeners = new Set<() => void>();
 let _colSyncTimer: any = null;
 let _colSyncRefs = 0;
+// Latest connection state from the shared poll ('online'|'offline_cached'|
+// 'disconnected'|'connecting'), so tiles can disable server-only actions (e.g.
+// download) without each one polling get_service_status independently.
+let _connState: string | null = null;
 async function _colSyncTick() {
   try {
     const st = await getServiceStatus();
+    _connState = st?.connection ?? null;
     _colSync.clear();
     for (const c of (st?.collections || [])) {
       _colSync.set(c.name, {
@@ -1000,20 +1024,29 @@ async function _colSyncTick() {
     _colSyncListeners.forEach((l) => { try { l(); } catch { } });
   } catch { /* transient */ }
 }
+// Subscribe a component to the shared status poll, starting/stopping the timer
+// via the shared ref count. Returns the unsubscribe cleanup.
+function _subscribeStatus(listener: () => void): () => void {
+  _colSyncListeners.add(listener);
+  _colSyncRefs++;
+  if (!_colSyncTimer) { _colSyncTick(); _colSyncTimer = setInterval(_colSyncTick, 1500); }
+  return () => {
+    _colSyncListeners.delete(listener);
+    _colSyncRefs--;
+    if (_colSyncRefs <= 0 && _colSyncTimer) { clearInterval(_colSyncTimer); _colSyncTimer = null; }
+  };
+}
 function useCollectionSync(name: string): ColSyncState | undefined {
   const [, force] = useState(0);
-  useEffect(() => {
-    const l = () => force((n) => n + 1);
-    _colSyncListeners.add(l);
-    _colSyncRefs++;
-    if (!_colSyncTimer) { _colSyncTick(); _colSyncTimer = setInterval(_colSyncTick, 1500); }
-    return () => {
-      _colSyncListeners.delete(l);
-      _colSyncRefs--;
-      if (_colSyncRefs <= 0 && _colSyncTimer) { clearInterval(_colSyncTimer); _colSyncTimer = null; }
-    };
-  }, []);
+  useEffect(() => _subscribeStatus(() => force((n) => n + 1)), []);
   return _colSync.get(name);
+}
+// True when the server isn't reachable (cached-offline or disconnected) — used
+// by tiles to dim/disable download actions that would just fail offline.
+function useOffline(): boolean {
+  const [, force] = useState(0);
+  useEffect(() => _subscribeStatus(() => force((n) => n + 1)), []);
+  return _connState === 'offline_cached' || _connState === 'disconnected';
 }
 
 // Collection tile — mosaic cover + kind badge + name/count below, with the
@@ -1389,7 +1422,8 @@ function V2NavBar({ active, onTab, activeRef }: { active: NavId; onTab: (id: Nav
             try {
               const r = await launchRetrodeckViaSteam();
               if (r.ok) {
-                toaster.toast({ title: 'RetroDECK', body: 'Launching…' });
+                // No "Launching…" toast — closing the side menus into the launch
+                // is the feedback. Surface failures only.
                 try { Navigation.CloseSideMenus(); } catch { /* ignore */ }
               } else {
                 toaster.toast({ title: 'RetroDECK', body: r.reason || 'Launch failed' });
@@ -1560,6 +1594,7 @@ function UserMenuModal({ username, role, avatar, closeModal }:
           </div>
           <div style={{ height: '1px', background: V2.border, margin: '0 4px 4px' }} />
           <UserMenuRow icon={<FaChartBar size={15} />} label="Stats" onSelect={() => go("/romm-sync-stats")} />
+          <UserMenuRow icon={<FaPuzzlePiece size={15} />} label="Emulator Cores" onSelect={() => go("/romm-sync-cores")} />
           <UserMenuRow icon={<FaCog size={15} />} label="Settings" onSelect={() => go("/romm-sync-settings")} />
           <div style={{ height: '1px', background: V2.border, margin: '4px 4px' }} />
           <UserMenuRow icon={<FaSignOutAlt size={15} />} label="Log out" danger onSelect={doLogout} />
@@ -2219,6 +2254,15 @@ function _dropLibGroup(key: string) {
 // Write-through helpers — use these instead of touching _libGamesCache directly.
 function libCacheSet(key: string, list: LibGame[]) { _libGamesCache.set(key, list); _persistLibGroup(key, list); }
 function libCacheDelete(key: string) { _libGamesCache.delete(key); _dropLibGroup(key); }
+// A game can appear in several cached groups (its platform + any collections), so
+// flip is_downloaded across ALL of them. Without this, re-entering a group serves
+// the stale cached list and the deleted game still shows as downloaded.
+function libCacheSetDownloaded(romId: number, downloaded: boolean) {
+  for (const [key, list] of _libGamesCache) {
+    if (!list.some((g) => g.rom_id === romId && !!g.is_downloaded !== downloaded)) continue;
+    libCacheSet(key, list.map((g) => g.rom_id === romId ? { ...g, is_downloaded: downloaded } : g));
+  }
+}
 function persistHomeCache() {
   if (!_lsAvail || !_homeCache) return;
   try { localStorage.setItem(_LS_HOME_KEY, JSON.stringify({ t: Date.now(), v: _homeCache })); } catch { }
@@ -2260,82 +2304,23 @@ const formatSpeed = (bytesPerSec: number): string => {
   return `${bytesPerSec.toFixed(0)} B/s`;
 };
 
-// Background monitoring - runs independently of UI
+// Background notification polling — drains events the backend emits at the exact
+// moment a sync/removal happens. No state diffing, no transition inference: the
+// backend is the single source of truth (see CollectionSyncManager.push_notification).
 let backgroundInterval: any = null;
-const previousSyncStates = new Map<string, { sync_state: string, downloaded?: number, total?: number }>();
 
 const checkForNotifications = async () => {
   try {
-    const result = await getServiceStatus();
-
-    // Collect all collections that need notifications
-    const notificationsToShow: Array<{ name: string, downloaded: number, total: number, type: string }> = [];
-
-    // Detect sync completion
-    result.collections?.forEach((col: any) => {
-      const previousData = previousSyncStates.get(col.name);
-      const currentState = col.sync_state;
-
-      // Log state for debugging
-      // Detect transition to 'synced' from either 'syncing' OR 'not_synced'
-      // 'syncing' -> 'synced': Normal case
-      // 'not_synced' -> 'synced': Fast sync where we missed the 'syncing' state
-      if (previousData && currentState === 'synced' &&
-        (previousData.sync_state === 'syncing' || previousData.sync_state === 'not_synced')) {
-        console.log(`[BACKGROUND NOTIFICATION] Collection '${col.name}' completed syncing: ${col.downloaded}/${col.total} ROMs (prev state: ${previousData.sync_state})`);
-        notificationsToShow.push({
-          name: col.name,
-          downloaded: col.downloaded,
-          total: col.total,
-          type: 'sync'
-        });
-      }
-      // Also detect when ROM count changes while in 'synced' state (deletions)
-      else if (
-        previousData?.sync_state === 'synced' &&
-        currentState === 'synced' &&
-        col.auto_sync &&
-        previousData.downloaded !== undefined &&
-        col.downloaded !== undefined &&
-        previousData.downloaded !== col.downloaded
-      ) {
-        console.log(`[BACKGROUND NOTIFICATION] Collection '${col.name}' updated: ${col.downloaded}/${col.total} ROMs (was ${previousData.downloaded}/${previousData.total})`);
-        notificationsToShow.push({
-          name: col.name,
-          downloaded: col.downloaded,
-          total: col.total,
-          type: 'update'
-        });
-      }
-
-      // Update previous state and counts
-      previousSyncStates.set(col.name, {
-        sync_state: currentState,
-        downloaded: col.downloaded,
-        total: col.total
-      });
-    });
-
-    // Show notifications with slight delay between each to prevent overlapping/deduplication
-    for (let i = 0; i < notificationsToShow.length; i++) {
-      const notification = notificationsToShow[i];
-      // Add delay only if not the first notification
-      if (i > 0) {
-        await new Promise(resolve => setTimeout(resolve, 300));
-      }
-      console.log(`[BACKGROUND] Showing notification for ${notification.name}`);
-      toaster.toast({
-        title: `✅ ${notification.name} - Sync Complete`,
-        body: `${notification.downloaded}/${notification.total} ROMs synced`,
-        duration: 5000,
-      });
-    }
-
-    if (notificationsToShow.length > 0) {
-      console.log(`[BACKGROUND] Showed ${notificationsToShow.length} notification(s)`);
+    const { events } = await drainNotifications();
+    if (!events?.length) return;
+    for (let i = 0; i < events.length; i++) {
+      // Slight stagger so the toaster doesn't dedupe a burst into one.
+      if (i > 0) await new Promise(resolve => setTimeout(resolve, 300));
+      const ev = events[i];
+      toaster.toast({ title: ev.title, body: ev.body, duration: 5000 });
     }
   } catch (error) {
-    console.error('[BACKGROUND NOTIFICATION] Error checking status:', error);
+    console.error('[BACKGROUND NOTIFICATION] Error draining notifications:', error);
   }
 };
 
@@ -2421,7 +2406,7 @@ function ConfigPage() {
     try {
       const result = await pairDevice(url.trim(), pairCode.trim());
       if (result.success) {
-        toaster.toast({ title: 'RomM Sync', body: 'Paired — connecting…', duration: 3000 });
+        // No in-progress toast — NavigateBack to the connected UI is the feedback.
         setPairCode('');
         Navigation.NavigateBack();
       } else {
@@ -2440,7 +2425,7 @@ function ConfigPage() {
       const effectiveDeviceName = deviceName.trim() || deviceNameDefault;
       const result = await saveConfig(url.trim(), username.trim(), password, romDir.trim(), saveDir.trim(), effectiveDeviceName, biosDir.trim());
       if (result.success) {
-        toaster.toast({ title: 'RomM Sync', body: 'Settings saved — reconnecting...', duration: 3000 });
+        // No in-progress toast — NavigateBack to the reconnecting UI is the feedback.
         Navigation.NavigateBack();
       } else {
         toaster.toast({ title: 'RomM Sync Error', body: result.error || 'Failed to save configuration.', duration: 5000 });
@@ -2762,22 +2747,32 @@ const V2SearchField = forwardRef(function V2SearchField(
       style={{ borderRadius: V2.radiusMd }}
     >
       <style>{`
-        .romm-search-wrap label { display: none !important; }
-        .romm-search-wrap > div { background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important; margin: 0 !important; }
-        .romm-search-wrap > div > div { background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important; }
-        .romm-search-wrap input { background: transparent !important; border: none !important; outline: none !important; box-shadow: none !important; color: ${V2.fg} !important; font-size: 14px !important; font-family: inherit !important; padding: 0 !important; margin: 0 !important; height: auto !important; min-height: 0 !important; caret-color: ${V2.brand} !important; }
-        .romm-search-wrap input::placeholder { color: rgba(255,255,255,0.45) !important; }
+        .romm-search-input label { display: none !important; }
+        .romm-search-input, .romm-search-input > div, .romm-search-input > div > div { background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important; margin: 0 !important; width: 100% !important; }
+        .romm-search-input input { background: transparent !important; border: none !important; outline: none !important; box-shadow: none !important; color: ${V2.fg} !important; font-size: 14px !important; font-family: inherit !important; padding: 0 10px !important; margin: 0 !important; height: auto !important; min-height: 0 !important; caret-color: ${V2.brand} !important; }
+        .romm-search-input input::placeholder { color: rgba(255,255,255,0.45) !important; }
       `}</style>
+      {/* Mirrors RomM's gallery search RTextField (outlined + inline icon
+          "well"): a left adornment box with its own elevated fill and a
+          divider that turns brand on focus, brand border + halo when active. */}
       <div className="romm-search-wrap" style={{
-        display: 'flex', alignItems: 'center', gap: '10px', height: '40px', padding: '0 12px',
+        display: 'flex', alignItems: 'stretch', height: '40px', overflow: 'hidden',
         borderRadius: V2.radiusMd,
-        background: focused ? V2.surfaceHover : 'rgba(255,255,255,0.045)',
+        background: V2.bgElevated,
         border: `1px solid ${focused ? V2.brand : V2.border}`,
         boxShadow: focused ? `0 0 0 3px rgba(139,116,232,0.22)` : 'none',
         transition: 'background 0.2s, border-color 0.2s, box-shadow 0.2s',
       }}>
-        <FaSearch size={14} color={focused ? V2.brandHover : V2.fgMuted} style={{ flexShrink: 0 }} />
-        <div style={{ flex: '1 1 auto', minWidth: 0 }}
+        <div style={{
+          display: 'flex', alignItems: 'center', padding: '0 11px', flexShrink: 0,
+          background: 'rgba(255,255,255,0.06)',
+          borderRight: `1px solid ${focused ? V2.brand : V2.border}`,
+          color: focused ? V2.brandHover : V2.fgMuted,
+          transition: 'border-right-color 0.2s, color 0.2s',
+        }}>
+          <FaSearch size={14} />
+        </div>
+        <div className="romm-search-input" style={{ flex: '1 1 auto', minWidth: 0, display: 'flex', alignItems: 'center' }}
           onFocusCapture={() => setFocused(true)}
           onBlurCapture={() => setFocused(false)}
         >
@@ -2790,9 +2785,9 @@ const V2SearchField = forwardRef(function V2SearchField(
           <div onClick={() => onChange('')}
             style={{
               flexShrink: 0, cursor: 'pointer', color: V2.fgMuted, display: 'flex', alignItems: 'center',
-              padding: '2px', borderRadius: '50%',
+              padding: '0 11px',
             }}>
-            <FaTimes size={13} />
+            <FaTimesCircle size={15} />
           </div>
         )}
       </div>
@@ -3180,12 +3175,90 @@ function HomePanel({ onOpen, onOpenGroup, onBg }:
   );
 }
 
+// Human "2 hours ago" from an ISO timestamp, for the offline banner's
+// "library from …" line. Coarse buckets are plenty here.
+function relativeAge(iso: string | null | undefined): string {
+  if (!iso) return 'an earlier session';
+  const then = Date.parse(iso);
+  if (isNaN(then)) return 'an earlier session';
+  const secs = Math.max(0, (Date.now() - then) / 1000);
+  if (secs < 90) return 'moments ago';
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  return days === 1 ? 'yesterday' : `${days} days ago`;
+}
+
+// Slim, full-width strip shown ONLY when the backend reports a non-online
+// connection state. It explains what offline means rather than just flagging an
+// error: cached browse + downloaded-game launch keep working, and any saves made
+// offline will sync on reconnect. Self-hides when online so the normal case is
+// untouched. Reads connection/snapshot_fetched_at/pending_saves from
+// get_service_status (see main.py get_service_status).
+function OfflineBanner({ status }: { status: any }) {
+  const conn = status?.connection;
+  if (!conn || conn === 'online') return null;
+
+  const pending = Number(status?.pending_saves || 0);
+  let dot = V2.warning, title = '', detail = '';
+  if (conn === 'connecting') {
+    dot = V2.fgMuted;
+    title = 'Connecting to RomM…';
+    detail = 'Your downloaded games are ready to play in the meantime.';
+  } else if (conn === 'offline_cached') {
+    dot = V2.warning;
+    title = `Offline — showing your library from ${relativeAge(status?.snapshot_fetched_at)}`;
+    detail = pending > 0
+      ? `Downloaded games play normally. ${pending} save${pending === 1 ? '' : 's'} will sync when you reconnect.`
+      : 'Downloaded games play normally. New downloads resume once you reconnect.';
+  } else { // 'disconnected' — no cached library to show
+    dot = V2.danger;
+    title = 'Not connected to RomM';
+    detail = 'Connect to your server to browse your library and sync saves.';
+  }
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: '10px',
+      margin: '0 16px 8px', padding: '8px 12px',
+      background: V2.surface, border: `1px solid ${V2.borderStrong}`,
+      borderRadius: V2.radiusMd, fontSize: '12px',
+    }}>
+      <div style={{
+        width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0,
+        background: dot, boxShadow: `0 0 6px ${dot}`,
+      }} />
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontWeight: 600, color: V2.fg }}>{title}</div>
+        <div style={{ color: V2.fgMuted, marginTop: '1px' }}>{detail}</div>
+      </div>
+    </div>
+  );
+}
+
 function LibraryGroupsPage() {
   const [active, setActive] = useState<NavId>(_libLastTab);
   const [groups, setGroups] = useState<LibGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [bgUri, setBgUri] = useState<string | null>(null);
+  const [svcStatus, setSvcStatus] = useState<any>(null);
   const mode = active === 'collections' ? 'collection' : 'platform';
+
+  // Poll connection state for the offline banner. Cheap (no API calls — built
+  // from live backend state) and slow-cadence; just enough to flip the banner
+  // in/out as connectivity changes.
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try { const st = await getServiceStatus(); if (alive) setSvcStatus(st); }
+      catch { /* transient */ }
+    };
+    tick();
+    const id = setInterval(tick, 5000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
 
   const load = async (m: string) => {
     setLoading(true);
@@ -3255,6 +3328,8 @@ function LibraryGroupsPage() {
       <V2NavBar active={active} onTab={onTab} activeRef={navPillRef} />
 
       <div style={{ height: '8px' }} />
+
+      <OfflineBanner status={svcStatus} />
 
       {active === 'home' ? (
         <HomePanel onOpen={openGame} onOpenGroup={openGroupFrom} onBg={setBgUri} />
@@ -3623,6 +3698,10 @@ function LibraryGamesPage() {
       }
       const ok = await deleteCollectionRoms(name, mode);
       if (ok === false) throw new Error('backend declined');
+      // Clear download state for every affected ROM across ALL cached groups
+      // (these games also live in their platform view / other collections),
+      // then drop this group's own entry so it re-fetches fresh on next entry.
+      for (const g of games) if (g.is_downloaded) libCacheSetDownloaded(g.rom_id, false);
       setGames((gs) => gs.map((g) => ({ ...g, is_downloaded: false })));
       libCacheDelete(cacheKey(name));
     } catch (e) {
@@ -4819,6 +4898,7 @@ function GameDetailPage() {
       if (res.ok) {
         toaster.toast({ title: 'Downloaded', body: detail?.name || game.name });
         setIsDownloaded(true);
+        libCacheSetDownloaded(game.rom_id, true);
       } else {
         toaster.toast({ title: 'Download failed', body: res.message || 'Unknown error' });
       }
@@ -4849,6 +4929,7 @@ function GameDetailPage() {
       const res = await deleteGame(game.rom_id);
       if (res?.success) {
         setIsDownloaded(false);
+        libCacheSetDownloaded(game.rom_id, false);
       } else {
         toaster.toast({ title: 'Delete failed', body: res?.message || 'Unknown error' });
       }
@@ -5178,8 +5259,8 @@ function V2SettingsSection({ title, children }: { title: string; children: any }
 
 // A focusable surface row: leading icon, title + optional subtitle, optional
 // trailing control. Acts as a button when onClick is given.
-function V2SettingsRow({ icon, title, subtitle, onClick, right, danger, disabled }:
-  { icon?: any; title: any; subtitle?: any; onClick?: () => void; right?: any; danger?: boolean; disabled?: boolean }) {
+function V2SettingsRow({ icon, title, subtitle, onClick, right, danger, disabled, bareIcon }:
+  { icon?: any; title: any; subtitle?: any; onClick?: () => void; right?: any; danger?: boolean; disabled?: boolean; bareIcon?: boolean }) {
   const [active, setActive] = useState(false);
   const interactive = !!onClick && !disabled;
   const accent = danger ? V2.danger : V2.brand;
@@ -5201,8 +5282,10 @@ function V2SettingsRow({ icon, title, subtitle, onClick, right, danger, disabled
         <div style={{
           flexShrink: 0, width: '36px', height: '36px', borderRadius: V2.radiusMd,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-          background: danger ? 'rgba(255,80,80,0.12)' : V2.bgElevated,
-          color: danger ? V2.danger : V2.brandHover,
+          // bareIcon: no chip background (used for full-bleed platform icons,
+          // matching the Stats page's plain icon cell).
+          background: bareIcon ? 'transparent' : (danger ? 'rgba(255,80,80,0.12)' : V2.bgElevated),
+          color: bareIcon ? V2.fg2 : (danger ? V2.danger : V2.brandHover),
         }}>{icon}</div>
       )}
       <div style={{ flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '2px' }}>
@@ -5424,6 +5507,176 @@ function StatsPage() {
   );
 }
 
+// Glassy core picker (RomM v2 chrome, like the account/collection menus).
+// Lists "Auto" + every installed core, with RetroDECK's choices surfaced first
+// and the current selection check-marked. closeModal is injected by showModal.
+function CorePickerModal({ row, availableCores, onPick, closeModal }: {
+  row: any; availableCores: string[]; onPick: (core: string) => void; closeModal?: () => void;
+}) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [query, setQuery] = useState('');
+  const rdSet = new Set<string>(row?.retrodeck_choices || []);
+  // RetroDECK's choices for this system are the cores actually meant for the
+  // platform (mGBA/VBA-M for gba, Swanstation/Beetle for psx, …). Show only
+  // those by default; expand to every installed core on demand (or when
+  // RetroDECK has no entry for this system, so the list wouldn't be empty).
+  const relevant = (row?.retrodeck_choices || []).filter((c: string) => availableCores.includes(c));
+  const [showAll, setShowAll] = useState(relevant.length === 0);
+  useEffect(() => { const t = setTimeout(() => panelRef.current?.focus(), 60); return () => clearTimeout(t); }, []);
+
+  const q = query.trim().toLowerCase();
+  const match = (c: string) => !q || c.toLowerCase().includes(q);
+  // RetroDECK's choices first (in its priority order), then (if expanded) the rest.
+  const rdOrdered = relevant.filter((c: string) => match(c));
+  // Filtering searches the whole installed set even when collapsed, so you can
+  // find any core by typing without toggling "show all" first.
+  const others = (showAll || q) ? availableCores.filter((c) => !rdSet.has(c) && match(c)) : [];
+  const current = row?.override || '';
+
+  const pick = (core: string) => { closeModal?.(); onPick(core); };
+
+  const coreRow = (core: string) => (
+    <UserMenuRow key={core}
+      icon={current === core ? <FaCheck size={13} /> : <FaPuzzlePiece size={13} />}
+      label={core + (row?.retrodeck_default === core ? '  · RetroDECK default' : (rdSet.has(core) ? '  · RetroDECK' : ''))}
+      onSelect={() => pick(core)} />
+  );
+
+  return (
+    <ModalRoot bHideCloseIcon onCancel={closeModal} onEscKeypress={closeModal}>
+      <Focusable noFocusRing style={{
+        position: 'fixed', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        background: 'rgba(7,7,15,0.45)', WebkitBackdropFilter: 'blur(8px)', backdropFilter: 'blur(8px)',
+      }}>
+        <style>{`${V2_FOCUS_STYLE}
+          @keyframes umIn { from { opacity: 0; transform: translateY(-6px) scale(0.98); } to { opacity: 1; transform: none; } }`}</style>
+        <div onClick={() => closeModal?.()} style={{ position: 'absolute', inset: 0 }} />
+        <Focusable noFocusRing autoFocus ref={panelRef} flow-children="vertical" style={{
+          position: 'relative', width: '340px', maxWidth: '92vw', boxSizing: 'border-box',
+          fontFamily: V2.font, color: V2.fg, padding: '8px',
+          display: 'flex', flexDirection: 'column',
+          background: 'linear-gradient(180deg, rgba(20,20,30,0.7) 0%, rgba(10,10,18,0.78) 100%)',
+          WebkitBackdropFilter: 'blur(28px) saturate(1.1)', backdropFilter: 'blur(28px) saturate(1.1)',
+          border: `1px solid rgba(255,255,255,0.12)`, borderRadius: V2.radiusCard,
+          boxShadow: '0 16px 48px rgba(0,0,0,0.55)', maxHeight: '82vh', overflowY: 'auto',
+          animation: 'umIn 0.18s cubic-bezier(0.22,1,0.36,1)',
+        }}>
+          <div style={{
+            fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em',
+            color: V2.fgMuted, padding: '6px 8px 10px',
+          }}>Core · {row?.platform_name || ''}</div>
+          <div style={{ padding: '0 4px 8px' }}>
+            <V2SearchField value={query} onChange={setQuery} />
+          </div>
+          <div style={{ height: '1px', background: V2.border, margin: '0 4px 4px' }} />
+          {/* Auto reverts to RetroDECK's choice / our guess. */}
+          {match('auto') && (
+            <UserMenuRow
+              icon={!current ? <FaCheck size={13} /> : <FaUndo size={13} />}
+              label={`Auto${row?.retrodeck_default ? `  ·  ${row.retrodeck_default}` : (row?.resolved_core ? `  ·  ${row.resolved_core}` : '')}`}
+              onSelect={() => pick('')} />
+          )}
+          {rdOrdered.length > 0 && <div style={{ height: '1px', background: V2.border, margin: '4px 4px' }} />}
+          {rdOrdered.map(coreRow)}
+          {/* Expand to the full installed-core list (hidden by default so the
+              platform's own cores aren't buried). Only offered when RetroDECK
+              actually narrowed the list. */}
+          {relevant.length > 0 && (
+            <>
+              <div style={{ height: '1px', background: V2.border, margin: '4px 4px' }} />
+              <UserMenuRow
+                icon={<FaLayerGroup size={13} />}
+                label={showAll ? 'Show only cores for this platform' : 'Show all installed cores'}
+                onSelect={() => setShowAll((v) => !v)} />
+            </>
+          )}
+          {others.length > 0 && <div style={{ height: '1px', background: V2.border, margin: '4px 4px' }} />}
+          {others.map(coreRow)}
+        </Focusable>
+      </Focusable>
+    </ModalRoot>
+  );
+}
+
+// Emulator Cores page: one row per library platform showing how its launch
+// core resolves (user override > RetroDECK/ES-DE > built-in guess). A on a row
+// opens the picker; the trailing badge shows the resolved core + its source.
+function CoresPage() {
+  const [rows, setRows] = useState<any[]>([]);
+  const [cores, setCores] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const load = async () => {
+    try {
+      const r = await getCoreMappings();
+      if (r?.success) { setRows(r.mappings || []); setCores(r.available_cores || []); }
+    } catch { /* ignore */ }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { load(); }, []);
+
+  const apply = async (slug: string, core: string) => {
+    try {
+      const r = await setCoreOverride(slug, core);
+      if (r?.success && r.mapping) {
+        setRows((prev) => prev.map((x) => x.slug === slug ? { ...r.mapping } : x));
+      }
+    } catch { toaster.toast({ title: 'Core override', body: 'Could not save change' }); }
+  };
+
+  const openPicker = (row: any) =>
+    showModal(<CorePickerModal row={row} availableCores={cores} onPick={(c) => apply(row.slug, c)} />);
+
+  const badge = (row: any) => {
+    const labelFor: Record<string, string> = { override: 'pinned', retrodeck: 'RetroDECK', guess: 'auto', none: '—' };
+    const color = row.source === 'override' ? V2.brandHover : (row.source === 'none' ? V2.danger : V2.fgMuted);
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <span style={{ fontSize: '13px', fontWeight: 600, color: row.resolved_core ? V2.fg : V2.danger }}>
+          {row.resolved_core || 'no core'}
+        </span>
+        <span style={{
+          fontSize: '10px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em',
+          color, border: `1px solid ${color}`, borderRadius: V2.radiusChip, padding: '1px 6px',
+        }}>{labelFor[row.source] || row.source}</span>
+        <FaChevronRight size={12} style={{ color: V2.fgFaint }} />
+      </div>
+    );
+  };
+
+  return v2Page(
+    <Focusable noFocusRing
+      onButtonDown={(e: any) => { if (e?.detail?.button === GamepadButton.CANCEL) Navigation.NavigateBack(); }}
+      style={{ maxWidth: '760px', margin: '0 auto', padding: '20px 20px 0' }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '24px' }}>
+        <GameActionButton icon={<FaChevronLeft size={16} />} onClick={() => Navigation.NavigateBack()} />
+        <div style={{ fontSize: '24px', fontWeight: 800, letterSpacing: '-0.01em' }}>Emulator Cores</div>
+      </div>
+
+      <V2SettingsSection title="Per-platform core">
+        {loading ? (
+          <V2SettingsRow icon={<FaPuzzlePiece size={16} />} title="Loading cores…" />
+        ) : rows.length === 0 ? (
+          <V2SettingsRow icon={<FaPuzzlePiece size={16} />}
+            title="No platforms detected yet"
+            subtitle="Open the Game Browser once so your library loads, then come back to pin a core per platform." />
+        ) : rows.map((row) => (
+          <V2SettingsRow key={row.slug}
+            bareIcon
+            icon={<PlatformIcon slug={row.slug} size={28} />}
+            title={row.platform_name}
+            subtitle={row.source === 'override'
+              ? 'Pinned by you — A to change or reset to auto'
+              : 'Auto-resolved — A to pin a specific core'}
+            onClick={() => openPicker(row)}
+            right={badge(row)} />
+        ))}
+      </V2SettingsSection>
+    </Focusable>
+  );
+}
+
 function SettingsPage() {
   const [loggingEnabled, setLoggingEnabled] = useState<boolean>(true);
   const [loading, setLoading] = useState<boolean>(true);
@@ -5606,6 +5859,15 @@ function Content() {
   const intervalRef = useRef<any>(null);
 
   const getStatusColor = () => {
+    // Prefer the finer-grained connection state: a cached-offline session is a
+    // warning (amber), but a true disconnect with nothing to show is an error
+    // (red), even though both report status === 'running'.
+    switch (status.connection) {
+      case 'online': return '#4ade80';
+      case 'offline_cached': return '#fbbf24';
+      case 'connecting': return '#9ca3af';
+      case 'disconnected': return '#f87171';
+    }
     switch (status.status) {
       case 'connected': return '#4ade80';
       case 'running': return '#fbbf24';
@@ -5614,6 +5876,10 @@ function Content() {
       default: return '#9ca3af';
     }
   };
+
+  // Pending offline saves get their own line so the user knows nothing is lost.
+  const pendingSaves = Number(status?.pending_saves || 0);
+  const showPending = status.connection === 'offline_cached' && pendingSaves > 0;
 
   const checkConfigured = async () => {
     try {
@@ -5686,6 +5952,14 @@ function Content() {
           <span>{(status.message || '').replace(', ', ' - ')}</span>
         </div>
       </PanelSectionRow>
+
+      {showPending && (
+        <PanelSectionRow>
+          <div style={{ fontSize: '11px', color: '#9ca3af', padding: '0 2px 4px', lineHeight: 1.4 }}>
+            {pendingSaves} save{pendingSaves === 1 ? '' : 's'} will sync when you reconnect.
+          </div>
+        </PanelSectionRow>
+      )}
 
       <PanelSectionRow>
         <ButtonItem
@@ -6365,6 +6639,7 @@ export default definePlugin(() => {
   routerHook.addRoute("/romm-sync-setup", () => <SetupWizard />, { exact: true });
   routerHook.addRoute("/romm-sync-settings", () => <SettingsPage />, { exact: true });
   routerHook.addRoute("/romm-sync-stats", () => <StatsPage />, { exact: true });
+  routerHook.addRoute("/romm-sync-cores", () => <CoresPage />, { exact: true });
   routerHook.addRoute("/romm-sync-config", () => <ConfigPage />, { exact: true });
   routerHook.addRoute("/romm-sync-library", () => <LibraryGroupsPage />, { exact: true });
   routerHook.addRoute("/romm-sync-library/:key", () => <LibraryGamesPage />, { exact: true });
@@ -6424,6 +6699,7 @@ export default definePlugin(() => {
       routerHook.removeRoute("/romm-sync-setup");
       routerHook.removeRoute("/romm-sync-settings");
       routerHook.removeRoute("/romm-sync-stats");
+      routerHook.removeRoute("/romm-sync-cores");
       routerHook.removeRoute("/romm-sync-config");
       routerHook.removeRoute("/romm-sync-library");
       routerHook.removeRoute("/romm-sync-library/:key");

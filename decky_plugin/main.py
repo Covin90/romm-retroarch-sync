@@ -61,6 +61,14 @@ log_file = Path.home() / '.config' / 'romm-retroarch-sync' / 'decky_debug.log'
 log_file.parent.mkdir(parents=True, exist_ok=True)
 settings_file = Path.home() / '.config' / 'romm-retroarch-sync' / 'decky_settings.json'
 
+# Persisted library snapshot — the last successful fetch of games + collections +
+# platform mappings. Hydrated on cold start so the Game Browser populates offline,
+# overwritten (write-through) after every successful fetch. schema-versioned and
+# tagged with the server_url so a server switch invalidates it. See _persist_snapshot /
+# _load_snapshot. SCHEMA bumps when the persisted game/collection shape changes.
+snapshot_file = Path.home() / '.config' / 'romm-retroarch-sync' / 'library_snapshot.json'
+SNAPSHOT_SCHEMA = 1
+
 
 def load_decky_settings():
     try:
@@ -205,6 +213,17 @@ class Plugin:
     # Timestamp for efficient polling with updated_after parameter
     _last_full_fetch_time: str = None  # ISO 8601 datetime of last full data fetch
 
+    # ISO 8601 fetched_at of the data currently in memory, sourced either from the
+    # persisted snapshot (cold start) or the last live fetch. Drives the "library
+    # from N ago" copy in the offline banner. None until hydrated/fetched.
+    _snapshot_fetched_at: str = None
+
+    # Reachability latch, distinct from RomMClient.authenticated (which is sticky).
+    # True while the server is responding; flipped False on any connected-branch
+    # failure. A False→True transition triggers an offline save flush. Starts None
+    # so the first successful probe doesn't count as a "reconnect".
+    _online: bool = None
+
     _bios_tracking: 'BiosTrackingManager' = None
     _steam_manager: 'SteamShortcutManager' = None
 
@@ -267,6 +286,13 @@ class Plugin:
             self._available_games = []
         self._connection_attempted = False
 
+        # Cold-start hydration: seed the library from the last persisted snapshot
+        # so the Game Browser is populated immediately — before the retry thread
+        # connects, and even if it never does (offline). A successful fetch later
+        # overwrites this in place.
+        if not self._available_games:
+            self._hydrate_from_snapshot()
+
         self._stop_event = threading.Event()
         self._retry_thread = threading.Thread(
             target=self._retry_loop,
@@ -310,6 +336,86 @@ class Plugin:
         self._disabled_collection_counts.clear()
 
         logging.info("Sync stopped")
+
+    # -----------------------------------------------------------------------
+    # Library snapshot (offline-first persistence)
+    # -----------------------------------------------------------------------
+
+    def _pending_save_count(self):
+        """Best-effort count of local save changes not yet pushed, for the UI.
+        Zero when auto-sync hasn't started (e.g. cold-start offline)."""
+        try:
+            if self._auto_sync:
+                return self._auto_sync.count_pending_saves()
+        except Exception as e:
+            logging.debug(f"pending save count failed: {e}")
+        return 0
+
+    def _note_reachable(self):
+        """Mark the server reachable. On an offline→online edge (was False),
+        flush any save changes made while offline. No-op on the first-ever probe
+        (was None) so startup doesn't masquerade as a reconnect."""
+        was = self._online
+        self._online = True
+        if was is False and self._auto_sync:
+            try:
+                logging.info("Server reachable again — flushing offline save changes")
+                self._auto_sync.flush_after_reconnect()
+            except Exception as e:
+                logging.warning(f"Reconnect save flush failed: {e}")
+
+    def _persist_snapshot(self):
+        """Write-through the live library to disk so a cold start can hydrate it
+        offline. Called after every successful fetch. Best-effort: never raises
+        into the caller (a failed snapshot must not break a working session)."""
+        try:
+            url = self._settings.get('RomM', 'url') if self._settings else ''
+            data = {
+                'schema': SNAPSHOT_SCHEMA,
+                'fetched_at': datetime.now(timezone.utc).isoformat(),
+                'server_url': url,
+                'games': self._available_games or [],
+                'collections': self._romm_collections or [],
+                'virtual_collections': self._romm_virtual_collections or [],
+                'platform_slug_to_name': self._platform_slug_to_name or {},
+            }
+            tmp = snapshot_file.with_suffix('.tmp')
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(data, f, separators=(',', ':'))
+            tmp.rename(snapshot_file)
+            logging.info(f"Persisted library snapshot ({len(data['games'])} games)")
+        except Exception as e:
+            logging.warning(f"Failed to persist library snapshot: {e}")
+
+    def _hydrate_from_snapshot(self):
+        """Load the persisted snapshot into live state on cold start so the Game
+        Browser populates before (or without) a network connection. Discards a
+        snapshot from a different server or an incompatible schema. Returns the
+        ISO fetched_at timestamp on success, else None."""
+        try:
+            if not snapshot_file.exists():
+                return None
+            with open(snapshot_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if data.get('schema') != SNAPSHOT_SCHEMA:
+                logging.info("Library snapshot schema mismatch; ignoring")
+                return None
+            configured_url = self._settings.get('RomM', 'url') if self._settings else ''
+            if configured_url and data.get('server_url') and data['server_url'] != configured_url:
+                logging.info("Library snapshot is for a different server; ignoring")
+                return None
+            self._available_games = data.get('games') or []
+            self._romm_collections = data.get('collections') or None
+            self._romm_virtual_collections = data.get('virtual_collections') or None
+            self._platform_slug_to_name = data.get('platform_slug_to_name') or {}
+            self._snapshot_fetched_at = data.get('fetched_at')
+            logging.info(f"Hydrated {len(self._available_games)} games from snapshot "
+                         f"(fetched {self._snapshot_fetched_at})")
+            return self._snapshot_fetched_at
+        except Exception as e:
+            logging.warning(f"Failed to hydrate library snapshot: {e}")
+            return None
 
     def _connect_to_romm(self):
         """Connect to RomM, load game list, and start AutoSyncManager."""
@@ -423,6 +529,8 @@ class Plugin:
                 logging.info(f"Loaded {len(self._available_games)} games")
 
                 self._last_full_fetch_time = datetime.now(timezone.utc).isoformat()
+                self._snapshot_fetched_at = self._last_full_fetch_time
+                self._persist_snapshot()
                 # Library is fetched on connect and on manual refresh (the reference
                 # client's on-demand model) — no background polling.
 
@@ -549,6 +657,8 @@ class Plugin:
         """
         connected = self._connect_to_romm()
         self._connection_attempted = True
+        if connected:
+            self._note_reachable()
 
         # If initial connection failed, retry quickly (DNS may not be ready yet)
         if not connected:
@@ -569,7 +679,12 @@ class Plugin:
                 if self._romm_client and self._romm_client.authenticated:
                     # Use updated_after for efficient collection refresh if we have a timestamp
                     updated_after = self._last_full_fetch_time
+                    # This GET is also our reachability probe: RomMClient.authenticated
+                    # is sticky (a network drop never flips it), so a raised exception
+                    # here is how we learn the server went away, and a success after a
+                    # failure is how we learn it came back.
                     new_collections = self._romm_client.get_collections(updated_after=updated_after)
+                    self._note_reachable()
 
                     if updated_after and new_collections:
                         # Merge updated collections with existing ones
@@ -586,7 +701,11 @@ class Plugin:
                     logging.info("Attempting to reconnect to RomM...")
                     if self._connect_to_romm():
                         logging.info("Reconnected successfully")
+                        self._note_reachable()
             except Exception as e:
+                # Treat any failure in the connected branch as a reachability loss
+                # so the next success triggers an offline→online flush.
+                self._online = False
                 logging.error(f"Retry loop error: {e}", exc_info=True)
 
         logging.info("Retry loop exited")
@@ -607,7 +726,14 @@ class Plugin:
                     'collection_count': 0,
                 }
 
-            connected = bool(self._romm_client and self._romm_client.authenticated)
+            # RomMClient.authenticated is sticky — a network drop never flips it —
+            # so also consult the reachability latch (_online). When it has
+            # explicitly latched False (the retry loop saw the server go away),
+            # treat the session as not-connected so the offline-aware branch below
+            # reports 'offline_cached' instead of a false 'online'. _online is None
+            # until the first probe, which must NOT demote a healthy connection.
+            connected = bool(self._romm_client and self._romm_client.authenticated
+                             and self._online is not False)
 
             if not connected:
                 # _connection_attempted becomes True once _connect_to_romm() finishes.
@@ -615,9 +741,27 @@ class Plugin:
                 # The frontend uses details.last_update to decide whether to show
                 # the "not connected / retry" warning (same key as before).
                 details = {'last_update': time.time()} if self._connection_attempted else {}
+                # Tri-state for the offline-aware UI: if we have a hydrated/cached
+                # library the user can still browse + launch downloaded games
+                # ('offline_cached'); with nothing to show it's a true cold
+                # 'disconnected'. Before the first attempt completes we're still
+                # 'connecting'. 'connection' is additive — legacy keys unchanged.
+                has_library = bool(self._available_games)
+                if not self._connection_attempted:
+                    conn_state = 'connecting'
+                    msg = "Connecting to RomM..."
+                elif has_library:
+                    conn_state = 'offline_cached'
+                    msg = "Offline — showing your saved library"
+                else:
+                    conn_state = 'disconnected'
+                    msg = "Not connected to RomM"
                 return {
                     'status':                  'running',
-                    'message':                 "Connecting to RomM...",
+                    'connection':              conn_state,
+                    'snapshot_fetched_at':     self._snapshot_fetched_at,
+                    'pending_saves':           self._pending_save_count(),
+                    'message':                 msg,
                     'details':                 details,
                     'collections':             [],
                     'collection_count':        0,
@@ -671,6 +815,9 @@ class Plugin:
 
             return {
                 'status':                  'connected',
+                'connection':              'online',
+                'snapshot_fetched_at':     self._snapshot_fetched_at,
+                'pending_saves':           self._pending_save_count(),
                 'message':                 message,
                 'details':                 status,
                 'collections':             collections,
@@ -689,6 +836,21 @@ class Plugin:
                 'collections':      [],
                 'collection_count': 0,
             }
+
+    async def drain_notifications(self):
+        """Return and clear queued notification events from the sync engine.
+
+        The frontend polls this on its status tick and toasts each event
+        verbatim. Events are produced at the exact moment a sync/removal
+        happens (see CollectionSyncManager.push_notification), so there's no
+        frontend-side diffing or transition inference.
+        """
+        try:
+            if self._collection_sync:
+                return {'events': self._collection_sync.drain_notifications()}
+        except Exception as e:
+            logging.debug(f"drain_notifications error: {e}")
+        return {'events': []}
 
     async def refresh_from_romm(self, force_full_refresh: bool = False):
         """Refresh data from RomM server (collections and games).
@@ -855,6 +1017,10 @@ class Plugin:
                     logging.info(f"Full refresh: loaded {len(self._available_games)} games")
 
             self._last_full_fetch_time = current_time
+            self._snapshot_fetched_at = current_time
+            # Write-through the freshly merged library so a later cold start /
+            # offline session sees this data.
+            self._persist_snapshot()
 
             # Get updated status
             status = await self.get_service_status()
@@ -1343,6 +1509,64 @@ class Plugin:
         except Exception as e:
             logging.error(f"set_retrodeck_button_enabled error: {e}")
             return False
+
+    async def get_core_mappings(self):
+        """For the core-mapping settings page: one row per platform in the
+        user's library, showing how the launch core resolves and the options
+        available to override it.
+
+        Returns {success, available_cores: [...], mappings: [
+          {slug, platform_name, resolved_core, source, override,
+           retrodeck_default, retrodeck_choices: [...]}
+        ]}.
+        """
+        try:
+            ra = self._retroarch
+            if not ra:
+                return {'success': False, 'mappings': [], 'available_cores': [],
+                        'message': 'RetroArch interface unavailable'}
+            available = sorted(ra.get_available_cores().keys())
+            # Unique platforms (slug + label) that have at least one DOWNLOADED
+            # game — the core choice only matters for games you can actually
+            # launch locally, so platforms with nothing downloaded are hidden.
+            seen, rows = set(), []
+            for g in (self._available_games or []):
+                if not g.get('is_downloaded'):
+                    continue
+                slug = g.get('platform_slug') or (g.get('romm_data') or {}).get('platform_slug')
+                if not slug or slug in seen:
+                    continue
+                seen.add(slug)
+                label = self._platform_name_for(g)
+                info = ra.describe_core_resolution(label, system_slug=slug)
+                info.update({'slug': slug, 'platform_name': label})
+                rows.append(info)
+            rows.sort(key=lambda r: (r['platform_name'] or '').lower())
+            return {'success': True, 'available_cores': available, 'mappings': rows}
+        except Exception as e:
+            logging.error(f"get_core_mappings error: {e}", exc_info=True)
+            return {'success': False, 'mappings': [], 'available_cores': [], 'message': str(e)}
+
+    async def set_core_override(self, slug: str, core: str = ''):
+        """Pin (core non-empty) or clear (core empty) the launch core for a
+        platform slug. Returns the refreshed resolution for that row."""
+        try:
+            ra = self._retroarch
+            if not ra:
+                return {'success': False, 'message': 'RetroArch interface unavailable'}
+            ra.set_core_override(slug, core or '')
+            # Recompute so the UI reflects the new source/resolved core.
+            label = slug
+            for g in (self._available_games or []):
+                if (g.get('platform_slug') or (g.get('romm_data') or {}).get('platform_slug')) == slug:
+                    label = self._platform_name_for(g)
+                    break
+            info = ra.describe_core_resolution(label, system_slug=slug)
+            info.update({'slug': slug, 'platform_name': label})
+            return {'success': True, 'mapping': info}
+        except Exception as e:
+            logging.error(f"set_core_override error: {e}", exc_info=True)
+            return {'success': False, 'message': str(e)}
 
     async def reset_all_settings(self):
         """Delete all downloaded ROMs from ALL collections, delete downloaded
