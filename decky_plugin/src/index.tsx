@@ -22,6 +22,7 @@ import { MdVerified } from "react-icons/md";
 
 // Call backend methods
 const getServiceStatus = callable<[], any>("get_service_status");
+const notifyNetworkState = callable<[boolean], any>("notify_network_state");
 const drainNotifications = callable<[], { events: Array<{ kind: string, title: string, body: string, timestamp: number }> }>("drain_notifications");
 const refreshFromRomm = callable<[boolean], any>("refresh_from_romm");
 const getLoggingEnabled = callable<[], boolean>("get_logging_enabled");
@@ -1009,9 +1010,13 @@ let _colSyncRefs = 0;
 // 'disconnected'|'connecting'), so tiles can disable server-only actions (e.g.
 // download) without each one polling get_service_status independently.
 let _connState: string | null = null;
+// Last full status object from the shared poll, so components can read
+// connection/snapshot_fetched_at/pending_saves without their own poller.
+let _lastStatus: any = null;
 async function _colSyncTick() {
   try {
     const st = await getServiceStatus();
+    _lastStatus = st ?? null;
     _connState = st?.connection ?? null;
     _colSync.clear();
     for (const c of (st?.collections || [])) {
@@ -1036,6 +1041,9 @@ function _subscribeStatus(listener: () => void): () => void {
     if (_colSyncRefs <= 0 && _colSyncTimer) { clearInterval(_colSyncTimer); _colSyncTimer = null; }
   };
 }
+// Force an immediate poll outside the 1.5s cadence — used when the device's
+// network state flips so the UI reflects it without waiting for the next tick.
+function refreshStatusNow() { _colSyncTick(); }
 function useCollectionSync(name: string): ColSyncState | undefined {
   const [, force] = useState(0);
   useEffect(() => _subscribeStatus(() => force((n) => n + 1)), []);
@@ -1047,6 +1055,12 @@ function useOffline(): boolean {
   const [, force] = useState(0);
   useEffect(() => _subscribeStatus(() => force((n) => n + 1)), []);
   return _connState === 'offline_cached' || _connState === 'disconnected';
+}
+// Full service status from the shared poll (one poller for the whole UI).
+function useServiceStatus(): any {
+  const [, force] = useState(0);
+  useEffect(() => _subscribeStatus(() => force((n) => n + 1)), []);
+  return _lastStatus;
 }
 
 // Collection tile — mosaic cover + kind badge + name/count below, with the
@@ -2308,9 +2322,36 @@ const formatSpeed = (bytesPerSec: number): string => {
 // moment a sync/removal happens. No state diffing, no transition inference: the
 // backend is the single source of truth (see CollectionSyncManager.push_notification).
 let backgroundInterval: any = null;
+// Last connection state seen by the background poller, for edge detection. Only
+// an online→offline (or offline→online) TRANSITION toasts — a cold start that's
+// already offline must not fire a spurious "connection lost".
+let _prevConn: string | null = null;
 
 const checkForNotifications = async () => {
   try {
+    // Connection-lost / restored toast — runs here (not in a component) so it
+    // fires even while the RomM app isn't open (e.g. mid-game).
+    try {
+      const st = await getServiceStatus();
+      const conn = st?.connection ?? null;
+      if (conn && conn !== 'connecting') {
+        const isOff = conn === 'offline_cached' || conn === 'disconnected';
+        if (_prevConn === 'online' && isOff) {
+          const noNet = st?.unreachable_reason === 'no_network';
+          toaster.toast({
+            title: noNet ? 'No internet connection' : "Can't reach RomM server",
+            body: noNet
+              ? 'Showing your downloaded games — saves sync when you’re back online.'
+              : 'The server isn’t responding — showing your downloaded games.',
+            duration: 5000,
+          });
+        } else if ((_prevConn === 'offline_cached' || _prevConn === 'disconnected') && conn === 'online') {
+          toaster.toast({ title: 'Back online', body: 'Reconnected to RomM — syncing.', duration: 4000 });
+        }
+        _prevConn = conn;
+      }
+    } catch { /* transient */ }
+
     const { events } = await drainNotifications();
     if (!events?.length) return;
     for (let i = 0; i < events.length; i++) {
@@ -3081,6 +3122,7 @@ function HomePanel({ onOpen, onOpenGroup, onBg }:
   const [platforms, setPlatforms] = useState<LibGroup[]>(c0?.platforms || []);
   const [collections, setCollections] = useState<LibGroup[]>(c0?.collections || []);
   const [loading, setLoading] = useState(!c0);
+  const offline = useOffline();
 
   useEffect(() => {
     let alive = true;
@@ -3100,7 +3142,9 @@ function HomePanel({ onOpen, onOpenGroup, onBg }:
       finally { if (alive) setLoading(false); }
     })();
     return () => { alive = false; };
-  }, []);
+    // Re-fetch when connectivity flips: offline filters the library to
+    // downloaded-only, so the rows must rebuild without a tab switch.
+  }, [offline]);
 
   // Land focus on the first card of whichever row renders first, so the user can
   // navigate straight in (no DOWN press needed off the nav bar).
@@ -3169,26 +3213,14 @@ function HomePanel({ onOpen, onOpenGroup, onBg }:
       )}
 
       {continuePlaying.length === 0 && recent.length === 0 && platforms.length === 0 && collections.length === 0 && (
-        <div style={{ padding: '16px', color: V2.fgMuted, fontSize: '13px' }}>No games in your library yet.</div>
+        <div style={{ padding: '16px', color: V2.fgMuted, fontSize: '13px' }}>
+          {offline
+            ? 'No downloaded games yet. Reconnect to browse and download your library.'
+            : 'No games in your library yet.'}
+        </div>
       )}
     </div>
   );
-}
-
-// Human "2 hours ago" from an ISO timestamp, for the offline banner's
-// "library from …" line. Coarse buckets are plenty here.
-function relativeAge(iso: string | null | undefined): string {
-  if (!iso) return 'an earlier session';
-  const then = Date.parse(iso);
-  if (isNaN(then)) return 'an earlier session';
-  const secs = Math.max(0, (Date.now() - then) / 1000);
-  if (secs < 90) return 'moments ago';
-  const mins = Math.round(secs / 60);
-  if (mins < 60) return `${mins} min ago`;
-  const hours = Math.round(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.round(hours / 24);
-  return days === 1 ? 'yesterday' : `${days} days ago`;
 }
 
 // Slim, full-width strip shown ONLY when the backend reports a non-online
@@ -3201,7 +3233,11 @@ function OfflineBanner({ status }: { status: any }) {
   const conn = status?.connection;
   if (!conn || conn === 'online') return null;
 
-  const pending = Number(status?.pending_saves || 0);
+  // Distinguish "the Deck has no internet" from "the Deck is online but the
+  // RomM server isn't responding" — same offline browse experience, but the
+  // cause (and what the user should check) is different.
+  const noNetwork = status?.unreachable_reason === 'no_network';
+
   let dot = V2.warning, title = '', detail = '';
   if (conn === 'connecting') {
     dot = V2.fgMuted;
@@ -3209,14 +3245,18 @@ function OfflineBanner({ status }: { status: any }) {
     detail = 'Your downloaded games are ready to play in the meantime.';
   } else if (conn === 'offline_cached') {
     dot = V2.warning;
-    title = `Offline — showing your library from ${relativeAge(status?.snapshot_fetched_at)}`;
-    detail = pending > 0
-      ? `Downloaded games play normally. ${pending} save${pending === 1 ? '' : 's'} will sync when you reconnect.`
-      : 'Downloaded games play normally. New downloads resume once you reconnect.';
+    title = noNetwork
+      ? 'No internet connection — showing your downloaded games'
+      : "Can't reach your RomM server — showing your downloaded games";
+    detail = noNetwork
+      ? 'Only games saved on this device are shown. Your full library and saves sync when you’re back online.'
+      : 'The server isn’t responding. Only games saved on this device are shown; everything syncs once it’s reachable.';
   } else { // 'disconnected' — no cached library to show
     dot = V2.danger;
-    title = 'Not connected to RomM';
-    detail = 'Connect to your server to browse your library and sync saves.';
+    title = noNetwork ? 'No internet connection' : "Can't reach your RomM server";
+    detail = noNetwork
+      ? 'Connect to the internet to browse your library and sync saves.'
+      : 'Your device is online but the RomM server isn’t responding. Check that it’s running and reachable.';
   }
 
   return (
@@ -3243,22 +3283,9 @@ function LibraryGroupsPage() {
   const [groups, setGroups] = useState<LibGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [bgUri, setBgUri] = useState<string | null>(null);
-  const [svcStatus, setSvcStatus] = useState<any>(null);
+  const svcStatus = useServiceStatus();
+  const offline = svcStatus?.connection === 'offline_cached' || svcStatus?.connection === 'disconnected';
   const mode = active === 'collections' ? 'collection' : 'platform';
-
-  // Poll connection state for the offline banner. Cheap (no API calls — built
-  // from live backend state) and slow-cadence; just enough to flip the banner
-  // in/out as connectivity changes.
-  useEffect(() => {
-    let alive = true;
-    const tick = async () => {
-      try { const st = await getServiceStatus(); if (alive) setSvcStatus(st); }
-      catch { /* transient */ }
-    };
-    tick();
-    const id = setInterval(tick, 5000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
 
   const load = async (m: string) => {
     setLoading(true);
@@ -3274,9 +3301,11 @@ function LibraryGroupsPage() {
   };
 
   // Only platforms/collections fetch groups; home/search are placeholders.
+  // Re-fetch on connectivity flip too — offline filters to downloaded-only, so
+  // the group list must rebuild without needing a tab switch.
   useEffect(() => {
     if (active === 'platforms' || active === 'collections') load(mode);
-  }, [active]);
+  }, [active, offline]);
 
   // Focus the first platform/collection tile once the index grid loads.
   const isGroupTab = active === 'platforms' || active === 'collections';
@@ -3339,7 +3368,11 @@ function LibraryGroupsPage() {
         <div style={{ padding: '16px', color: V2.fgMuted, fontSize: '13px' }}>Loading…</div>
       ) : groups.length === 0 ? (
         <div style={{ padding: '16px', color: V2.fgMuted, fontSize: '13px' }}>
-          {mode === 'collection' ? 'No collections found on the server.' : 'No games found.'}
+          {svcStatus?.connection === 'offline_cached' || svcStatus?.connection === 'disconnected'
+            ? (mode === 'collection'
+                ? "Collections aren't available offline — reconnect to browse them."
+                : 'No downloaded games yet. Reconnect to download from your library.')
+            : (mode === 'collection' ? 'No collections found on the server.' : 'No games found.')}
         </div>
       ) : mode === 'platform' ? (
         <Focusable noFocusRing
@@ -5877,9 +5910,6 @@ function Content() {
     }
   };
 
-  // Pending offline saves get their own line so the user knows nothing is lost.
-  const pendingSaves = Number(status?.pending_saves || 0);
-  const showPending = status.connection === 'offline_cached' && pendingSaves > 0;
 
   const checkConfigured = async () => {
     try {
@@ -5952,14 +5982,6 @@ function Content() {
           <span>{(status.message || '').replace(', ', ' - ')}</span>
         </div>
       </PanelSectionRow>
-
-      {showPending && (
-        <PanelSectionRow>
-          <div style={{ fontSize: '11px', color: '#9ca3af', padding: '0 2px 4px', lineHeight: 1.4 }}>
-            {pendingSaves} save{pendingSaves === 1 ? '' : 's'} will sync when you reconnect.
-          </div>
-        </PanelSectionRow>
-      )}
 
       <PanelSectionRow>
         <ButtonItem
@@ -6653,6 +6675,19 @@ export default definePlugin(() => {
   registerRommLaunchIntercept();
   registerRommSessionEndWatch();
 
+  // OS-level connectivity bridge: the Decky frontend runs in a Chromium context,
+  // so navigator's online/offline events fire the instant the Deck's network
+  // drops or returns — far faster than the backend's 5-min retry probe. Forward
+  // each edge to the backend (which treats 'offline' as authoritative and
+  // re-probes the server on 'online'), then force an immediate status poll so
+  // the banner/tiles flip without waiting for the next 1.5s tick.
+  const onNetOffline = () => { notifyNetworkState(false).catch(() => { }).finally(() => refreshStatusNow()); };
+  const onNetOnline = () => { notifyNetworkState(true).catch(() => { }).finally(() => refreshStatusNow()); };
+  try {
+    window.addEventListener('offline', onNetOffline);
+    window.addEventListener('online', onNetOnline);
+  } catch (e) { console.error('[RomM] net listeners', e); }
+
   // Re-bind the launch intercept if the RomM tile was added in a prior session,
   // and auto-open the setup wizard once when no connection is configured.
   (async () => {
@@ -6691,6 +6726,10 @@ export default definePlugin(() => {
     onDismount: () => {
       console.log('[PLUGIN] onDismount - Stopping background monitoring');
       stopBackgroundMonitoring();
+      try {
+        window.removeEventListener('offline', onNetOffline);
+        window.removeEventListener('online', onNetOnline);
+      } catch { /* ignore */ }
       try { _rommActionReg?.unregister(); } catch { /* ignore */ }
       _rommActionReg = null;
       try { _rommLifetimeReg?.unregister(); } catch { /* ignore */ }

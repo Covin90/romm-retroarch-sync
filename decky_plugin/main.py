@@ -189,6 +189,7 @@ class Plugin:
     # Background retry thread (reconnect + collection-list refresh every 5 min)
     _stop_event: threading.Event = None
     _retry_thread: threading.Thread = None
+    _reach_thread: threading.Thread = None
 
     # Cached collection list — refreshed on connect and every 5 min in _retry_loop.
     # Passed to build_sync_status so get_service_status() makes zero API calls.
@@ -223,6 +224,12 @@ class Plugin:
     # failure. A False→True transition triggers an offline save flush. Starts None
     # so the first successful probe doesn't count as a "reconnect".
     _online: bool = None
+
+    # Device-level network state, reported by the frontend's navigator
+    # online/offline events. Distinct from _online (server reachability): lets us
+    # tell "the Deck has no internet" (no_network) from "the Deck is online but
+    # the RomM server isn't responding" (server_unreachable). None = unknown.
+    _device_online: bool = None
 
     _bios_tracking: 'BiosTrackingManager' = None
     _steam_manager: 'SteamShortcutManager' = None
@@ -301,13 +308,28 @@ class Plugin:
         )
         self._retry_thread.start()
 
-        logging.info("Sync started (retry thread only, managers start on connect)")
+        # Fast reachability probe: actively checks the server every ~25s and
+        # flips the connection state, so offline/online is detected in seconds
+        # WITHOUT relying on the frontend's navigator events (gamescope often
+        # doesn't emit them). The 5-min retry loop remains the heavier
+        # reconnect/refresh worker.
+        self._reach_thread = threading.Thread(
+            target=self._reachability_loop,
+            daemon=True,
+            name="romm-reachability",
+        )
+        self._reach_thread.start()
+
+        logging.info("Sync started (retry + reachability threads; managers start on connect)")
 
     def _stop_sync(self):
         if self._stop_event:
             self._stop_event.set()
         if self._retry_thread:
             self._retry_thread.join(timeout=5)
+        if self._reach_thread:
+            self._reach_thread.join(timeout=5)
+            self._reach_thread = None
 
         # Stop managers
         if self._bios_tracking:
@@ -341,28 +363,83 @@ class Plugin:
     # Library snapshot (offline-first persistence)
     # -----------------------------------------------------------------------
 
-    def _pending_save_count(self):
-        """Best-effort count of local save changes not yet pushed, for the UI.
-        Zero when auto-sync hasn't started (e.g. cold-start offline)."""
-        try:
-            if self._auto_sync:
-                return self._auto_sync.count_pending_saves()
-        except Exception as e:
-            logging.debug(f"pending save count failed: {e}")
-        return 0
-
     def _note_reachable(self):
         """Mark the server reachable. On an offline→online edge (was False),
         flush any save changes made while offline. No-op on the first-ever probe
         (was None) so startup doesn't masquerade as a reconnect."""
         was = self._online
         self._online = True
+        # The server answering proves the device has network too.
+        self._device_online = True
         if was is False and self._auto_sync:
             try:
                 logging.info("Server reachable again — flushing offline save changes")
                 self._auto_sync.flush_after_reconnect()
             except Exception as e:
                 logging.warning(f"Reconnect save flush failed: {e}")
+
+    def _reachability_loop(self):
+        """Actively probe the server every ~25s and flip the connection state.
+
+        This is the dependable offline/online detector: it does not rely on the
+        frontend's navigator events (gamescope's embedded browser frequently
+        doesn't emit them). Only runs the probe once we have an authenticated
+        client — the retry loop owns (re)connecting from a cold/disconnected
+        state. _note_reachable() handles the offline→online save flush.
+        """
+        while not self._stop_event.wait(25):
+            try:
+                if not (self._romm_client and self._romm_client.authenticated):
+                    continue
+                if self._romm_client.is_reachable():
+                    self._note_reachable()
+                elif self._online is not False:
+                    self._online = False
+                    logging.info("Reachability probe failed — server unreachable, going offline")
+            except Exception as e:
+                logging.debug(f"reachability loop error: {e}")
+
+    def _probe_now(self):
+        """One-shot reachability check, run off the 5-minute retry cadence.
+
+        Triggered when the device's own network state changes (the frontend
+        forwards navigator's online event) so recovery is near-instant instead
+        of waiting for the next retry-loop tick. Reconnects if we were never
+        authenticated, else does a cheap GET; _note_reachable() handles the
+        offline→online flush. A failure latches _online False.
+        """
+        try:
+            if self._romm_client and self._romm_client.authenticated:
+                self._romm_client.get_collections(updated_after=self._last_full_fetch_time)
+                self._note_reachable()
+            elif self._connect_to_romm():
+                self._note_reachable()
+        except Exception as e:
+            self._online = False
+            logging.info(f"Network probe failed, staying offline: {e}")
+
+    async def notify_network_state(self, online: bool):
+        """Frontend bridge for the device's OS-level connectivity (navigator
+        online/offline events). 'offline' is authoritative and instant — no
+        network means the server is unreachable, so latch offline right away.
+        'online' only means the LAN/internet is back, NOT that RomM is up, so we
+        kick a background probe rather than assuming reachability.
+        """
+        try:
+            self._device_online = bool(online)
+            if not online:
+                # No network on the device ⇒ the server is definitionally
+                # unreachable too. Latch both.
+                self._online = False
+                logging.info("Device reports offline — latching offline (no_network)")
+            else:
+                logging.info("Device reports online — probing RomM")
+                threading.Thread(target=self._probe_now, daemon=True,
+                                 name="romm-net-probe").start()
+            return {'success': True}
+        except Exception as e:
+            logging.debug(f"notify_network_state error: {e}")
+            return {'success': False}
 
     def _persist_snapshot(self):
         """Write-through the live library to disk so a cold start can hydrate it
@@ -746,21 +823,29 @@ class Plugin:
                 # ('offline_cached'); with nothing to show it's a true cold
                 # 'disconnected'. Before the first attempt completes we're still
                 # 'connecting'. 'connection' is additive — legacy keys unchanged.
+                # Cause of the outage, so the UI can say "you're offline" vs
+                # "can't reach the server". If the device itself reported no
+                # network it's 'no_network'; otherwise the device has a network
+                # but the RomM server isn't answering ('server_unreachable').
+                reason = 'no_network' if self._device_online is False else 'server_unreachable'
                 has_library = bool(self._available_games)
                 if not self._connection_attempted:
                     conn_state = 'connecting'
                     msg = "Connecting to RomM..."
+                    reason = None
                 elif has_library:
                     conn_state = 'offline_cached'
-                    msg = "Offline — showing your saved library"
+                    msg = ("No internet connection" if reason == 'no_network'
+                           else "Can't reach your RomM server")
                 else:
                     conn_state = 'disconnected'
-                    msg = "Not connected to RomM"
+                    msg = ("No internet connection" if reason == 'no_network'
+                           else "Can't reach your RomM server")
                 return {
                     'status':                  'running',
                     'connection':              conn_state,
+                    'unreachable_reason':      reason,
                     'snapshot_fetched_at':     self._snapshot_fetched_at,
-                    'pending_saves':           self._pending_save_count(),
                     'message':                 msg,
                     'details':                 details,
                     'collections':             [],
@@ -816,8 +901,8 @@ class Plugin:
             return {
                 'status':                  'connected',
                 'connection':              'online',
+                'unreachable_reason':      None,
                 'snapshot_fetched_at':     self._snapshot_fetched_at,
-                'pending_saves':           self._pending_save_count(),
                 'message':                 message,
                 'details':                 status,
                 'collections':             collections,
@@ -1033,6 +1118,10 @@ class Plugin:
             }
 
         except Exception as e:
+            # Passive reachability latch: a real server call just failed, so the
+            # server is unreachable even though authenticated is still sticky-true.
+            # Catches the "on Wi-Fi but RomM is down" case the OS can't see.
+            self._online = False
             logging.error(f"refresh_from_romm error: {e}", exc_info=True)
             return {
                 'success': False,
@@ -2001,6 +2090,14 @@ class Plugin:
         """rom_id -> game dict, from the in-memory library."""
         return {g.get('rom_id'): g for g in (self._available_games or []) if g.get('rom_id')}
 
+    def _is_offline(self):
+        """True when the server isn't reachable. Mirrors get_service_status:
+        RomMClient.authenticated is sticky, so the reachability latch (_online)
+        must also be consulted. When offline the library is filtered to
+        downloaded-only — everything shown is actually playable."""
+        return not (self._romm_client and self._romm_client.authenticated
+                    and self._online is not False)
+
     # File types RetroArch can boot directly. .m3u is the multi-disc playlist
     # (RomM generates one inside the download zip); listing it lets the user
     # launch "all discs" with in-game disc swapping. .bin is intentionally
@@ -2159,6 +2256,12 @@ class Plugin:
         """
         try:
             if mode == 'collection':
+                # Offline: collection contents are fetched live per-open, so they
+                # can't be browsed without the server. Show none rather than
+                # tiles that error on open — the platform view (downloaded-only)
+                # is the offline browse path.
+                if self._is_offline():
+                    return {'success': True, 'mode': mode, 'groups': []}
                 actively = (self._settings.get('Collections', 'actively_syncing', '')
                             if self._settings else '')
                 synced_set = {c for c in actively.split('|') if c}
@@ -2212,8 +2315,13 @@ class Plugin:
                 return {'success': True, 'mode': mode, 'groups': groups}
 
             # default: platform
+            # Offline: only downloaded games are playable, so restrict the index
+            # to them — platforms with nothing downloaded drop out entirely.
+            offline = self._is_offline()
             agg = {}
             for g in (self._available_games or []):
+                if offline and not g.get('is_downloaded'):
+                    continue
                 label = self._platform_name_for(g)
                 slug = g.get('platform_slug') or (g.get('romm_data') or {}).get('platform_slug')
                 a = agg.setdefault(label, {'key': label, 'label': label, 'count': 0,
@@ -2299,10 +2407,13 @@ class Plugin:
                 return {'success': True, 'games': games}
 
             # platform
+            offline = self._is_offline()
             games = []
             for g in (self._available_games or []):
                 if self._platform_name_for(g) != key:
                     continue
+                if offline and not g.get('is_downloaded'):
+                    continue  # offline: only show playable (downloaded) games
                 sg = self._serialize_game(g)
                 sg['platform'] = key  # resolved label, not the raw (maybe-Unknown) field
                 games.append(sg)
@@ -2320,11 +2431,15 @@ class Plugin:
         in-memory name filter if the server query fails or the client is down.
         """
         q = (query or '').strip()
+        offline = self._is_offline()
         if not q:
-            # Mirror RomM's Search view: with no term, show the whole library.
+            # Mirror RomM's Search view: with no term, show the whole library
+            # (downloaded-only while offline).
             try:
                 out = []
                 for g in (self._available_games or []):
+                    if offline and not g.get('is_downloaded'):
+                        continue
                     sg = self._serialize_game(g)
                     sg['platform'] = self._platform_name_for(g)
                     out.append(sg)
@@ -2372,10 +2487,13 @@ class Plugin:
                 out.sort(key=lambda x: (x.get('name') or '').lower())
                 return {'success': True, 'games': out}
 
-            # Fallback: in-memory name filter (offline / search error).
+            # Fallback: in-memory name filter (offline / search error). Offline
+            # shows only downloaded games, matching the rest of the library.
             ql = q.lower()
             out = []
             for g in (self._available_games or []):
+                if offline and not g.get('is_downloaded'):
+                    continue
                 if ql in (g.get('name') or '').lower():
                     sg = self._serialize_game(g)
                     sg['platform'] = self._platform_name_for(g)
@@ -2942,6 +3060,12 @@ class Plugin:
                 return {'success': False, 'message': 'Not connected to RomM'}
             idx = self._games_index()
             g = idx.get(rom_id)
+            # Trigger trace: download_game is ONLY invoked by an explicit frontend
+            # action (tile/detail/batch button) — nothing in the backend auto-calls
+            # it. Logging the rom here so an unexpected download can be traced to a
+            # real UI event instead of guessed at.
+            logging.info(f"download_game RPC (user action): rom_id={rom_id} "
+                         f"name={(g or {}).get('name', '?')}")
             download_dir = Path(self._settings.get('Download', 'rom_directory',
                                                    '~/RomMSync/roms')).expanduser()
             if g:
@@ -3170,6 +3294,10 @@ class Plugin:
                 return g.get('created_at') or ''
             has_dates = any(g.get('created_at') for g in games)
             ordered = sorted(games, key=_key, reverse=True) if has_dates else list(games)
+            # Offline: the 'Recently added' row only shows downloaded (playable)
+            # games, matching the filtered library.
+            if self._is_offline():
+                ordered = [g for g in ordered if g.get('is_downloaded')]
             recent = [self._serialize_game(g) for g in ordered[:15]]
             continue_playing = await asyncio.to_thread(self._fetch_continue_playing, 15)
             return {

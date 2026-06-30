@@ -1607,6 +1607,22 @@ class RomMClient:
 
         return True
 
+    def is_reachable(self, timeout=6):
+        """Cheap connectivity probe: does the server answer right now?
+
+        A single tiny GET (limit=1) with a short timeout — used by the backend
+        reachability loop to detect offline/online without depending on the
+        frontend's navigator events (gamescope often doesn't emit them). Returns
+        True if the server responded at all (any < 500), False on any network
+        error/timeout. Does NOT touch self.authenticated.
+        """
+        try:
+            r = self.session.get(urljoin(self.base_url, '/api/roms'),
+                                  params={'limit': 1}, timeout=timeout)
+            return r.status_code < 500
+        except Exception:
+            return False
+
     def register_device(self, device_name=None, platform=None, client=None, client_version=None):
         """Register or get device ID with RomM.
 
@@ -7416,31 +7432,6 @@ class AutoSyncManager:
             })
 
         return inventory
-
-    def count_pending_saves(self):
-        """Count local save/state files whose on-disk fingerprint differs from the
-        last successfully-uploaded one — i.e. changes not yet pushed to the server.
-
-        Drives the offline "N saves will sync when you reconnect" indicator. Pure
-        read of local state + the persisted fingerprint cache; makes no network
-        calls, so it's safe to call from get_service_status while offline.
-        """
-        try:
-            pending = 0
-            save_files = self.retroarch.get_save_files()
-            for _save_type, files in save_files.items():
-                for file_info in files:
-                    file_path = Path(file_info['path'])
-                    if not file_path.exists():
-                        continue
-                    stat = file_path.stat()
-                    fingerprint = (stat.st_size, stat.st_mtime)
-                    if self.last_uploaded.get(str(file_path)) != fingerprint:
-                        pending += 1
-            return pending
-        except Exception as e:
-            logging.debug(f"count_pending_saves error: {e}")
-            return 0
 
     def flush_after_reconnect(self):
         """Flush local save changes accumulated while offline. Called when the
