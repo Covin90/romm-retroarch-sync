@@ -3237,6 +3237,7 @@ function OfflineBanner({ status }: { status: any }) {
   // RomM server isn't responding" — same offline browse experience, but the
   // cause (and what the user should check) is different.
   const noNetwork = status?.unreachable_reason === 'no_network';
+  const pending = status?.pending_saves || 0;
 
   let dot = V2.warning, title = '', detail = '';
   if (conn === 'connecting') {
@@ -3273,6 +3274,11 @@ function OfflineBanner({ status }: { status: any }) {
       <div style={{ minWidth: 0 }}>
         <div style={{ fontWeight: 600, color: V2.fg }}>{title}</div>
         <div style={{ color: V2.fgMuted, marginTop: '1px' }}>{detail}</div>
+        {conn !== 'connecting' && pending > 0 && (
+          <div style={{ color: V2.brandHover, marginTop: '4px', fontWeight: 600 }}>
+            {pending === 1 ? '1 game waiting to sync' : `${pending} games waiting to sync`}
+          </div>
+        )}
       </div>
     </div>
   );

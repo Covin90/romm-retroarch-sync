@@ -3316,6 +3316,13 @@ class RomMClient:
                 else:
                     logging.warning(f"Upload unexpected status {response.status_code}: {response.text[:200]}")
 
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout) as e:
+                # Network is down / server unreachable — this is NOT a rejection.
+                # Signal 'offline' so the caller can say "will sync on reconnect"
+                # and leave the file queued rather than reporting a hard failure.
+                logging.info(f"Upload deferred (offline): {file_path.name}")
+                return 'offline'
             except Exception as e:
                 logging.error(f"Upload exception: {e}")
 
@@ -6486,6 +6493,96 @@ class AutoSyncManager:
         except Exception as e:
             logging.debug(f"Could not save upload fingerprints: {e}")
 
+    def _record_synced(self, path):
+        """Record the current (size, mtime) of a file as its last-synced state.
+
+        Called after a save reconciles with the server (no_op / successful
+        upload / successful download) so count_pending_saves() doesn't flag it
+        as waiting to sync. Returns True if last_uploaded changed (caller
+        persists once per cycle).
+        """
+        try:
+            st = Path(path).stat()
+            fp = (st.st_size, st.st_mtime)
+            key = str(path)
+            if self.last_uploaded.get(key) == fp:
+                return False
+            self.last_uploaded[key] = fp
+            return True
+        except Exception:
+            return False
+
+    def mark_all_synced(self, exclude=None):
+        """Snapshot every current save/state file as the last-synced baseline.
+
+        Called at the end of an online sync cycle that made real server contact.
+        While connected, the on-disk saves/states are (assumed) reconciled with
+        the server, so we record a fingerprint for each. This converts the cache
+        from a partial "files we happened to upload" map into a complete "synced
+        as of last online" baseline — which is what makes the offline pending
+        count accurate (only files that DRIFT or appear after this baseline
+        count as waiting to sync, instead of every never-before-seen file).
+
+        ``exclude`` is a set of paths to skip — files whose upload genuinely
+        failed this cycle, which must stay flagged as pending.
+
+        Returns True if anything changed (caller persists once).
+        """
+        exclude = exclude or set()
+        changed = False
+        try:
+            save_files = self.retroarch.get_save_files() or {}
+            for bucket in ('saves', 'states'):
+                for entry in save_files.get(bucket, []):
+                    path = entry.get('path')
+                    if path and str(path) not in exclude and self._record_synced(path):
+                        changed = True
+        except Exception as e:
+            logging.debug(f"mark_all_synced failed: {e}")
+        return changed
+
+    @staticmethod
+    def _game_key_for_save(path):
+        """Collapse a save/state filename to its game, so per-game counting
+        treats all of a game's slots/backups as one. e.g.
+        'Star Wars (Europe).state3' / '.state.auto' / '.srm' -> 'Star Wars (Europe)'.
+        """
+        name = Path(path).name
+        if name.lower().endswith('.state.auto'):
+            return name[:-len('.state.auto')]
+        return Path(name).stem
+
+    def count_pending_saves(self):
+        """Number of distinct GAMES with local save/state changes waiting to
+        UPLOAD on reconnect.
+
+        A file is pending when its current (size, mtime) differs from the
+        last-synced baseline (never-synced or changed since). We group by game
+        because a single game can have many save-state slots — the user thinks
+        in games, not files. Spans both saves and states. This is purely the
+        upload direction ("what will push"); downloads never factor in. Used by
+        the offline sync-queue indicator. Best-effort: returns 0 on any failure.
+        """
+        try:
+            pending_games = set()
+            save_files = self.retroarch.get_save_files() or {}
+            for bucket in ('saves', 'states'):
+                for entry in save_files.get(bucket, []):
+                    path = entry.get('path')
+                    if not path:
+                        continue
+                    try:
+                        st = Path(path).stat()
+                    except Exception:
+                        continue
+                    fp = (st.st_size, st.st_mtime)
+                    if self.last_uploaded.get(str(path)) != fp:
+                        pending_games.add(self._game_key_for_save(path))
+            return len(pending_games)
+        except Exception as e:
+            logging.debug(f"count_pending_saves failed: {e}")
+            return 0
+
     def start_auto_sync(self):
         """Start all auto-sync components"""
         if self.enabled:
@@ -7269,7 +7366,13 @@ class AutoSyncManager:
                 slot=slot, autocleanup=autocleanup, autocleanup_limit=autocleanup_limit
             )
 
-            if result == 'conflict':
+            if result == 'offline':
+                # No network — leave the file pending (don't record a synced
+                # fingerprint) so the reconnect flush retries it. Reassure the
+                # user instead of reporting a failure.
+                self.log(f"📴 Offline — {file_path.name} will sync on next connection")
+                self.retroarch.send_notification("Offline — save will upload on next connection")
+            elif result == 'conflict':
                 self.log(f"⚠️ Server returned 409 Conflict for {file_path.name} — server has newer version, triggering download")
                 self.retroarch.send_notification(f"Sync conflict: {file_path.name}")
                 # Trigger download so the newer server version lands locally.
@@ -7301,6 +7404,47 @@ class AutoSyncManager:
                 
         except Exception as e:
             self.log(f"❌ Upload error for {file_path}: {e}")
+
+    def _handle_upload_conflict(self, op, entry, rom_id, slot, device_id,
+                                session_id, saves_dir, summary):
+        """Resolve a 409 returned by an 'upload' op (a diverged save).
+
+        Applies the user's overwrite preference (Smart prefer-newer by default):
+        re-push local with overwrite when local wins, else back up local and pull
+        the server copy. Updates ``summary`` and returns True if a fingerprint
+        was recorded (caller persists), False if deferred/failed.
+        """
+        choice = self._resolve_save_conflict(op, entry['_path'])
+        if choice == 'local':
+            if self.romm_client.upload_save(
+                rom_id, 'saves', entry['_path'], emulator=entry.get('emulator'),
+                device_id=device_id, slot=slot, overwrite=True,
+                autocleanup=entry.get('_autocleanup', False),
+                autocleanup_limit=entry.get('_autocleanup_limit'),
+                session_id=session_id,
+            ) is True:
+                summary['uploaded'] += 1
+                return self._record_synced(entry['_path'])
+            summary['errors'] += 1
+            return False
+        if choice == 'server':
+            try:
+                src = Path(entry['_path'])
+                shutil.copy2(src, src.with_suffix(
+                    src.suffix + f".local-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"))
+            except Exception:
+                pass
+            target = self._resolve_download_target(op, saves_dir)
+            if self.romm_client.download_save_by_id(
+                op.get('save_id'), 'saves', target,
+                device_id=device_id, session_id=session_id):
+                summary['downloaded'] += 1
+                return self._record_synced(target)
+            summary['errors'] += 1
+            return False
+        # 'skip' — defer for UI resolution, leave both sides untouched.
+        summary['conflicts'].append(op)
+        return False
 
     def _resolve_save_conflict(self, op, local_path):
         """Decide how to resolve a save conflict: 'local' or 'server'.
@@ -7417,11 +7561,18 @@ class AutoSyncManager:
                 tz=_dt.timezone.utc,
             ).isoformat()
 
+            # Use the RomM core name (e.g. "Mupen64Plus-Next"), not the raw save
+            # folder name (e.g. "n64"). get_save_files()' retroarch_emulator is
+            # just the directory; the states path already converts via
+            # get_emulator_info_from_path, so mirror it here for consistency.
+            emulator = self.retroarch.get_emulator_info_from_path(path).get('romm_emulator') \
+                or entry.get('retroarch_emulator')
+
             inventory.append({
                 'rom_id': rom_id,
                 'file_name': entry['name'],
                 'slot': slot,
-                'emulator': entry.get('retroarch_emulator'),
+                'emulator': emulator,
                 'content_hash': content_hash,
                 'updated_at': updated_at,
                 'file_size_bytes': stat.st_size,
@@ -7445,6 +7596,35 @@ class AutoSyncManager:
             return
         self.trigger_session_save_sync("reconnect")
 
+    def flush_pending_states(self):
+        """Re-upload local save STATES that drifted from the synced baseline.
+
+        The negotiate engine is saves-only; states sync via the watcher on file
+        write. A state changed while offline never gets retried on its own when
+        the connection returns (the write already happened), so push any drifted
+        states here. process_save_upload skips unchanged files via its own
+        fingerprint check, and records the fingerprint on a successful upload.
+
+        Runs BEFORE the negotiate baseline so mark_all_synced doesn't first mark
+        a still-pending state as synced and hide it.
+        """
+        if not (self.romm_client and self.romm_client.authenticated):
+            return
+        try:
+            save_files = self.retroarch.get_save_files() or {}
+            for entry in save_files.get('states', []):
+                path = entry.get('path')
+                if not path:
+                    continue
+                try:
+                    st = Path(path).stat()
+                except Exception:
+                    continue
+                if self.last_uploaded.get(str(path)) != (st.st_size, st.st_mtime):
+                    self.process_save_upload(path)
+        except Exception as e:
+            logging.debug(f"flush_pending_states failed: {e}")
+
     def trigger_session_save_sync(self, reason=""):
         """Run a session-based save-sync in the background (coalesced).
 
@@ -7467,6 +7647,10 @@ class AutoSyncManager:
             try:
                 if reason:
                     self.log(f"🔄 Save-sync session ({reason})")
+                # Push any states that drifted (e.g. changed while offline)
+                # BEFORE the negotiate baseline, so they actually reach the
+                # server instead of being marked synced in place.
+                self.flush_pending_states()
                 self.run_negotiated_save_sync()
             except Exception as e:
                 self.log(f"❌ Session save-sync failed: {e}")
@@ -7511,6 +7695,11 @@ class AutoSyncManager:
         # Lookup local inventory entry by (rom_id, slot) for upload operations.
         inv_by_key = {(e['rom_id'], e['slot']): e for e in inventory}
         saves_dir = self.retroarch.save_dirs.get('saves')
+        # Track whether we updated any synced fingerprints so we persist once.
+        _fp_dirty = False
+        # Save paths whose upload genuinely failed this cycle — excluded from
+        # the end-of-cycle baseline so they stay flagged as pending.
+        _errored_paths = set()
 
         for op in operations:
             action = op.get('action')
@@ -7519,6 +7708,11 @@ class AutoSyncManager:
             try:
                 if action == 'no_op':
                     summary['no_op'] += 1
+                    # Already in sync with the server — record the current
+                    # fingerprint so the pending-saves count doesn't flag it.
+                    entry = inv_by_key.get((rom_id, slot))
+                    if entry and self._record_synced(entry['_path']):
+                        _fp_dirty = True
 
                 elif action == 'upload':
                     entry = inv_by_key.get((rom_id, slot))
@@ -7535,8 +7729,23 @@ class AutoSyncManager:
                     )
                     if ok is True:
                         summary['uploaded'] += 1
+                        if self._record_synced(entry['_path']):
+                            _fp_dirty = True
+                    elif ok == 'conflict':
+                        # The server rejected a "clean" upload with 409 — a
+                        # version diverged underneath us. Resolve like any
+                        # conflict (Smart prefer-newer by default): re-push local
+                        # with overwrite when local wins, else pull the server
+                        # copy. Without this the save would silently never sync.
+                        if self._handle_upload_conflict(op, entry, rom_id, slot,
+                                                        device_id, session_id,
+                                                        saves_dir, summary):
+                            _fp_dirty = True
+                        else:
+                            _errored_paths.add(str(entry['_path']))
                     else:
                         summary['errors'] += 1
+                        _errored_paths.add(str(entry['_path']))
 
                 elif action == 'download':
                     target = self._resolve_download_target(op, saves_dir)
@@ -7546,6 +7755,8 @@ class AutoSyncManager:
                     )
                     if ok:
                         summary['downloaded'] += 1
+                        if self._record_synced(target):
+                            _fp_dirty = True
                     else:
                         summary['errors'] += 1
 
@@ -7568,8 +7779,12 @@ class AutoSyncManager:
                             session_id=session_id,
                         ) is True:
                             summary['uploaded'] += 1
+                            if self._record_synced(entry['_path']):
+                                _fp_dirty = True
                         else:
                             summary['errors'] += 1
+                            if entry:
+                                _errored_paths.add(str(entry['_path']))
                     elif choice == 'server':
                         # Back up local before overwriting it — whatever chose
                         # 'server' (resolver or preference), never lose local work.
@@ -7585,14 +7800,36 @@ class AutoSyncManager:
                             op.get('save_id'), 'saves', target,
                             device_id=device_id, session_id=session_id):
                             summary['downloaded'] += 1
+                            if self._record_synced(target):
+                                _fp_dirty = True
                         else:
                             summary['errors'] += 1
                     else:
-                        # Defer — record for UI resolution, leave both sides untouched.
+                        # Defer — record for UI resolution, leave both sides
+                        # untouched. A deferred conflict is genuinely pending,
+                        # so keep it out of the baseline.
                         summary['conflicts'].append(op)
+                        if entry:
+                            _errored_paths.add(str(entry['_path']))
             except Exception as e:
                 self.log(f"❌ Save-sync op {action} rom={rom_id} failed: {e}")
                 summary['errors'] += 1
+
+        # Baseline the on-disk saves/states as "synced as of now" — but only if
+        # the cycle made real server contact (at least one op reconciled).
+        # Transient DNS/network blips can fail an individual op; a single
+        # failure must NOT block baselining everything else (especially STATES,
+        # which the saves-only negotiate never reports on). Files whose upload
+        # genuinely failed (or are in unresolved conflict) are excluded so they
+        # stay flagged as pending. This makes the offline count = only what
+        # changed/appeared after the last successful sync.
+        made_contact = (summary['no_op'] + summary['uploaded'] + summary['downloaded']) > 0
+        if made_contact:
+            if self.mark_all_synced(exclude=_errored_paths):
+                _fp_dirty = True
+
+        if _fp_dirty:
+            self._save_upload_fingerprints()
 
         completed = summary['uploaded'] + summary['downloaded'] + summary['no_op']
         self.romm_client.complete_sync_session(

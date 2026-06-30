@@ -791,6 +791,19 @@ class Plugin:
     # Public callables
     # -----------------------------------------------------------------------
 
+    def _count_pending_saves(self):
+        """Local save/state changes not yet reconciled with the server.
+
+        Drives the offline sync-queue indicator ("N saves waiting to sync").
+        Best-effort: 0 when auto-sync isn't up or anything goes wrong.
+        """
+        try:
+            if self._auto_sync and hasattr(self._auto_sync, 'count_pending_saves'):
+                return self._auto_sync.count_pending_saves()
+        except Exception as e:
+            logging.debug(f"_count_pending_saves failed: {e}")
+        return 0
+
     async def get_service_status(self):
         """Build and return current sync status directly from live object state."""
         try:
@@ -846,6 +859,7 @@ class Plugin:
                     'connection':              conn_state,
                     'unreachable_reason':      reason,
                     'snapshot_fetched_at':     self._snapshot_fetched_at,
+                    'pending_saves':           self._count_pending_saves(),
                     'message':                 msg,
                     'details':                 details,
                     'collections':             [],
@@ -903,6 +917,7 @@ class Plugin:
                 'connection':              'online',
                 'unreachable_reason':      None,
                 'snapshot_fetched_at':     self._snapshot_fetched_at,
+                'pending_saves':           self._count_pending_saves(),
                 'message':                 message,
                 'details':                 status,
                 'collections':             collections,
