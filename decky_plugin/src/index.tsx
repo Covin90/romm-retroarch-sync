@@ -1333,7 +1333,7 @@ function PlatformTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: (g
 // Sits beside the 32px brand mark: app icon + short label so the action reads
 // clearly (vs. a bare glyph). Fully controller-focusable.
 function NavLaunchButton({ iconSrc, label, onActivate }:
-  { iconSrc: string | null; label: string; onActivate: () => void }) {
+  { iconSrc: string | null; label?: string; onActivate: () => void }) {
   const [active, setActive] = useState(false);
   return (
     <Focusable noFocusRing
@@ -1342,7 +1342,7 @@ function NavLaunchButton({ iconSrc, label, onActivate }:
       onMouseEnter={() => setActive(true)} onMouseLeave={() => setActive(false)}
       style={{
         display: 'inline-flex', alignItems: 'center', gap: '7px',
-        height: '34px', padding: iconSrc ? '0 12px 0 5px' : '0 12px',
+        height: '34px', padding: iconSrc ? '0 7px 0 5px' : '0 10px',
         borderRadius: V2.radiusPill, cursor: 'pointer',
         background: active ? V2.surfaceHover : V2.surface,
         color: active ? V2.fg : V2.fg2,
@@ -1355,7 +1355,8 @@ function NavLaunchButton({ iconSrc, label, onActivate }:
       {iconSrc
         ? <img src={iconSrc} style={{ width: '26px', height: '26px', display: 'block', flexShrink: 0, borderRadius: '50%' }} />
         : <FaExternalLinkAlt size={13} style={{ marginLeft: '3px' }} />}
-      <span>{label}</span>
+      <FaPlay size={11} style={{ flexShrink: 0 }} />
+      {label && <span>{label}</span>}
     </Focusable>
   );
 }
@@ -1432,7 +1433,7 @@ function V2NavBar({ active, onTab, activeRef }: { active: NavId; onTab: (id: Nav
       <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
         {iso && <img src={iso} style={{ width: '32px', height: '32px', display: 'block' }} />}
         {rdEnabled
-          ? <NavLaunchButton iconSrc={rdIcon} label="Launch RetroDECK" onActivate={async () => {
+          ? <NavLaunchButton iconSrc={rdIcon} onActivate={async () => {
             try {
               const r = await launchRetrodeckViaSteam();
               if (r.ok) {
