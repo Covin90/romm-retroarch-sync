@@ -3314,6 +3314,17 @@ class Plugin:
             if self._is_offline():
                 ordered = [g for g in ordered if g.get('is_downloaded')]
             recent = [self._serialize_game(g) for g in ordered[:15]]
+            # Downloaded: locally-installed games, latest download first (local
+            # file mtime — we don't persist a download timestamp anywhere else).
+            def _dl_key(g):
+                try:
+                    lp = g.get('local_path')
+                    return Path(lp).stat().st_mtime if lp else 0.0
+                except Exception:
+                    return 0.0
+            dl_games = sorted((g for g in games if g.get('is_downloaded')),
+                              key=_dl_key, reverse=True)
+            downloaded_row = [self._serialize_game(g) for g in dl_games[:15]]
             continue_playing = await asyncio.to_thread(self._fetch_continue_playing, 15)
             return {
                 'success': True,
@@ -3324,11 +3335,12 @@ class Plugin:
                     'collections': collections,
                 },
                 'recent': recent,
+                'downloaded_games': downloaded_row,
                 'continue_playing': continue_playing,
             }
         except Exception as e:
             logging.error(f"get_home_data error: {e}", exc_info=True)
-            return {'success': False, 'stats': {}, 'recent': [], 'continue_playing': [], 'message': str(e)}
+            return {'success': False, 'stats': {}, 'recent': [], 'downloaded_games': [], 'continue_playing': [], 'message': str(e)}
 
     async def launch_game(self, rom_id: int, disc: str = None, sibling_rom_id: int = None):
         """Launch a downloaded game in RetroArch (A button on a downloaded card).

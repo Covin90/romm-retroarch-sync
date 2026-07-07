@@ -2243,7 +2243,7 @@ const _libGamesCache = new Map<string, LibGame[]>();
 // Home tab data cache — survives tab-switch remounts so returning to Home paints
 // instantly (then refreshes silently) instead of flashing "Loading…".
 let _homeCache: {
-  recent: LibGame[]; continuePlaying: LibGame[];
+  recent: LibGame[]; continuePlaying: LibGame[]; downloaded: LibGame[];
   platforms: LibGroup[]; collections: LibGroup[];
 } | null = null;
 
@@ -3120,6 +3120,7 @@ function HomePanel({ onOpen, onOpenGroup, onBg }:
   const c0 = _homeCache;
   const [recent, setRecent] = useState<LibGame[]>(c0?.recent || []);
   const [continuePlaying, setContinuePlaying] = useState<LibGame[]>(c0?.continuePlaying || []);
+  const [downloaded, setDownloaded] = useState<LibGame[]>(c0?.downloaded || []);
   const [platforms, setPlatforms] = useState<LibGroup[]>(c0?.platforms || []);
   const [collections, setCollections] = useState<LibGroup[]>(c0?.collections || []);
   const [loading, setLoading] = useState(!c0);
@@ -3134,7 +3135,7 @@ function HomePanel({ onOpen, onOpenGroup, onBg }:
         ]);
         if (!alive) return;
         const next = { ..._homeCache } as NonNullable<typeof _homeCache>;
-        if (h?.success) { setRecent(h.recent || []); setContinuePlaying(h.continue_playing || []); next.recent = h.recent || []; next.continuePlaying = h.continue_playing || []; }
+        if (h?.success) { setRecent(h.recent || []); setContinuePlaying(h.continue_playing || []); setDownloaded(h.downloaded_games || []); next.recent = h.recent || []; next.continuePlaying = h.continue_playing || []; next.downloaded = h.downloaded_games || []; }
         if (p?.success) { setPlatforms(p.groups || []); next.platforms = p.groups || []; }
         if (c?.success) { setCollections(c.groups || []); next.collections = c.groups || []; }
         _homeCache = next;
@@ -3149,8 +3150,8 @@ function HomePanel({ onOpen, onOpenGroup, onBg }:
 
   // Land focus on the first card of whichever row renders first, so the user can
   // navigate straight in (no DOWN press needed off the nav bar).
-  const firstList = continuePlaying.length ? 'cp' : recent.length ? 'rc'
-    : platforms.length ? 'pf' : collections.length ? 'cl' : null;
+  const firstList = continuePlaying.length ? 'cp' : downloaded.length ? 'dl'
+    : recent.length ? 'rc' : platforms.length ? 'pf' : collections.length ? 'cl' : null;
   const firstRef = useAutoFocus(!loading && firstList !== null, firstList);
 
   if (loading) {
@@ -3172,6 +3173,19 @@ function HomePanel({ onOpen, onOpenGroup, onBg }:
             <div key={g.rom_id} style={{ flexShrink: 0, ...(g.screenshot ? {} : { width: '132px' }) }}>
               <GameTile game={g} onOpen={onOpen} onActiveCover={onBg}
                 focusRef={firstList === 'cp' && i === 0 ? firstRef : undefined} />
+            </div>
+          ))}
+        </CardRow>
+      )}
+
+      {/* Downloaded — locally installed games, latest download first, so a
+          just-downloaded game is one row away instead of a search away. */}
+      {downloaded.length > 0 && (
+        <CardRow icon={<FaDownload size={14} />} title="Downloaded" count={downloaded.length}>
+          {downloaded.map((g, i) => (
+            <div key={g.rom_id} style={{ width: '132px', flexShrink: 0 }}>
+              <GameTile game={g} onOpen={onOpen} onActiveCover={onBg}
+                focusRef={firstList === 'dl' && i === 0 ? firstRef : undefined} />
             </div>
           ))}
         </CardRow>
@@ -3213,7 +3227,7 @@ function HomePanel({ onOpen, onOpenGroup, onBg }:
         </CardRow>
       )}
 
-      {continuePlaying.length === 0 && recent.length === 0 && platforms.length === 0 && collections.length === 0 && (
+      {continuePlaying.length === 0 && downloaded.length === 0 && recent.length === 0 && platforms.length === 0 && collections.length === 0 && (
         <div style={{ padding: '16px', color: V2.fgMuted, fontSize: '13px' }}>
           {offline
             ? 'No downloaded games yet. Reconnect to browse and download your library.'
