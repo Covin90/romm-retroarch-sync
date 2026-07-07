@@ -14,7 +14,7 @@ import {
   Menu,
   MenuItem,
 } from "@decky/ui";
-import { callable, definePlugin, toaster, routerHook, openFilePicker, FileSelectionType } from "@decky/api";
+import { call, callable, definePlugin, toaster, routerHook, openFilePicker, FileSelectionType } from "@decky/api";
 import { useState, useEffect, useLayoutEffect, useRef, useMemo, forwardRef, memo, type Ref, type ChangeEvent } from "react";
 import { FaSync, FaTrash, FaCog, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaTimesCircle, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight, FaCheckCircle, FaUsers, FaExternalLinkAlt, FaPuzzlePiece, FaBoxOpen, FaClone, FaRedo, FaClock, FaCheck, FaEllipsisH, FaGlobe, FaChevronDown, FaChartBar, FaSignOutAlt } from "react-icons/fa";
 import { BsGearFill } from "react-icons/bs";
@@ -2312,6 +2312,13 @@ function persistHomeCache() {
       for (const k of Object.keys(o)) _platIconCache.set(k, o[k]);
   } catch { }
 })();
+
+// Auto-update
+const getPluginVersion = callable<[], string>("get_plugin_version");
+const getUpdateChannel = callable<[], string>("get_update_channel");
+const setUpdateChannel = callable<[string], string>("set_update_channel");
+const checkForUpdate = callable<[string], any>("check_for_update");
+const downloadUpdate = callable<[string], any>("download_update");
 
 const formatSpeed = (bytesPerSec: number): string => {
   if (bytesPerSec >= 1024 * 1024) return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`;
@@ -5765,6 +5772,13 @@ function SettingsPage() {
     catch { setRdButton(!enabled); }
   };
 
+  // Auto-update state
+  const [version, setVersion] = useState<string>('');
+  const [channel, setChannel] = useState<string>('stable');
+  const [checking, setChecking] = useState<boolean>(false);
+  const [updating, setUpdating] = useState<boolean>(false);
+  const [updateInfo, setUpdateInfo] = useState<any>(null);
+
   useEffect(() => {
     // Load initial logging preference
     const loadSettings = async () => {
@@ -5778,7 +5792,93 @@ function SettingsPage() {
       }
     };
     loadSettings();
+    // Load version + update channel
+    (async () => {
+      try {
+        setVersion(await getPluginVersion());
+        setChannel(await getUpdateChannel());
+      } catch (error) {
+        console.error('Failed to load version/channel:', error);
+      }
+    })();
   }, []);
+
+  const handleChannelChange = async (next: string) => {
+    setChannel(next);
+    setUpdateInfo(null);
+    try {
+      await setUpdateChannel(next);
+    } catch (error) {
+      console.error('Failed to set update channel:', error);
+    }
+  };
+
+  const handleCheckUpdate = async () => {
+    setChecking(true);
+    setUpdateInfo(null);
+    try {
+      const info = await checkForUpdate(channel);
+      setUpdateInfo(info);
+      if (!info?.success) {
+        toaster.toast({ title: 'Update check failed', body: info?.message ?? 'Unknown error' });
+      } else if (!info.available) {
+        toaster.toast({ title: 'Up to date', body: `v${info.current} is the latest on ${channel}.` });
+      }
+    } catch (error) {
+      toaster.toast({ title: 'Update check failed', body: String(error) });
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const handleInstallUpdate = async () => {
+    if (!updateInfo?.url) return;
+    setUpdating(true);
+    try {
+      // Preferred path: ask Decky Loader to install the release zip directly from
+      // its URL. The loader downloads, verifies, extracts and reloads the plugin
+      // itself — true one-click. `name` MUST match plugin.json ("RomM RetroArch
+      // Sync") or the loader installs a duplicate instead of replacing us.
+      // This route lives behind the loader's sandboxed API and may be rejected on
+      // some Decky versions, so we fall back to a guided manual install.
+      try {
+        await call<[string, string, string, string], void>(
+          "utilities/install_plugin",
+          updateInfo.url,
+          "RomM RetroArch Sync",
+          updateInfo.latest,
+          "",
+        );
+        toaster.toast({
+          title: `Installing v${updateInfo.latest}…`,
+          body: 'Decky is applying the update. The plugin will reload automatically.',
+          duration: 10000,
+        });
+        setUpdateInfo({ ...updateInfo, available: false });
+        return;
+      } catch (loaderErr) {
+        console.warn('Loader install route unavailable, falling back to manual:', loaderErr);
+      }
+
+      // Fallback: download the zip ourselves and guide the user through Decky's
+      // "Install plugin from ZIP" developer flow.
+      const dl = await downloadUpdate(updateInfo.url);
+      if (!dl?.success) {
+        toaster.toast({ title: 'Download failed', body: dl?.message ?? 'Unknown error' });
+        return;
+      }
+      toaster.toast({
+        title: `v${updateInfo.latest} downloaded`,
+        body: 'Open Decky ▸ gear ▸ Install plugin from ZIP, then pick the file below.',
+        duration: 12000,
+      });
+      setUpdateInfo({ ...updateInfo, downloadedPath: dl.path });
+    } catch (error) {
+      toaster.toast({ title: 'Update failed', body: String(error) });
+    } finally {
+      setUpdating(false);
+    }
+  };
 
   const handleLoggingToggle = async (enabled: boolean) => {
     setLoggingEnabled(enabled);
@@ -5876,6 +5976,44 @@ function SettingsPage() {
         )}
       </V2SettingsSection>
 
+      <V2SettingsSection title="Updates">
+        <div style={{
+          display: 'flex', flexDirection: 'column', gap: '12px', padding: '16px',
+          borderRadius: V2.radiusCard, background: V2.surface, border: `1px solid ${V2.border}`,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{ fontSize: '13px', color: V2.fg2 }}>Channel</span>
+            <V2Button variant={channel === 'stable' ? 'primary' : 'tonal'}
+              onClick={() => handleChannelChange('stable')}>Stable</V2Button>
+            <V2Button variant={channel === 'beta' ? 'primary' : 'tonal'}
+              onClick={() => handleChannelChange('beta')}>Beta</V2Button>
+          </div>
+          <div style={{ fontSize: '12px', color: V2.fgMuted, lineHeight: 1.4 }}>
+            Stable = latest release. Beta = newest pre-release (leading edge, less tested).
+          </div>
+          <V2Button variant="tonal" onClick={handleCheckUpdate} disabled={checking || updating}>
+            <FaSync size={13} />
+            <span>{checking ? 'Checking…' : 'Check for Updates'}</span>
+          </V2Button>
+          {updateInfo?.available && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <div style={{ fontSize: '13px', color: V2.brand, fontWeight: 600 }}>
+                Update available: v{updateInfo.latest}{updateInfo.prerelease ? ' (pre-release)' : ''}
+              </div>
+              <V2Button variant="primary" onClick={handleInstallUpdate} disabled={updating}>
+                <FaDownload size={13} />
+                <span>{updating ? 'Installing…' : `Install v${updateInfo.latest}`}</span>
+              </V2Button>
+              {updateInfo.downloadedPath && (
+                <div style={{ fontSize: '11px', color: V2.fgMuted, wordBreak: 'break-all' }}>
+                  Downloaded to: {updateInfo.downloadedPath}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </V2SettingsSection>
+
       <V2SettingsSection title="About">
         <div style={{
           display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px',
@@ -5884,7 +6022,7 @@ function SettingsPage() {
         }}>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px' }}>
             <span style={{ fontWeight: 800, fontSize: '16px' }}>RomM RetroArch Sync</span>
-            <span style={{ color: V2.fgMuted, fontSize: '12px' }}>v1.6.0</span>
+            <span style={{ color: V2.fgMuted, fontSize: '12px' }}>v{version || '1.6.0'}</span>
           </div>
           <div style={{ color: V2.fgMuted, fontSize: '12px' }}>by Covin</div>
           <div style={{ display: 'flex', gap: '10px', marginTop: '6px' }}>

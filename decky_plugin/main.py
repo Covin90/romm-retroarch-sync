@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import mimetypes
+import re
 import sys
 import threading
 import time
@@ -171,6 +172,46 @@ def _detect_multi_disc(local_path, is_downloaded):
         games = _list_standalone_games(p)
         return len(games) > 1, len(games)
     return False, 0
+
+
+# ---------------------------------------------------------------------------
+# Version + auto-update
+# ---------------------------------------------------------------------------
+GITHUB_OWNER = "Covin90"
+GITHUB_REPO = "romm-retroarch-sync"
+GITHUB_API = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}"
+
+# The release asset the updater downloads (see DEPLOYMENT.md naming convention).
+UPDATE_ASSET_SUFFIX = "-decky.zip"
+
+# Update channels exposed in the UI.
+VALID_CHANNELS = ("stable", "beta")
+
+
+def _read_plugin_version():
+    """Single source of truth for the plugin version.
+
+    Prefers Decky's DECKY_PLUGIN_VERSION env (injected from package.json at load
+    time), falling back to reading package.json directly. This removes the old
+    hardcoded version literals that used to drift between files.
+    """
+    v = os.environ.get('DECKY_PLUGIN_VERSION')
+    if v:
+        return v.lstrip('v')
+    try:
+        with open(Path(__file__).parent / 'package.json') as f:
+            return str(json.load(f).get('version', '0.0.0'))
+    except Exception:
+        return '0.0.0'
+
+
+PLUGIN_VERSION = _read_plugin_version()
+
+
+def _parse_version(v):
+    """Loose semver tuple for comparison, e.g. 'v1.6.0' -> (1, 6, 0)."""
+    nums = [int(n) for n in re.findall(r'\d+', v or '')][:3]
+    return tuple(nums) + (0,) * (3 - len(nums))
 
 
 # ---------------------------------------------------------------------------
@@ -1672,6 +1713,105 @@ class Plugin:
             logging.error(f"set_core_override error: {e}", exc_info=True)
             return {'success': False, 'message': str(e)}
 
+    # -----------------------------------------------------------------------
+    # Auto-update
+    # -----------------------------------------------------------------------
+    async def get_plugin_version(self):
+        """Current installed version — single source of truth (package.json)."""
+        return PLUGIN_VERSION
+
+    async def get_update_channel(self):
+        return load_decky_settings().get('update_channel', 'stable')
+
+    async def set_update_channel(self, channel: str):
+        channel = channel if channel in VALID_CHANNELS else 'stable'
+        settings = load_decky_settings()
+        settings['update_channel'] = channel
+        save_decky_settings(settings)
+        logging.info(f"[UPDATE] channel set to {channel}")
+        return channel
+
+    def _select_release(self, channel: str):
+        """Return the GitHub release dict for the given channel, or None.
+
+        stable → latest non-prerelease. beta → newest release overall (which may
+        be a prerelease or a stable, whichever is more recent), so beta testers
+        always track the leading edge.
+        """
+        import requests
+        headers = {'Accept': 'application/vnd.github+json'}
+        if channel == 'beta':
+            resp = requests.get(f"{GITHUB_API}/releases",
+                                headers=headers, params={'per_page': 20}, timeout=15)
+            resp.raise_for_status()
+            releases = [r for r in resp.json() if not r.get('draft')]
+            return releases[0] if releases else None
+        resp = requests.get(f"{GITHUB_API}/releases/latest", headers=headers, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def check_for_update(self, channel: str = None):
+        """Query GitHub for a newer release on the selected channel.
+
+        Returns dict: {success, available, current, latest, channel, prerelease,
+        notes, url, asset_name}. `available` is only True when a newer version
+        AND a downloadable -decky.zip asset both exist.
+        """
+        try:
+            channel = channel if channel in VALID_CHANNELS else \
+                load_decky_settings().get('update_channel', 'stable')
+            rel = self._select_release(channel)
+            if not rel:
+                return {'success': True, 'available': False, 'current': PLUGIN_VERSION,
+                        'latest': PLUGIN_VERSION, 'channel': channel,
+                        'notes': '', 'url': None,
+                        'message': 'No releases found for this channel'}
+
+            asset = next((a for a in rel.get('assets', [])
+                          if a.get('name', '').endswith(UPDATE_ASSET_SUFFIX)), None)
+            latest = (rel.get('tag_name') or rel.get('name') or '').lstrip('v')
+            newer = _parse_version(latest) > _parse_version(PLUGIN_VERSION)
+
+            return {
+                'success': True,
+                'available': bool(newer and asset),
+                'current': PLUGIN_VERSION,
+                'latest': latest,
+                'channel': channel,
+                'prerelease': bool(rel.get('prerelease')),
+                'notes': rel.get('body') or '',
+                'url': asset.get('browser_download_url') if asset else None,
+                'asset_name': asset.get('name') if asset else None,
+            }
+        except Exception as e:
+            logging.error(f"[UPDATE] check_for_update error: {e}", exc_info=True)
+            return {'success': False, 'available': False,
+                    'current': PLUGIN_VERSION, 'message': str(e)}
+
+    async def download_update(self, url: str):
+        """Download a release zip into the plugin runtime dir. Returns its path."""
+        try:
+            import requests
+            if not url:
+                return {'success': False, 'message': 'No download URL provided'}
+            dest_dir = Path(os.environ.get('DECKY_PLUGIN_RUNTIME_DIR',
+                                           str(Path(__file__).parent / 'updates')))
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            name = url.split('/')[-1] or 'update.zip'
+            dest = dest_dir / name
+            logging.info(f"[UPDATE] downloading {url} -> {dest}")
+            with requests.get(url, stream=True, timeout=120) as r:
+                r.raise_for_status()
+                with open(dest, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=1 << 16):
+                        if chunk:
+                            f.write(chunk)
+            logging.info(f"[UPDATE] downloaded {dest.stat().st_size} bytes")
+            return {'success': True, 'path': str(dest), 'name': name}
+        except Exception as e:
+            logging.error(f"[UPDATE] download_update error: {e}", exc_info=True)
+            return {'success': False, 'message': str(e)}
+
     async def reset_all_settings(self):
         """Delete all downloaded ROMs from ALL collections, delete downloaded
         BIOS files, and reset sync state.  Credentials are preserved."""
@@ -1846,7 +1986,7 @@ class Plugin:
                 device_name=self._settings.get('Device', 'device_name', _socket.gethostname()),
                 platform=self._settings.get('Device', 'device_platform', 'SteamOS'),
                 client=self._settings.get('Device', 'client', 'RomM-RetroArch-Sync-Decky'),
-                client_version=self._settings.get('Device', 'client_version', '1.5'),
+                client_version=PLUGIN_VERSION,
             )
             if device_id:
                 self._settings.set('Device', 'device_id', device_id)
