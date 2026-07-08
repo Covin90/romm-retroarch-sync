@@ -2323,6 +2323,10 @@ const checkForUpdate = callable<[string], any>("check_for_update");
 const downloadUpdate = callable<[string], any>("download_update");
 const getCheckOnStartup = callable<[], boolean>("get_check_on_startup");
 const setCheckOnStartup = callable<[boolean], boolean>("set_check_on_startup");
+// Session cache for update checks: the section auto-checks on open, and this
+// keeps reopening Settings from burning GitHub's anonymous rate limit (60/hr).
+let _updCheckCache: { t: number; channel: string; info: any } | null = null;
+const _UPD_CACHE_MS = 5 * 60 * 1000;
 
 const formatSpeed = (bytesPerSec: number): string => {
   if (bytesPerSec >= 1024 * 1024) return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`;
@@ -5787,6 +5791,7 @@ function SettingsPage() {
   // inline status line under the action button ('ok' green / 'err' red).
   const [installPct, setInstallPct] = useState<number | null>(null);
   const [statusMsg, setStatusMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+  const [lastChecked, setLastChecked] = useState<number | null>(null);
 
   useEffect(() => {
     // Load initial logging preference
@@ -5805,8 +5810,12 @@ function SettingsPage() {
     (async () => {
       try {
         setVersion(await getPluginVersion());
-        setChannel(await getUpdateChannel());
+        const ch = await getUpdateChannel();
+        setChannel(ch);
         setCheckOnStartupState(await getCheckOnStartup());
+        // Auto-check when the section opens so the state is visible without a
+        // button press (cached — see _updCheckCache).
+        runUpdateCheck(ch, false);
       } catch (error) {
         console.error('Failed to load version/channel:', error);
       }
@@ -5824,6 +5833,7 @@ function SettingsPage() {
   };
 
   const handleChannelChange = async (next: string) => {
+    if (updating) return;
     setChannel(next);
     setUpdateInfo(null);
     setStatusMsg(null);
@@ -5832,26 +5842,47 @@ function SettingsPage() {
     } catch (error) {
       console.error('Failed to set update channel:', error);
     }
+    // Re-check right away so switching channels never shows stale state.
+    runUpdateCheck(next, false);
   };
 
-  const handleCheckUpdate = async () => {
+  const applyCheckResult = (info: any, ch: string, checkedAt: number) => {
+    setUpdateInfo(info);
+    setLastChecked(checkedAt);
+    if (!info?.success) {
+      setStatusMsg({ kind: 'err', text: `Couldn't check for updates — ${info?.message ?? 'unknown error'}` });
+    } else if (!info.available) {
+      setStatusMsg({ kind: 'ok', text: `Up to date — v${info.current} is the latest on ${ch}.` });
+    } else {
+      setStatusMsg(null);
+    }
+  };
+
+  const runUpdateCheck = async (ch: string, force: boolean) => {
+    // Auto-checks (section open, channel switch) reuse a recent result; the
+    // manual button always hits the network.
+    const c = _updCheckCache;
+    if (!force && c && c.channel === ch && Date.now() - c.t < _UPD_CACHE_MS) {
+      applyCheckResult(c.info, ch, c.t);
+      return;
+    }
     setChecking(true);
     setUpdateInfo(null);
     setStatusMsg(null);
     try {
-      const info = await checkForUpdate(channel);
-      setUpdateInfo(info);
-      if (!info?.success) {
-        setStatusMsg({ kind: 'err', text: `Couldn't check for updates — ${info?.message ?? 'unknown error'}` });
-      } else if (!info.available) {
-        setStatusMsg({ kind: 'ok', text: `Up to date — v${info.current} is the latest on ${channel}.` });
-      }
+      const info = await checkForUpdate(ch);
+      const now = Date.now();
+      if (info?.success) _updCheckCache = { t: now, channel: ch, info };
+      applyCheckResult(info, ch, now);
     } catch (error) {
+      setLastChecked(Date.now());
       setStatusMsg({ kind: 'err', text: `Couldn't check for updates — ${String(error)}` });
     } finally {
       setChecking(false);
     }
   };
+
+  const handleCheckUpdate = () => runUpdateCheck(channel, true);
 
   const handleInstallUpdate = async () => {
     if (!updateInfo?.url) return;
@@ -6069,13 +6100,14 @@ function SettingsPage() {
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <span style={{ fontSize: '13px', color: V2.fg2 }}>Channel</span>
-            <V2Button variant={channel === 'stable' ? 'primary' : 'tonal'}
+            <V2Button variant={channel === 'stable' ? 'primary' : 'tonal'} disabled={updating}
               onClick={() => handleChannelChange('stable')}>Stable</V2Button>
-            <V2Button variant={channel === 'beta' ? 'primary' : 'tonal'}
+            <V2Button variant={channel === 'beta' ? 'primary' : 'tonal'} disabled={updating}
               onClick={() => handleChannelChange('beta')}>Beta</V2Button>
           </div>
           <div style={{ fontSize: '12px', color: V2.fgMuted, lineHeight: 1.4 }}>
-            Installed: v{version || '…'} ({channel}) · Stable = latest release, Beta = newest pre-release.
+            Installed: v{version || '…'} ({channel})
+            {lastChecked != null && ` · checked ${Date.now() - lastChecked < 60000 ? 'just now' : `${Math.round((Date.now() - lastChecked) / 60000)}m ago`}`}
           </div>
           {/* One progressive action button: Check → Install → Installing N%.
               A single focus target is friendlier for controller navigation than
@@ -6093,6 +6125,14 @@ function SettingsPage() {
                     : 'Check for Updates'}
             </span>
           </V2Button>
+          {updating && (
+            <div style={{ height: '4px', borderRadius: '2px', background: 'rgba(255,255,255,0.10)', overflow: 'hidden' }}>
+              <div style={{
+                height: '100%', width: `${installPct ?? 0}%`, background: V2.brand,
+                borderRadius: '2px', transition: 'width 0.3s ease',
+              }} />
+            </div>
+          )}
           {statusMsg && (
             <div style={{ fontSize: '12px', lineHeight: 1.4, color: statusMsg.kind === 'err' ? V2.danger : '#4ade80' }}>
               {statusMsg.text}
