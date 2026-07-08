@@ -1578,6 +1578,51 @@ class Plugin:
             logging.error(f"get_account_username error: {e}")
             return {'username': ''}
 
+    async def get_avatar(self):
+        """Return the connected user's RomM avatar as a base64 data URI, or
+        {'data_uri': None} when the user has none / offline.
+
+        Fetched raw (NOT through get_image's thumbnailing pipeline): avatars are
+        small and may be transparent PNGs, and re-encoding them to JPEG would
+        strip alpha and add artifacts. RomM serves user avatars at
+        /api/raw/assets/<avatar_path>, cache-busted by updated_at — the same URL
+        its own web UI builds. Logs the HTTP status on miss so a wrong path /
+        404 is diagnosable instead of silently falling back to the initial."""
+        return await asyncio.to_thread(self._get_avatar_blocking)
+
+    def _get_avatar_blocking(self):
+        try:
+            import base64
+            client = self._romm_client
+            if client is None or not getattr(client, 'authenticated', False):
+                return {'data_uri': None}
+            user = client.get_current_user() or {}
+            ap = (user.get('avatar_path') or '').strip()
+            if not ap:
+                return {'data_uri': None}
+            ck = ('avatar', ap, user.get('updated_at') or '')
+            if ck in self._cover_cache:
+                return {'data_uri': self._cover_cache[ck]}
+            url = ap if ap.startswith('http') else urljoin(
+                client.base_url, f"/api/raw/assets/{ap.lstrip('/')}")
+            params = {}
+            ts = user.get('updated_at') or ''
+            if ts:
+                params['ts'] = ts
+            resp = client.session.get(url, params=params or None, timeout=15)
+            if resp.status_code != 200 or not resp.content:
+                logging.warning(f"get_avatar: {url} -> {resp.status_code} "
+                                f"({len(resp.content or b'')} bytes)")
+                return {'data_uri': None}
+            mime = resp.headers.get('content-type') or \
+                mimetypes.guess_type(ap)[0] or 'image/png'
+            uri = f"data:{mime};base64,{base64.b64encode(resp.content).decode('ascii')}"
+            self._cover_cache_put(ck, uri)
+            return {'data_uri': uri}
+        except Exception as e:
+            logging.error(f"get_avatar error: {e}", exc_info=True)
+            return {'data_uri': None}
+
     async def get_plugin_stats(self):
         """Plugin-local stats for the user-menu Stats page. Computed live from
         in-memory state (no API calls): library size, what's downloaded on this

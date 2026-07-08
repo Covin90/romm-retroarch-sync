@@ -35,6 +35,7 @@ const setCoreOverride = callable<[string, string], any>("set_core_override");
 const getConfig = callable<[], any>("get_config");
 const logout = callable<[boolean], any>("logout");
 const getAccountUsername = callable<[], any>("get_account_username");
+const getAvatar = callable<[], any>("get_avatar");
 const getPluginStats = callable<[], any>("get_plugin_stats");
 const saveConfig = callable<[string, string, string, string, string, string, string], any>("save_config");
 const testRommConnection = callable<[string, string, string], any>("test_connection");
@@ -1393,7 +1394,17 @@ function NavLaunchButton({ iconSrc, label, onActivate }:
 }
 
 type NavId = 'home' | 'platforms' | 'collections' | 'search';
-function V2NavBar({ active, onTab, activeRef }: { active: NavId; onTab: (id: NavId) => void; activeRef?: React.MutableRefObject<any> }) {
+
+// Everything the top-bar chrome needs (brand marks, account identity, RetroDECK
+// launch button state). Lifted into a hook so the owning page (LibraryGroupsPage)
+// can drive both the V2NavBar rendering AND the controller shortcuts / footer
+// hints from one fetch, instead of the nav bar owning state the page can't reach.
+export type NavChrome = {
+  iso: string | null; word: string | null;
+  username: string; role: string; avatar: string | null;
+  rdEnabled: boolean; rdIcon: string | null;
+};
+function useNavChrome(): NavChrome {
   const [iso, setIso] = useState<string | null>(null);
   const [word, setWord] = useState<string | null>(null);
   const [username, setUsername] = useState<string>('Guest');
@@ -1415,16 +1426,20 @@ function V2NavBar({ active, onTab, activeRef }: { active: NavId; onTab: (id: Nav
         const acc = await getAccountUsername();
         if (alive && acc?.username) setUsername(acc.username);
         if (alive && acc?.role) setRole(acc.role);
-        // Avatars are user-uploaded assets served at /api/raw/assets/<path>,
-        // cache-busted by updated_at — same URL RomM's userAvatarUrl builds.
-        if (acc?.avatar_path) {
-          const img = await getImage(`/api/raw/assets/${acc.avatar_path}?ts=${acc.updated_at || ''}`);
-          if (alive) setAvatar(img?.data_uri || null);
-        }
       } catch { }
+      // Avatar fetched raw by the backend (get_avatar) — keeps transparency and
+      // logs a wrong path/404 instead of silently showing the initial fallback.
+      try { const av = await getAvatar(); if (alive) setAvatar(av?.data_uri || null); } catch { }
     })();
     return () => { alive = false; };
   }, []);
+  return { iso, word, username, role, avatar, rdEnabled, rdIcon };
+}
+
+function V2NavBar({ active, onTab, activeRef, chrome, onLaunchRd }:
+  { active: NavId; onTab: (id: NavId) => void; activeRef?: React.MutableRefObject<any>;
+    chrome: NavChrome; onLaunchRd: () => void }) {
+  const { iso, word, username, role, avatar, rdEnabled, rdIcon } = chrome;
   const tabs: { id: NavId; label: string; Icon: any }[] = [
     { id: 'home', label: 'Home', Icon: FaHome },
     { id: 'platforms', label: 'Platforms', Icon: FaGamepad },
@@ -1464,18 +1479,7 @@ function V2NavBar({ active, onTab, activeRef }: { active: NavId; onTab: (id: Nav
       <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
         {iso && <img src={iso} style={{ width: '32px', height: '32px', display: 'block' }} />}
         {rdEnabled
-          ? <NavLaunchButton iconSrc={rdIcon} onActivate={async () => {
-            try {
-              const r = await launchRetrodeckViaSteam();
-              if (r.ok) {
-                // No "Launching…" toast — closing the side menus into the launch
-                // is the feedback. Surface failures only.
-                try { Navigation.CloseSideMenus(); } catch { /* ignore */ }
-              } else {
-                toaster.toast({ title: 'RetroDECK', body: r.reason || 'Launch failed' });
-              }
-            } catch (e) { toaster.toast({ title: 'RetroDECK', body: String(e) }); }
-          }} />
+          ? <NavLaunchButton iconSrc={rdIcon} onActivate={onLaunchRd} />
           : (word && <img src={word} style={{ height: '22px', width: 'auto', display: 'block' }} />)}
       </div>
       <div style={{ justifySelf: 'center', display: 'flex', alignItems: 'center', gap: '10px' }}>
@@ -1772,6 +1776,46 @@ function Bumper({ label }: { label: string }) {
       border: `1px solid ${V2.borderStrong}`, boxShadow: '0 1px 2px rgba(0,0,0,0.4)',
       lineHeight: 1, whiteSpace: 'nowrap',
     }}>{label}</span>
+  );
+}
+
+// Steam-style face-button glyph: a colored letter disc (A green / B red /
+// X blue / Y yellow) matching the Deck's on-screen button hints.
+function FaceGlyph({ letter }: { letter: 'A' | 'B' | 'X' | 'Y' }) {
+  const color = ({ A: '#5ba32b', B: '#c0392b', X: '#2a6fb0', Y: '#c9a227' } as const)[letter];
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+      width: '17px', height: '17px', borderRadius: '50%', flexShrink: 0,
+      background: color, color: '#fff', fontSize: '10.5px', fontWeight: 800,
+      lineHeight: 1, boxShadow: '0 1px 2px rgba(0,0,0,0.5)',
+    }}>{letter}</span>
+  );
+}
+
+// Bottom-right controller hint legend for the library — the on-screen "which
+// button does what" strip the Deck UI shows. Surfaces the shortcuts that aren't
+// otherwise discoverable with a controller: Y account menu, X RetroDECK launch
+// (only when enabled), and Select → plugin Settings.
+function NavHints({ rdEnabled }: { rdEnabled: boolean }) {
+  const item = (glyph: any, label: string) => (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}>
+      {glyph}<span style={{ fontSize: '12px', fontWeight: 600, color: V2.fg2 }}>{label}</span>
+    </span>
+  );
+  return (
+    <div style={{
+      position: 'fixed', right: '16px', bottom: '10px', zIndex: 60,
+      display: 'flex', alignItems: 'center', gap: '14px', pointerEvents: 'none',
+      padding: '7px 14px', borderRadius: V2.radiusPill,
+      background: 'rgba(7,7,15,0.82)', border: `1px solid ${V2.borderStrong}`,
+      backdropFilter: 'blur(16px)', WebkitBackdropFilter: 'blur(16px)',
+      boxShadow: '0 4px 16px rgba(0,0,0,0.45)',
+    }}>
+      {item(<FaceGlyph letter="Y" />, 'Account')}
+      {rdEnabled && item(<FaceGlyph letter="X" />, 'RetroDECK')}
+      {item(<Bumper label="Select" />, 'Settings')}
+    </div>
   );
 }
 
@@ -3416,16 +3460,38 @@ function LibraryGroupsPage() {
     setActive(next);
     requestAnimationFrame(() => { try { navPillRef.current?.focus(); } catch { } });
   };
+
+  // Top-bar chrome (account + RetroDECK) is fetched here — not inside V2NavBar —
+  // so the same data drives the visible pills AND the controller shortcuts below.
+  // The side clusters (RetroDECK button, user pill) sit in separate grid columns
+  // that Steam's directional focus can't reliably reach from the content grid, so
+  // we expose them as buttons too: Y opens the user menu, X launches RetroDECK.
+  const chrome = useNavChrome();
+  const launchRd = async () => {
+    try {
+      const r = await launchRetrodeckViaSteam();
+      if (r.ok) { try { Navigation.CloseSideMenus(); } catch { /* ignore */ } }
+      else toaster.toast({ title: 'RetroDECK', body: r.reason || 'Launch failed' });
+    } catch (e) { toaster.toast({ title: 'RetroDECK', body: String(e) }); }
+  };
+  const openUserMenu = () => showModal(
+    <UserMenuModal username={chrome.username} role={chrome.role} avatar={chrome.avatar} />,
+  );
+
   const onButtonDown = (evt: any) => {
     const b = evt?.detail?.button;
     if (b === GamepadButton.BUMPER_LEFT) cycle(-1);
     else if (b === GamepadButton.BUMPER_RIGHT) cycle(1);
     else if (b === GamepadButton.SELECT) Navigation.Navigate("/romm-sync-settings");
+    else if (b === GamepadButton.OPTIONS) openUserMenu();               // Y → account menu
+    else if (b === GamepadButton.SECONDARY && chrome.rdEnabled) launchRd(); // X → RetroDECK
   };
 
   return v2Page(
     <Focusable noFocusRing onButtonDown={onButtonDown}>
-      <V2NavBar active={active} onTab={onTab} activeRef={navPillRef} />
+      <V2NavBar active={active} onTab={onTab} activeRef={navPillRef} chrome={chrome} onLaunchRd={launchRd} />
+
+      <NavHints rdEnabled={chrome.rdEnabled} />
 
       <div style={{ height: '8px' }} />
 
