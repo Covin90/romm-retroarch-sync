@@ -7155,16 +7155,27 @@ export default definePlugin(() => {
     if (ts) {
       localStorage.removeItem(_LS_REOPEN_HOME);
       if (Date.now() - ts < 60000) {
-        setTimeout(() => {
-          // Close the QAM/side menus FIRST — after a reload Decky can leave its
-          // panel (or the plugin's context menu) open, which would sit on top of
-          // the freshly opened home page.
+        // Don't reopen Home on a fixed timer — the backend was just re-imported
+        // by the update and spends several seconds reconnecting + loading the
+        // library. Mounting the grid during that window fetches covers against a
+        // half-ready backend and they come back empty (and stick). Wait until the
+        // backend reports the library is ready, then navigate — mirroring what a
+        // manual reopen does. Poll up to ~30s, then go anyway as a fallback.
+        (async () => {
+          const deadline = Date.now() + 30000;
+          while (Date.now() < deadline) {
+            try {
+              const s = await getServiceStatus();
+              if (s?.status === 'connected' && s?.library_ready) break;
+            } catch { /* backend not routing yet */ }
+            await new Promise((r) => setTimeout(r, 1000));
+          }
           try { Navigation.CloseSideMenus(); } catch { /* ignore */ }
           try { Navigation.Navigate("/romm-sync-library"); }
           catch (e) { console.error('[RomM] reopen home after update', e); }
           // Belt and braces: some Decky builds restore the QAM a beat later.
           setTimeout(() => { try { Navigation.CloseSideMenus(); } catch { /* ignore */ } }, 600);
-        }, 1500);
+        })();
       }
     }
   } catch { /* ignore */ }

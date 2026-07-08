@@ -975,6 +975,11 @@ class Plugin:
                 'status':                  'connected',
                 'connection':              'online',
                 'unreachable_reason':      None,
+                # True once the initial full library fetch has completed — the
+                # frontend gates the post-update "reopen Home" on this so covers
+                # don't fetch against a still-initializing backend.
+                'library_ready':           self._last_full_fetch_time is not None,
+                'game_count':              game_count,
                 'snapshot_fetched_at':     self._snapshot_fetched_at,
                 'pending_saves':           self._count_pending_saves(),
                 'message':                 message,
