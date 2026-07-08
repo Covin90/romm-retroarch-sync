@@ -5783,6 +5783,10 @@ function SettingsPage() {
   const [updating, setUpdating] = useState<boolean>(false);
   const [updateInfo, setUpdateInfo] = useState<any>(null);
   const [checkOnStartup, setCheckOnStartupState] = useState<boolean>(true);
+  // Install progress % (from loader/plugin_download_info events) and the
+  // inline status line under the action button ('ok' green / 'err' red).
+  const [installPct, setInstallPct] = useState<number | null>(null);
+  const [statusMsg, setStatusMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
   useEffect(() => {
     // Load initial logging preference
@@ -5822,6 +5826,7 @@ function SettingsPage() {
   const handleChannelChange = async (next: string) => {
     setChannel(next);
     setUpdateInfo(null);
+    setStatusMsg(null);
     try {
       await setUpdateChannel(next);
     } catch (error) {
@@ -5832,16 +5837,17 @@ function SettingsPage() {
   const handleCheckUpdate = async () => {
     setChecking(true);
     setUpdateInfo(null);
+    setStatusMsg(null);
     try {
       const info = await checkForUpdate(channel);
       setUpdateInfo(info);
       if (!info?.success) {
-        toaster.toast({ title: 'Update check failed', body: info?.message ?? 'Unknown error' });
+        setStatusMsg({ kind: 'err', text: `Couldn't check for updates — ${info?.message ?? 'unknown error'}` });
       } else if (!info.available) {
-        toaster.toast({ title: 'Up to date', body: `v${info.current} is the latest on ${channel}.` });
+        setStatusMsg({ kind: 'ok', text: `Up to date — v${info.current} is the latest on ${channel}.` });
       }
     } catch (error) {
-      toaster.toast({ title: 'Update check failed', body: String(error) });
+      setStatusMsg({ kind: 'err', text: `Couldn't check for updates — ${String(error)}` });
     } finally {
       setChecking(false);
     }
@@ -5850,69 +5856,113 @@ function SettingsPage() {
   const handleInstallUpdate = async () => {
     if (!updateInfo?.url) return;
     setUpdating(true);
+    setStatusMsg(null);
+    setInstallPct(0);
     try {
-      // Preferred path: ask Decky Loader to install the release zip directly from
-      // its URL. The loader downloads, verifies, extracts and reloads the plugin
-      // itself — true one-click. `name` MUST match plugin.json ("RomM RetroArch
-      // Sync") or the loader installs a duplicate instead of replacing us.
-      //
-      // We must use the loader's own WSRouter (window.DeckyBackend), NOT
-      // @decky/api's `call` — the latter namespaces every route to *our* plugin
-      // (loader/call_plugin_method), so "utilities/install_plugin" would resolve
-      // to a nonexistent method on us. DeckyBackend.call dispatches the route
-      // verbatim, exactly like the loader's built-in installPlugin(). The global
-      // is undocumented, so we feature-detect and fall back to a manual install.
+      // One-click install through the loader's WSRouter (window.DeckyBackend) —
+      // @decky/api's `call` namespaces routes to our own plugin, so it can't
+      // reach loader utilities/*. utilities/install_plugin only REGISTERS an
+      // install request and emits loader/add_plugin_install_prompt, which
+      // Decky's frontend turns into its own confirmation modal. The user already
+      // confirmed in OUR UI, so we suppress Decky's listener for that one event,
+      // catch the request_id ourselves, and confirm programmatically — no Decky
+      // modal. Progress/completion arrive as loader/plugin_download_* events.
       try {
         const backend = (window as any).DeckyBackend;
-        if (!backend?.call) throw new Error('DeckyBackend unavailable');
-        await backend.call(
-          "utilities/install_plugin",
-          updateInfo.url,
-          "RomM RetroArch Sync",
-          updateInfo.latest,
-          "",
-        );
-        toaster.toast({
-          title: `Updated to v${updateInfo.latest}`,
-          body: 'Reloading the plugin to activate the new version…',
-          duration: 8000,
-        });
-        setUpdateInfo({ ...updateInfo, available: false });
-        // Leave a breadcrumb so the freshly-reloaded plugin reopens the home
-        // page (the reload drops the user out of our full-screen UI). Survives
-        // the reload because localStorage lives on the Chromium origin, not our
-        // torn-down JS context. Consumed once on startup below.
-        try { localStorage.setItem(_LS_REOPEN_HOME, String(Date.now())); } catch { /* ignore */ }
-        // install_plugin already stops + re-imports the backend, but the running
-        // frontend can stay on the old JS bundle until an explicit reload (this
-        // is why Decky's plugin list has a manual Reload button). Force a clean
-        // reload so the new version is live without the user touching anything.
-        // This tears down our own UI — nothing after it runs, so it's last.
+        if (!backend?.call || !backend?.eventListeners?.get) throw new Error('DeckyBackend unavailable');
+
+        const PROMPT = 'loader/add_plugin_install_prompt';
+        const promptSet: Set<any> | undefined = backend.eventListeners.get(PROMPT);
+        const saved = promptSet ? Array.from(promptSet) : [];
+        promptSet?.clear();
+
+        let restored = false;
+        const restore = () => {
+          if (restored) return;
+          restored = true;
+          try {
+            backend.removeEventListener(PROMPT, onPrompt);
+            for (const l of saved) backend.addEventListener(PROMPT, l);
+            backend.removeEventListener('loader/plugin_download_info', onInfo);
+            backend.removeEventListener('loader/plugin_download_finish', onFinish);
+          } catch { /* ignore */ }
+        };
+
+        const onPrompt = (name: string, _version: string, request_id: string) => {
+          if (name !== 'RomM RetroArch Sync') return;
+          // Put Decky's listeners back immediately — store installs must keep
+          // prompting normally; only OUR request skips the modal.
+          try {
+            backend.removeEventListener(PROMPT, onPrompt);
+            for (const l of saved) backend.addEventListener(PROMPT, l);
+          } catch { /* ignore */ }
+          backend.call('utilities/confirm_plugin_install', request_id).catch((e: any) => {
+            restore();
+            setUpdating(false);
+            setInstallPct(null);
+            setStatusMsg({ kind: 'err', text: `Install failed — ${String(e?.message ?? e)}` });
+          });
+        };
+        const onInfo = (percent: number) => {
+          if (typeof percent === 'number') setInstallPct(Math.max(0, Math.min(100, Math.round(percent))));
+        };
+        const onFinish = (name: string) => {
+          if (name !== 'RomM RetroArch Sync') return;
+          restore();
+          setInstallPct(100);
+          // Breadcrumb so the freshly-reloaded plugin reopens the home page
+          // (survives the reload — localStorage lives on the Chromium origin).
+          try { localStorage.setItem(_LS_REOPEN_HOME, String(Date.now())); } catch { /* ignore */ }
+          toaster.toast({ title: `Updated to v${updateInfo.latest}`, body: '', duration: 5000 });
+          // The backend was re-imported by the install, but the running frontend
+          // stays on the old JS bundle until an explicit reload. Nothing after
+          // this runs — it tears down our own UI.
+          setTimeout(() => {
+            try { backend.call('loader/reload_plugin', 'RomM RetroArch Sync'); } catch { /* ignore */ }
+          }, 800);
+        };
+
+        backend.addEventListener(PROMPT, onPrompt);
+        backend.addEventListener('loader/plugin_download_info', onInfo);
+        backend.addEventListener('loader/plugin_download_finish', onFinish);
+        // Safety net: if no prompt/finish ever arrives, restore Decky's
+        // listeners and surface an error instead of hanging in "Installing…".
         setTimeout(() => {
-          try { backend.call("loader/reload_plugin", "RomM RetroArch Sync"); } catch { /* ignore */ }
-        }, 1200);
-        return;
+          if (!restored) {
+            restore();
+            setUpdating(false);
+            setInstallPct(null);
+            setStatusMsg({ kind: 'err', text: 'Install timed out — try again or install from ZIP.' });
+          }
+        }, 90000);
+
+        await backend.call(
+          'utilities/install_plugin',
+          updateInfo.url,
+          'RomM RetroArch Sync',
+          updateInfo.latest,
+          '',
+        );
+        return; // stay in "Installing…" until onFinish reloads us
       } catch (loaderErr) {
         console.warn('Loader install route unavailable, falling back to manual:', loaderErr);
+        setInstallPct(null);
       }
 
       // Fallback: download the zip ourselves and guide the user through Decky's
       // "Install plugin from ZIP" developer flow.
       const dl = await downloadUpdate(updateInfo.url);
       if (!dl?.success) {
-        toaster.toast({ title: 'Download failed', body: dl?.message ?? 'Unknown error' });
+        setStatusMsg({ kind: 'err', text: `Download failed — ${dl?.message ?? 'unknown error'}` });
         return;
       }
-      toaster.toast({
-        title: `v${updateInfo.latest} downloaded`,
-        body: 'Open Decky ▸ gear ▸ Install plugin from ZIP, then pick the file below.',
-        duration: 12000,
-      });
+      setStatusMsg({ kind: 'ok', text: `v${updateInfo.latest} downloaded — install it via Decky ▸ gear ▸ Install plugin from ZIP.` });
       setUpdateInfo({ ...updateInfo, downloadedPath: dl.path });
-    } catch (error) {
-      toaster.toast({ title: 'Update failed', body: String(error) });
-    } finally {
       setUpdating(false);
+    } catch (error) {
+      setStatusMsg({ kind: 'err', text: `Update failed — ${String(error)}` });
+      setUpdating(false);
+      setInstallPct(null);
     }
   };
 
@@ -6025,34 +6075,50 @@ function SettingsPage() {
               onClick={() => handleChannelChange('beta')}>Beta</V2Button>
           </div>
           <div style={{ fontSize: '12px', color: V2.fgMuted, lineHeight: 1.4 }}>
-            Stable = latest release. Beta = newest pre-release (leading edge, less tested).
+            Installed: v{version || '…'} ({channel}) · Stable = latest release, Beta = newest pre-release.
           </div>
-          <V2Button variant="tonal" onClick={handleCheckUpdate} disabled={checking || updating}>
-            <FaSync size={13} />
-            <span>{checking ? 'Checking…' : 'Check for Updates'}</span>
+          {/* One progressive action button: Check → Install → Installing N%.
+              A single focus target is friendlier for controller navigation than
+              a second button appearing underneath. */}
+          <V2Button
+            variant={updateInfo?.available ? 'primary' : 'tonal'}
+            onClick={updateInfo?.available ? handleInstallUpdate : handleCheckUpdate}
+            disabled={checking || updating}
+          >
+            {updateInfo?.available ? <FaDownload size={13} /> : <FaSync size={13} />}
+            <span>
+              {updating ? `Installing… ${installPct != null ? `${installPct}%` : ''}`
+                : checking ? 'Checking…'
+                  : updateInfo?.available ? `Install v${updateInfo.latest}${updateInfo.prerelease ? ' (pre-release)' : ''}`
+                    : 'Check for Updates'}
+            </span>
           </V2Button>
+          {statusMsg && (
+            <div style={{ fontSize: '12px', lineHeight: 1.4, color: statusMsg.kind === 'err' ? V2.danger : '#4ade80' }}>
+              {statusMsg.text}
+            </div>
+          )}
+          {updateInfo?.available && !!updateInfo.notes && !updating && (
+            <div style={{
+              fontSize: '12px', color: V2.fg2, lineHeight: 1.5, whiteSpace: 'pre-wrap',
+              maxHeight: '108px', overflow: 'hidden', padding: '10px 12px',
+              borderRadius: V2.radiusMd, background: 'rgba(255,255,255,0.045)', border: `1px solid ${V2.border}`,
+            }}>
+              <div style={{ fontWeight: 600, color: V2.fg, marginBottom: '4px' }}>What's new in v{updateInfo.latest}</div>
+              {String(updateInfo.notes).slice(0, 500)}
+            </div>
+          )}
+          {updateInfo?.downloadedPath && (
+            <div style={{ fontSize: '11px', color: V2.fgMuted, wordBreak: 'break-all' }}>
+              Downloaded to: {updateInfo.downloadedPath}
+            </div>
+          )}
           <RomSwitch
             checked={checkOnStartup}
             onChange={handleCheckOnStartupToggle}
             label="Check on startup"
             description="Show a notification when an update is available for the selected channel."
           />
-          {updateInfo?.available && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              <div style={{ fontSize: '13px', color: V2.brand, fontWeight: 600 }}>
-                Update available: v{updateInfo.latest}{updateInfo.prerelease ? ' (pre-release)' : ''}
-              </div>
-              <V2Button variant="primary" onClick={handleInstallUpdate} disabled={updating}>
-                <FaDownload size={13} />
-                <span>{updating ? 'Installing…' : `Install v${updateInfo.latest}`}</span>
-              </V2Button>
-              {updateInfo.downloadedPath && (
-                <div style={{ fontSize: '11px', color: V2.fgMuted, wordBreak: 'break-all' }}>
-                  Downloaded to: {updateInfo.downloadedPath}
-                </div>
-              )}
-            </div>
-          )}
         </div>
       </V2SettingsSection>
 
@@ -6911,8 +6977,14 @@ export default definePlugin(() => {
       localStorage.removeItem(_LS_REOPEN_HOME);
       if (Date.now() - ts < 60000) {
         setTimeout(() => {
-          try { Navigation.Navigate("/romm-sync-library"); Navigation.CloseSideMenus(); }
+          // Close the QAM/side menus FIRST — after a reload Decky can leave its
+          // panel (or the plugin's context menu) open, which would sit on top of
+          // the freshly opened home page.
+          try { Navigation.CloseSideMenus(); } catch { /* ignore */ }
+          try { Navigation.Navigate("/romm-sync-library"); }
           catch (e) { console.error('[RomM] reopen home after update', e); }
+          // Belt and braces: some Decky builds restore the QAM a beat later.
+          setTimeout(() => { try { Navigation.CloseSideMenus(); } catch { /* ignore */ } }, 600);
         }, 1500);
       }
     }
@@ -6929,6 +7001,7 @@ export default definePlugin(() => {
       if (info?.success && info.available) {
         toaster.toast({
           title: `Update available: v${info.latest}`,
+          body: '',
           duration: 6000,
         });
       }
