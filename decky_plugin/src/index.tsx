@@ -1779,48 +1779,6 @@ function Bumper({ label }: { label: string }) {
   );
 }
 
-// Steam-style face-button glyph: a colored letter disc (A green / B red /
-// X blue / Y yellow) matching the Deck's on-screen button hints.
-function FaceGlyph({ letter }: { letter: 'A' | 'B' | 'X' | 'Y' }) {
-  const color = ({ A: '#5ba32b', B: '#c0392b', X: '#2a6fb0', Y: '#c9a227' } as const)[letter];
-  return (
-    <span style={{
-      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-      width: '17px', height: '17px', borderRadius: '50%', flexShrink: 0,
-      background: color, color: '#fff', fontSize: '10.5px', fontWeight: 800,
-      lineHeight: 1, boxShadow: '0 1px 2px rgba(0,0,0,0.5)',
-    }}>{letter}</span>
-  );
-}
-
-// Bottom-right controller hint legend for the library — the on-screen "which
-// button does what" strip the Deck UI shows. Surfaces the shortcuts that aren't
-// otherwise discoverable with a controller: Y account menu, X RetroDECK launch
-// (only when enabled), and Select → plugin Settings.
-function NavHints({ rdEnabled }: { rdEnabled: boolean }) {
-  const item = (glyph: any, label: string) => (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}>
-      {glyph}<span style={{ fontSize: '12px', fontWeight: 600, color: V2.fg2 }}>{label}</span>
-    </span>
-  );
-  return (
-    <div style={{
-      // Sits above Steam's own bottom button-hint bar (bottom:0), not on top of
-      // it, so it can't be hidden behind the native footer.
-      position: 'fixed', right: '16px', bottom: '52px', zIndex: 7200,
-      display: 'flex', alignItems: 'center', gap: '14px', pointerEvents: 'none',
-      padding: '7px 14px', borderRadius: V2.radiusPill,
-      background: 'rgba(7,7,15,0.82)', border: `1px solid ${V2.borderStrong}`,
-      backdropFilter: 'blur(16px)', WebkitBackdropFilter: 'blur(16px)',
-      boxShadow: '0 4px 16px rgba(0,0,0,0.45)',
-    }}>
-      {item(<FaceGlyph letter="Y" />, 'Account')}
-      {rdEnabled && item(<FaceGlyph letter="X" />, 'RetroDECK')}
-      {item(<Bumper label="Select" />, 'Settings')}
-    </div>
-  );
-}
-
 // RomM RTabNav "underlined" variant — tabs over a bottom border with a 2px
 // brand underline that slides between the active tab (GameDetails tab strip).
 function V2TabNav({ tabs, active, onTab }:
@@ -3489,11 +3447,20 @@ function LibraryGroupsPage() {
     else if (b === GamepadButton.SECONDARY && chrome.rdEnabled) launchRd(); // X → RetroDECK
   };
 
-  return v2Page(
-    <Focusable noFocusRing onButtonDown={onButtonDown}>
-      <V2NavBar active={active} onTab={onTab} activeRef={navPillRef} chrome={chrome} onLaunchRd={launchRd} />
+  // Surface the page-level shortcuts in Steam's NATIVE bottom hint bar (not a
+  // custom overlay): actionDescriptionMap labels arbitrary buttons — including
+  // Select, which has no dedicated on*ActionDescription prop. Set on the root
+  // Focusable so the labels show for the whole library regardless of which tile
+  // is focused (a focused tile only overrides the specific buttons it defines).
+  const actionMap: { [k: number]: string } = {
+    [GamepadButton.SELECT]: 'Settings',
+    [GamepadButton.OPTIONS]: 'Account',
+  };
+  if (chrome.rdEnabled) actionMap[GamepadButton.SECONDARY] = 'RetroDECK';
 
-      <NavHints rdEnabled={chrome.rdEnabled} />
+  return v2Page(
+    <Focusable noFocusRing onButtonDown={onButtonDown} actionDescriptionMap={actionMap}>
+      <V2NavBar active={active} onTab={onTab} activeRef={navPillRef} chrome={chrome} onLaunchRd={launchRd} />
 
       <div style={{ height: '8px' }} />
 
