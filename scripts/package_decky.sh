@@ -41,9 +41,11 @@ mkdir -p "$STAGE/dist" "$STAGE/assets" "$STAGE/bin"
 cp "$PLUGIN_DIR/plugin.json" "$PLUGIN_DIR/package.json" "$PLUGIN_DIR/LICENSE" "$PLUGIN_DIR/main.py" "$STAGE/"
 cp "$PLUGIN_DIR/dist/index.js" "$PLUGIN_DIR/dist/index.js.map" "$STAGE/dist/"
 cp -rL "$PLUGIN_DIR/py_modules" "$STAGE/"
-cp "$PLUGIN_DIR"/assets/logo.png "$PLUGIN_DIR"/assets/romm-isotipo.svg \
-   "$PLUGIN_DIR"/assets/romm-logotipo.svg "$PLUGIN_DIR"/assets/auth_background.svg \
-   "$PLUGIN_DIR"/assets/retrodeck.svg "$PLUGIN_DIR"/assets/romm-*.png "$STAGE/assets/"
+# Copy the ENTIRE assets/ dir (not an explicit allow-list) so a newly added
+# asset can't be silently left out. assets/ holds only shipped files; dev-only
+# generators live in scripts/, not here. Step 3 then asserts every source asset
+# is present in the package.
+cp "$PLUGIN_DIR"/assets/* "$STAGE/assets/"
 cp "$PLUGIN_DIR/bin/7zz"               "$STAGE/bin/" && chmod +x "$STAGE/bin/7zz"
 cp "$PLUGIN_DIR/bin/romm-session-host" "$STAGE/bin/" && chmod +x "$STAGE/bin/romm-session-host"
 
@@ -54,8 +56,6 @@ REQUIRED=(
   plugin.json package.json LICENSE main.py
   dist/index.js dist/index.js.map
   bin/7zz bin/romm-session-host
-  assets/logo.png assets/romm-grid.png assets/romm-hero.png
-  assets/romm-logo.png assets/romm-header.png assets/romm-icon.png
   py_modules/sync_core.py py_modules/bios_manager.py
   py_modules/requests/ py_modules/watchdog/ py_modules/PIL/ py_modules/pillow.libs/
   py_modules/urllib3/ py_modules/certifi/ py_modules/charset_normalizer/ py_modules/idna/
@@ -70,6 +70,14 @@ for item in "${REQUIRED[@]}"; do
     # file: must exist and be non-empty
     if [ ! -s "$path" ]; then missing+=("$item"); fi
   fi
+done
+# Every file in the source assets/ dir must be present + non-empty in the
+# package. Dynamic (not a hardcoded list) so a newly added asset is required
+# automatically — this is what catches an asset silently dropped from the copy.
+for src in "$PLUGIN_DIR"/assets/*; do
+  [ -f "$src" ] || continue
+  name="$(basename "$src")"
+  [ -s "$STAGE/assets/$name" ] || missing+=("assets/$name")
 done
 # bin/romm-session-host and bin/7zz must be executable in the staging tree.
 for x in bin/7zz bin/romm-session-host; do
@@ -101,6 +109,12 @@ for item in "${REQUIRED[@]}"; do
   else
     unzip -l "$ROOT/$OUT_ZIP" "$member" >/dev/null 2>&1 || zip_missing+=("$item")
   fi
+done
+# Every source asset must also be inside the zip.
+for src in "$PLUGIN_DIR"/assets/*; do
+  [ -f "$src" ] || continue
+  member="$PLUGIN_NAME/assets/$(basename "$src")"
+  unzip -l "$ROOT/$OUT_ZIP" "$member" >/dev/null 2>&1 || zip_missing+=("assets/$(basename "$src")")
 done
 if [ "${#zip_missing[@]}" -ne 0 ]; then
   echo "[package] ✗ POST-ZIP CHECK FAILED — not inside $OUT_ZIP:" >&2
