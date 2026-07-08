@@ -14,7 +14,7 @@ import {
   Menu,
   MenuItem,
 } from "@decky/ui";
-import { call, callable, definePlugin, toaster, routerHook, openFilePicker, FileSelectionType } from "@decky/api";
+import { callable, definePlugin, toaster, routerHook, openFilePicker, FileSelectionType } from "@decky/api";
 import { useState, useEffect, useLayoutEffect, useRef, useMemo, forwardRef, memo, type Ref, type ChangeEvent } from "react";
 import { FaSync, FaTrash, FaCog, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaTimesCircle, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight, FaCheckCircle, FaUsers, FaExternalLinkAlt, FaPuzzlePiece, FaBoxOpen, FaClone, FaRedo, FaClock, FaCheck, FaEllipsisH, FaGlobe, FaChevronDown, FaChartBar, FaSignOutAlt } from "react-icons/fa";
 import { BsGearFill } from "react-icons/bs";
@@ -5853,10 +5853,17 @@ function SettingsPage() {
       // its URL. The loader downloads, verifies, extracts and reloads the plugin
       // itself — true one-click. `name` MUST match plugin.json ("RomM RetroArch
       // Sync") or the loader installs a duplicate instead of replacing us.
-      // This route lives behind the loader's sandboxed API and may be rejected on
-      // some Decky versions, so we fall back to a guided manual install.
+      //
+      // We must use the loader's own WSRouter (window.DeckyBackend), NOT
+      // @decky/api's `call` — the latter namespaces every route to *our* plugin
+      // (loader/call_plugin_method), so "utilities/install_plugin" would resolve
+      // to a nonexistent method on us. DeckyBackend.call dispatches the route
+      // verbatim, exactly like the loader's built-in installPlugin(). The global
+      // is undocumented, so we feature-detect and fall back to a manual install.
       try {
-        await call<[string, string, string, string], void>(
+        const backend = (window as any).DeckyBackend;
+        if (!backend?.call) throw new Error('DeckyBackend unavailable');
+        await backend.call(
           "utilities/install_plugin",
           updateInfo.url,
           "RomM RetroArch Sync",
