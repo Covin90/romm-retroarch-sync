@@ -1805,7 +1805,9 @@ function NavHints({ rdEnabled }: { rdEnabled: boolean }) {
   );
   return (
     <div style={{
-      position: 'fixed', right: '16px', bottom: '10px', zIndex: 60,
+      // Sits above Steam's own bottom button-hint bar (bottom:0), not on top of
+      // it, so it can't be hidden behind the native footer.
+      position: 'fixed', right: '16px', bottom: '52px', zIndex: 7200,
       display: 'flex', alignItems: 'center', gap: '14px', pointerEvents: 'none',
       padding: '7px 14px', borderRadius: V2.radiusPill,
       background: 'rgba(7,7,15,0.82)', border: `1px solid ${V2.borderStrong}`,

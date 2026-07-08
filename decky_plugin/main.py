@@ -1584,10 +1584,13 @@ class Plugin:
 
         Fetched raw (NOT through get_image's thumbnailing pipeline): avatars are
         small and may be transparent PNGs, and re-encoding them to JPEG would
-        strip alpha and add artifacts. RomM serves user avatars at
-        /api/raw/assets/<avatar_path>, cache-busted by updated_at — the same URL
-        its own web UI builds. Logs the HTTP status on miss so a wrong path /
-        404 is diagnosable instead of silently falling back to the initial."""
+        strip alpha and add artifacts.
+
+        RomM 5.0's v2 UI serves user avatars at /api/users/<id>/avatar (see
+        frontend/src/v2/utils/userAvatar.ts), cache-busted by updated_at — NOT
+        the legacy /api/raw/assets/<avatar_path> static mount, which returns a
+        blank/404 on 5.x and was why the avatar silently fell back to the
+        initial. Logs the HTTP status on miss so a wrong path is diagnosable."""
         return await asyncio.to_thread(self._get_avatar_blocking)
 
     def _get_avatar_blocking(self):
@@ -1597,19 +1600,19 @@ class Plugin:
             if client is None or not getattr(client, 'authenticated', False):
                 return {'data_uri': None}
             user = client.get_current_user() or {}
+            uid = user.get('id')
             ap = (user.get('avatar_path') or '').strip()
-            if not ap:
+            # RomM returns the default avatar when avatar_path is empty; skip the
+            # round-trip and let the frontend draw its own initial fallback.
+            if not uid or not ap:
                 return {'data_uri': None}
-            ck = ('avatar', ap, user.get('updated_at') or '')
+            ts = user.get('updated_at') or ''
+            ck = ('avatar', uid, ap, ts)
             if ck in self._cover_cache:
                 return {'data_uri': self._cover_cache[ck]}
-            url = ap if ap.startswith('http') else urljoin(
-                client.base_url, f"/api/raw/assets/{ap.lstrip('/')}")
-            params = {}
-            ts = user.get('updated_at') or ''
-            if ts:
-                params['ts'] = ts
-            resp = client.session.get(url, params=params or None, timeout=15)
+            url = urljoin(client.base_url, f"/api/users/{uid}/avatar")
+            params = {'ts': ts} if ts else None
+            resp = client.session.get(url, params=params, timeout=15)
             if resp.status_code != 200 or not resp.content:
                 logging.warning(f"get_avatar: {url} -> {resp.status_code} "
                                 f"({len(resp.content or b'')} bytes)")
