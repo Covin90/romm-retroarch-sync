@@ -6068,16 +6068,13 @@ function SettingsPage() {
           if (name !== 'RomM RetroArch Sync') return;
           restore();
           setInstallPct(100);
-          // Breadcrumb so the freshly-reloaded plugin reopens the home page
-          // (survives the reload — localStorage lives on the Chromium origin).
-          try { localStorage.setItem(_LS_REOPEN_HOME, String(Date.now())); } catch { /* ignore */ }
           toaster.toast({ title: `Updated to v${updateInfo.latest}`, body: '', duration: 5000 });
-          // The backend was re-imported by the install, but the running frontend
-          // stays on the old JS bundle until an explicit reload. Nothing after
-          // this runs — it tears down our own UI.
-          setTimeout(() => {
-            try { backend.call('loader/reload_plugin', 'RomM RetroArch Sync'); } catch { /* ignore */ }
-          }, 800);
+          // Do NOT call loader/reload_plugin here: utilities/install_plugin
+          // ALREADY reloads us (its _install does stop() + import_plugin(), and
+          // import_plugin re-imports the frontend via the loader/import_plugin
+          // event). An extra reload stacked a 3× reload storm that left the UI
+          // orphaned at 100%. The loader's own single reload picks up the reopen
+          // breadcrumb set before the install call below.
         };
 
         backend.addEventListener(PROMPT, onPrompt);
@@ -6094,6 +6091,12 @@ function SettingsPage() {
           }
         }, 90000);
 
+        // Set the reopen-home breadcrumb NOW, before install — the loader may
+        // tear the frontend down mid-install (import_plugin), so setting it in
+        // onFinish could be too late. Survives the reload (Chromium-origin
+        // localStorage); consumed once on the next startup.
+        try { localStorage.setItem(_LS_REOPEN_HOME, String(Date.now())); } catch { /* ignore */ }
+
         await backend.call(
           'utilities/install_plugin',
           updateInfo.url,
@@ -6101,9 +6104,12 @@ function SettingsPage() {
           updateInfo.latest,
           '',
         );
-        return; // stay in "Installing…" until onFinish reloads us
+        return; // stay in "Installing…" — the loader's install reloads us
       } catch (loaderErr) {
         console.warn('Loader install route unavailable, falling back to manual:', loaderErr);
+        // Clear the breadcrumb — no reload will happen on this path, so it must
+        // not hijack a later normal launch into reopening Home.
+        try { localStorage.removeItem(_LS_REOPEN_HOME); } catch { /* ignore */ }
         setInstallPct(null);
       }
 
