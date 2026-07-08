@@ -1465,7 +1465,11 @@ function V2NavBar({ active, onTab, activeRef, chrome, onLaunchRd }:
   }, [activeIdx]);
 
   return (
-    <div style={{
+    // Horizontal-flow Focusable so the three clusters (RetroDECK launch · nav
+    // tabs · user pill) navigate with LEFT/RIGHT. Without this the row is a plain
+    // div inside the page's vertical-flow Focusable, so Steam stacked the three
+    // as a vertical list and you had to press UP/DOWN to reach the side clusters.
+    <Focusable noFocusRing flow-children="horizontal" style={{
       position: 'sticky', top: 0, zIndex: 50, height: '58px',
       display: 'grid', gridTemplateColumns: '1fr auto 1fr', alignItems: 'center',
       padding: '0 20px', background: 'rgba(7,7,15,0.78)',
@@ -1526,7 +1530,7 @@ function V2NavBar({ active, onTab, activeRef, chrome, onLaunchRd }:
       <div style={{ justifySelf: 'end' }}>
         <UserPill username={username} role={role} avatar={avatar} />
       </div>
-    </div>
+    </Focusable>
   );
 }
 
@@ -3448,18 +3452,18 @@ function LibraryGroupsPage() {
   };
 
   // Surface the page-level shortcuts in Steam's NATIVE bottom hint bar (not a
-  // custom overlay): actionDescriptionMap labels arbitrary buttons — including
-  // Select, which has no dedicated on*ActionDescription prop. Set on the root
-  // Focusable so the labels show for the whole library regardless of which tile
-  // is focused (a focused tile only overrides the specific buttons it defines).
-  const actionMap: { [k: number]: string } = {
-    [GamepadButton.SELECT]: 'Settings',
-    [GamepadButton.OPTIONS]: 'Account',
-  };
-  if (chrome.rdEnabled) actionMap[GamepadButton.SECONDARY] = 'RetroDECK';
-
+  // custom overlay). Settings goes through actionDescriptionMap because Select
+  // (the View button) has no dedicated on*ActionDescription prop — and Steam
+  // slots that map entry into the far-left navigation cluster of the footer,
+  // ahead of the A/B/X/Y group. Account (Y) and RetroDECK (X) use their standard
+  // named props. Set on the root Focusable so the labels show for the whole
+  // library regardless of which tile is focused (a focused tile only overrides
+  // the specific buttons it defines).
   return v2Page(
-    <Focusable noFocusRing onButtonDown={onButtonDown} actionDescriptionMap={actionMap}>
+    <Focusable noFocusRing onButtonDown={onButtonDown}
+      actionDescriptionMap={{ [GamepadButton.SELECT]: 'Settings' }}
+      onOptionsActionDescription="Account"
+      onSecondaryActionDescription={chrome.rdEnabled ? 'RetroDECK' : undefined}>
       <V2NavBar active={active} onTab={onTab} activeRef={navPillRef} chrome={chrome} onLaunchRd={launchRd} />
 
       <div style={{ height: '8px' }} />
