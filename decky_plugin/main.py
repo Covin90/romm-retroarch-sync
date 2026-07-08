@@ -208,10 +208,28 @@ def _read_plugin_version():
 PLUGIN_VERSION = _read_plugin_version()
 
 
-def _parse_version(v):
-    """Loose semver tuple for comparison, e.g. 'v1.6.0' -> (1, 6, 0)."""
-    nums = [int(n) for n in re.findall(r'\d+', v or '')][:3]
-    return tuple(nums) + (0,) * (3 - len(nums))
+def _version_key(v):
+    """Comparable semver key with pre-release ordering.
+
+    Follows semver precedence: 1.7.0 > 1.7.0-beta.2 > 1.7.0-beta.1 > 1.6.1.
+    A final release outranks any pre-release of the same core version, and
+    pre-release identifiers compare numerically/lexically per the spec. Handles
+    a leading 'v' and drops build metadata after '+'.
+    """
+    v = (v or '').lstrip('vV').strip().split('+', 1)[0]
+    core, _, pre = v.partition('-')
+    nums = [int(n) for n in re.findall(r'\d+', core)][:3]
+    core_t = tuple(nums) + (0,) * (3 - len(nums))
+    if not pre:
+        # No pre-release → sorts ABOVE any pre-release of the same core.
+        return (core_t, (1,))
+    ids = []
+    for x in re.split(r'[.]', pre):
+        if x.isdigit():
+            ids.append((0, int(x), ''))   # numeric identifiers rank below alnum
+        else:
+            ids.append((1, 0, x))
+    return (core_t, (0, tuple(ids)))
 
 
 # ---------------------------------------------------------------------------
@@ -1731,6 +1749,16 @@ class Plugin:
         logging.info(f"[UPDATE] channel set to {channel}")
         return channel
 
+    async def get_check_on_startup(self):
+        return bool(load_decky_settings().get('check_on_startup', True))
+
+    async def set_check_on_startup(self, enabled: bool):
+        settings = load_decky_settings()
+        settings['check_on_startup'] = bool(enabled)
+        save_decky_settings(settings)
+        logging.info(f"[UPDATE] check_on_startup set to {bool(enabled)}")
+        return bool(enabled)
+
     def _select_release(self, channel: str):
         """Return the GitHub release dict for the given channel, or None.
 
@@ -1770,11 +1798,16 @@ class Plugin:
             asset = next((a for a in rel.get('assets', [])
                           if a.get('name', '').endswith(UPDATE_ASSET_SUFFIX)), None)
             latest = (rel.get('tag_name') or rel.get('name') or '').lstrip('v')
-            newer = _parse_version(latest) > _parse_version(PLUGIN_VERSION)
+            newer = _version_key(latest) > _version_key(PLUGIN_VERSION)
+            available = bool(newer and asset)
+            logging.info(
+                f"[UPDATE] check channel={channel} current={PLUGIN_VERSION} "
+                f"latest={latest} prerelease={bool(rel.get('prerelease'))} "
+                f"asset={'yes' if asset else 'MISSING'} available={available}")
 
             return {
                 'success': True,
-                'available': bool(newer and asset),
+                'available': available,
                 'current': PLUGIN_VERSION,
                 'latest': latest,
                 'channel': channel,

@@ -2319,6 +2319,8 @@ const getUpdateChannel = callable<[], string>("get_update_channel");
 const setUpdateChannel = callable<[string], string>("set_update_channel");
 const checkForUpdate = callable<[string], any>("check_for_update");
 const downloadUpdate = callable<[string], any>("download_update");
+const getCheckOnStartup = callable<[], boolean>("get_check_on_startup");
+const setCheckOnStartup = callable<[boolean], boolean>("set_check_on_startup");
 
 const formatSpeed = (bytesPerSec: number): string => {
   if (bytesPerSec >= 1024 * 1024) return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`;
@@ -5778,6 +5780,7 @@ function SettingsPage() {
   const [checking, setChecking] = useState<boolean>(false);
   const [updating, setUpdating] = useState<boolean>(false);
   const [updateInfo, setUpdateInfo] = useState<any>(null);
+  const [checkOnStartup, setCheckOnStartupState] = useState<boolean>(true);
 
   useEffect(() => {
     // Load initial logging preference
@@ -5797,11 +5800,22 @@ function SettingsPage() {
       try {
         setVersion(await getPluginVersion());
         setChannel(await getUpdateChannel());
+        setCheckOnStartupState(await getCheckOnStartup());
       } catch (error) {
         console.error('Failed to load version/channel:', error);
       }
     })();
   }, []);
+
+  const handleCheckOnStartupToggle = async (enabled: boolean) => {
+    setCheckOnStartupState(enabled);
+    try {
+      await setCheckOnStartup(enabled);
+    } catch (error) {
+      console.error('Failed to set check-on-startup:', error);
+      setCheckOnStartupState(!enabled);
+    }
+  };
 
   const handleChannelChange = async (next: string) => {
     setChannel(next);
@@ -5995,6 +6009,12 @@ function SettingsPage() {
             <FaSync size={13} />
             <span>{checking ? 'Checking…' : 'Check for Updates'}</span>
           </V2Button>
+          <RomSwitch
+            checked={checkOnStartup}
+            onChange={handleCheckOnStartupToggle}
+            label="Check on startup"
+            description="Show a notification when an update is available for the selected channel."
+          />
           {updateInfo?.available && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
               <div style={{ fontSize: '13px', color: V2.brand, fontWeight: 600 }}>
@@ -6846,6 +6866,24 @@ export default definePlugin(() => {
     window.addEventListener('offline', onNetOffline);
     window.addEventListener('online', onNetOnline);
   } catch (e) { console.error('[RomM] net listeners', e); }
+
+  // Passive update check on load: if enabled, look for a newer release on the
+  // selected channel and toast the user (no auto-install — they install from
+  // Settings ▸ Updates). The backend logs the outcome to decky_debug.log.
+  (async () => {
+    try {
+      if (!(await getCheckOnStartup())) return;
+      const ch = await getUpdateChannel();
+      const info = await checkForUpdate(ch);
+      if (info?.success && info.available) {
+        toaster.toast({
+          title: `RomM Sync update available: v${info.latest}`,
+          body: `Open Settings ▸ Updates to install (${ch} channel).`,
+          duration: 12000,
+        });
+      }
+    } catch (e) { console.error('[RomM] startup update check', e); }
+  })();
 
   // Re-bind the launch intercept if the RomM tile was added in a prior session,
   // and auto-open the setup wizard once when no connection is configured.
