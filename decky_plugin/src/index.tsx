@@ -5545,11 +5545,11 @@ function StatsPage() {
 
   return v2Page(
     <Focusable noFocusRing
-      onButtonDown={(e: any) => { if (e?.detail?.button === GamepadButton.CANCEL) Navigation.NavigateBack(); }}
+      onCancelButton={() => Navigation.Navigate("/romm-sync-library")}
       style={{ maxWidth: '760px', margin: '0 auto', padding: '20px 20px 0' }}>
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '24px' }}>
-        <GameActionButton icon={<FaChevronLeft size={16} />} onClick={() => Navigation.NavigateBack()} />
+        <GameActionButton icon={<FaChevronLeft size={16} />} onClick={() => Navigation.Navigate("/romm-sync-library")} />
         <div style={{ fontSize: '24px', fontWeight: 800, letterSpacing: '-0.01em' }}>Stats</div>
       </div>
 
@@ -5746,11 +5746,11 @@ function CoresPage() {
 
   return v2Page(
     <Focusable noFocusRing
-      onButtonDown={(e: any) => { if (e?.detail?.button === GamepadButton.CANCEL) Navigation.NavigateBack(); }}
+      onCancelButton={() => Navigation.Navigate("/romm-sync-library")}
       style={{ maxWidth: '760px', margin: '0 auto', padding: '20px 20px 0' }}>
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '24px' }}>
-        <GameActionButton icon={<FaChevronLeft size={16} />} onClick={() => Navigation.NavigateBack()} />
+        <GameActionButton icon={<FaChevronLeft size={16} />} onClick={() => Navigation.Navigate("/romm-sync-library")} />
         <div style={{ fontSize: '24px', fontWeight: 800, letterSpacing: '-0.01em' }}>Emulator Cores</div>
       </div>
 
@@ -6167,11 +6167,11 @@ function SettingsPage() {
 
   return v2Page(
     <Focusable noFocusRing
-      onButtonDown={(e: any) => { if (e?.detail?.button === GamepadButton.CANCEL) Navigation.NavigateBack(); }}
+      onCancelButton={() => Navigation.Navigate("/romm-sync-library")}
       style={{ maxWidth: '760px', margin: '0 auto', padding: '20px 20px 0' }}>
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '24px' }}>
-        <GameActionButton icon={<FaChevronLeft size={16} />} onClick={() => Navigation.NavigateBack()} />
+        <GameActionButton icon={<FaChevronLeft size={16} />} onClick={() => Navigation.Navigate("/romm-sync-library")} />
         <div style={{ fontSize: '24px', fontWeight: 800, letterSpacing: '-0.01em' }}>Settings</div>
       </div>
 
