@@ -1770,10 +1770,15 @@ class Plugin:
         headers = {'Accept': 'application/vnd.github+json'}
         if channel == 'beta':
             resp = requests.get(f"{GITHUB_API}/releases",
-                                headers=headers, params={'per_page': 20}, timeout=15)
+                                headers=headers, params={'per_page': 50}, timeout=15)
             resp.raise_for_status()
             releases = [r for r in resp.json() if not r.get('draft')]
-            return releases[0] if releases else None
+            # GitHub's /releases order is NOT newest-first by version — tags sort
+            # roughly lexicographically, so v1.7.0-beta.10 lists BELOW beta.9
+            # ("1" < "9"). Never trust releases[0]; pick the semver max ourselves.
+            if not releases:
+                return None
+            return max(releases, key=lambda r: _version_key(r.get('tag_name') or r.get('name') or ''))
         resp = requests.get(f"{GITHUB_API}/releases/latest", headers=headers, timeout=15)
         resp.raise_for_status()
         return resp.json()
