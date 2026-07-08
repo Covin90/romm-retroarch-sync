@@ -6915,9 +6915,8 @@ export default definePlugin(() => {
       const info = await checkForUpdate(ch);
       if (info?.success && info.available) {
         toaster.toast({
-          title: `RomM Sync update available: v${info.latest}`,
-          body: `Open Settings ▸ Updates to install (${ch} channel).`,
-          duration: 12000,
+          title: `Update available: v${info.latest}`,
+          duration: 6000,
         });
       }
     } catch (e) { console.error('[RomM] startup update check', e); }
