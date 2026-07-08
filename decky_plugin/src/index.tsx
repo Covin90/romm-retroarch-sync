@@ -5746,6 +5746,83 @@ function CoresPage() {
   );
 }
 
+// ChannelSegment — joined Stable|Beta pill with a sliding brand highlight.
+// Reads as a setting (one control, two states) rather than two separate actions.
+function ChannelSegment({ value, onChange, disabled }:
+  { value: string; onChange: (v: string) => void; disabled?: boolean }) {
+  const opts = ['stable', 'beta'];
+  const idx = Math.max(0, opts.indexOf(value));
+  const [focusedIdx, setFocusedIdx] = useState<number | null>(null);
+  return (
+    <div style={{
+      position: 'relative', display: 'flex', flexShrink: 0, padding: '3px',
+      borderRadius: '999px', background: 'rgba(0,0,0,0.35)', border: `1px solid ${V2.border}`,
+      opacity: disabled ? 0.55 : 1,
+    }}>
+      {/* sliding highlight */}
+      <div style={{
+        position: 'absolute', top: '3px', bottom: '3px',
+        left: `calc(${idx * 50}% + 3px)`, width: 'calc(50% - 6px)',
+        borderRadius: '999px', background: V2.brand,
+        transition: 'left 240ms cubic-bezier(0.22,1,0.36,1)',
+      }} />
+      {opts.map((o, i) => (
+        <Focusable key={o} noFocusRing
+          onActivate={() => !disabled && onChange(o)}
+          onClick={() => !disabled && onChange(o)}
+          onFocus={() => setFocusedIdx(i)} onBlur={() => setFocusedIdx(null)}
+          style={{
+            position: 'relative', zIndex: 1, padding: '4px 16px', borderRadius: '999px',
+            fontSize: '12px', fontWeight: 600, textAlign: 'center', cursor: disabled ? 'default' : 'pointer',
+            color: i === idx ? '#fff' : V2.fg2,
+            boxShadow: focusedIdx === i ? `0 0 0 2px ${V2.brand}` : 'none',
+            transition: 'color 200ms, box-shadow 150ms',
+          }}>
+          {o === 'stable' ? 'Stable' : 'Beta'}
+        </Focusable>
+      ))}
+    </div>
+  );
+}
+
+// UpdateActionBtn — full-width fixed-height action button whose background
+// fills left→right with the brand color during install (progress lives IN the
+// button, so nothing below it shifts).
+function UpdateActionBtn({ label, icon, onClick, disabled, primary, progress }:
+  { label: string; icon: any; onClick: () => void; disabled?: boolean; primary?: boolean; progress?: number | null }) {
+  const [focused, setFocused] = useState(false);
+  const filling = progress != null;
+  return (
+    <Focusable noFocusRing
+      onActivate={() => !disabled && onClick()}
+      onClick={() => !disabled && onClick()}
+      onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+      onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
+      style={{
+        position: 'relative', overflow: 'hidden', width: '100%', height: '40px',
+        borderRadius: V2.radiusMd, border: `1px solid ${filling ? V2.brand : V2.border}`,
+        background: primary && !filling ? V2.brand : V2.surface,
+        opacity: disabled && !filling ? 0.55 : 1, cursor: disabled ? 'default' : 'pointer',
+        boxShadow: focused && !disabled ? `0 0 0 2px ${V2.brand}` : 'none',
+        transition: 'box-shadow 0.15s, background 0.2s, border-color 0.2s',
+      }}>
+      {filling && (
+        <div style={{
+          position: 'absolute', inset: 0, width: `${Math.max(2, progress ?? 0)}%`,
+          background: V2.brand, transition: 'width 0.3s ease',
+        }} />
+      )}
+      <div style={{
+        position: 'relative', zIndex: 1, display: 'flex', alignItems: 'center',
+        justifyContent: 'center', gap: '8px', height: '100%',
+        fontSize: '14px', fontWeight: 600, color: primary || filling ? '#fff' : V2.fg,
+      }}>
+        {icon}<span>{label}</span>
+      </div>
+    </Focusable>
+  );
+}
+
 function SettingsPage() {
   const [loggingEnabled, setLoggingEnabled] = useState<boolean>(true);
   const [loading, setLoading] = useState<boolean>(true);
@@ -6098,61 +6175,74 @@ function SettingsPage() {
           display: 'flex', flexDirection: 'column', gap: '12px', padding: '16px',
           borderRadius: V2.radiusCard, background: V2.surface, border: `1px solid ${V2.border}`,
         }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span style={{ fontSize: '13px', color: V2.fg2 }}>Channel</span>
-            <V2Button variant={channel === 'stable' ? 'primary' : 'tonal'} disabled={updating}
-              onClick={() => handleChannelChange('stable')}>Stable</V2Button>
-            <V2Button variant={channel === 'beta' ? 'primary' : 'tonal'} disabled={updating}
-              onClick={() => handleChannelChange('beta')}>Beta</V2Button>
+          {/* Header: version prominent, channel as a segmented control */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', minWidth: 0 }}>
+              <span style={{ fontSize: '16px', fontWeight: 800, lineHeight: 1 }}>v{version || '…'}</span>
+              {/* Status subline: one glanceable row with icon */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '12px', lineHeight: 1.3 }}>
+                {checking ? (
+                  <span style={{ color: V2.fgMuted }}>Checking…</span>
+                ) : updateInfo?.available ? (
+                  <>
+                    <FaDownload size={10} style={{ color: V2.brand, flexShrink: 0 }} />
+                    <span style={{ color: V2.brand, fontWeight: 600 }}>
+                      v{updateInfo.latest} available{updateInfo.prerelease ? ' (pre-release)' : ''}
+                    </span>
+                  </>
+                ) : statusMsg?.kind === 'err' ? (
+                  <>
+                    <FaTimesCircle size={10} style={{ color: V2.danger, flexShrink: 0 }} />
+                    <span style={{ color: V2.danger }}>{statusMsg.text}</span>
+                  </>
+                ) : statusMsg?.kind === 'ok' ? (
+                  <>
+                    <FaCheckCircle size={10} style={{ color: '#4ade80', flexShrink: 0 }} />
+                    <span style={{ color: V2.fgMuted }}>
+                      Up to date{lastChecked != null && ` · checked ${Date.now() - lastChecked < 60000 ? 'just now' : `${Math.round((Date.now() - lastChecked) / 60000)}m ago`}`}
+                    </span>
+                  </>
+                ) : (
+                  <span style={{ color: V2.fgMuted }}>{channel} channel</span>
+                )}
+              </div>
+            </div>
+            <ChannelSegment value={channel} onChange={handleChannelChange} disabled={updating} />
           </div>
-          <div style={{ fontSize: '12px', color: V2.fgMuted, lineHeight: 1.4 }}>
-            Installed: v{version || '…'} ({channel})
-            {lastChecked != null && ` · checked ${Date.now() - lastChecked < 60000 ? 'just now' : `${Math.round((Date.now() - lastChecked) / 60000)}m ago`}`}
-          </div>
-          {/* One progressive action button: Check → Install → Installing N%.
-              A single focus target is friendlier for controller navigation than
-              a second button appearing underneath. */}
-          <V2Button
-            variant={updateInfo?.available ? 'primary' : 'tonal'}
+          {/* Action: full width, fixed height; fills with brand color while installing */}
+          <UpdateActionBtn
+            label={updating ? `Installing… ${installPct != null ? `${installPct}%` : ''}`
+              : checking ? 'Checking…'
+                : updateInfo?.available ? `Install v${updateInfo.latest}`
+                  : 'Check for Updates'}
+            icon={updateInfo?.available && !updating ? <FaDownload size={13} /> : <FaSync size={13} />}
             onClick={updateInfo?.available ? handleInstallUpdate : handleCheckUpdate}
             disabled={checking || updating}
-          >
-            {updateInfo?.available ? <FaDownload size={13} /> : <FaSync size={13} />}
-            <span>
-              {updating ? `Installing… ${installPct != null ? `${installPct}%` : ''}`
-                : checking ? 'Checking…'
-                  : updateInfo?.available ? `Install v${updateInfo.latest}${updateInfo.prerelease ? ' (pre-release)' : ''}`
-                    : 'Check for Updates'}
-            </span>
-          </V2Button>
-          {updating && (
-            <div style={{ height: '4px', borderRadius: '2px', background: 'rgba(255,255,255,0.10)', overflow: 'hidden' }}>
-              <div style={{
-                height: '100%', width: `${installPct ?? 0}%`, background: V2.brand,
-                borderRadius: '2px', transition: 'width 0.3s ease',
-              }} />
-            </div>
-          )}
-          {statusMsg && (
-            <div style={{ fontSize: '12px', lineHeight: 1.4, color: statusMsg.kind === 'err' ? V2.danger : '#4ade80' }}>
-              {statusMsg.text}
-            </div>
-          )}
-          {updateInfo?.available && !!updateInfo.notes && !updating && (
-            <div style={{
-              fontSize: '12px', color: V2.fg2, lineHeight: 1.5, whiteSpace: 'pre-wrap',
-              maxHeight: '108px', overflow: 'hidden', padding: '10px 12px',
-              borderRadius: V2.radiusMd, background: 'rgba(255,255,255,0.045)', border: `1px solid ${V2.border}`,
-            }}>
-              <div style={{ fontWeight: 600, color: V2.fg, marginBottom: '4px' }}>What's new in v{updateInfo.latest}</div>
-              {String(updateInfo.notes).slice(0, 500)}
-            </div>
-          )}
+            primary={!!updateInfo?.available && !updating}
+            progress={updating ? (installPct ?? 0) : null}
+          />
           {updateInfo?.downloadedPath && (
             <div style={{ fontSize: '11px', color: V2.fgMuted, wordBreak: 'break-all' }}>
               Downloaded to: {updateInfo.downloadedPath}
             </div>
           )}
+          {updateInfo?.available && !!updateInfo.notes && !updating && (
+            <>
+              <div style={{ height: '1px', background: V2.border }} />
+              <div style={{ fontSize: '12px', color: V2.fg2, lineHeight: 1.5 }}>
+                <div style={{ fontWeight: 600, color: V2.fg, marginBottom: '4px' }}>What's new in v{updateInfo.latest}</div>
+                {/* Fade-out mask instead of a hard clip, so truncation reads as intentional */}
+                <div style={{
+                  whiteSpace: 'pre-wrap', maxHeight: '96px', overflow: 'hidden',
+                  WebkitMaskImage: 'linear-gradient(180deg, black 62%, transparent 100%)',
+                  maskImage: 'linear-gradient(180deg, black 62%, transparent 100%)',
+                } as any}>
+                  {String(updateInfo.notes).slice(0, 600)}
+                </div>
+              </div>
+            </>
+          )}
+          <div style={{ height: '1px', background: V2.border }} />
           <RomSwitch
             checked={checkOnStartup}
             onChange={handleCheckOnStartupToggle}
