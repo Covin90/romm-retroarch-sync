@@ -6282,14 +6282,27 @@ function TitleView() {
 // press squash that define the RomM v2 toggle's feel.
 function RomSwitch({ checked, onChange, disabled, label, description }:
   { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean; label?: string; description?: string }) {
+  const [focused, setFocused] = useState(false);
   const row = (inner: any) => (
-    <div
+    // Focusable (not a bare div) so the gamepad can land on it and it shows a
+    // focus highlight — a plain div only reacts to :hover, which never fires
+    // under controller navigation.
+    <Focusable
+      noFocusRing
+      onActivate={() => { if (!disabled) onChange(!checked); }}
       onClick={() => { if (!disabled) onChange(!checked); }}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
+      onMouseEnter={() => setFocused(true)}
+      onMouseLeave={() => setFocused(false)}
       style={{
         display: 'flex', alignItems: 'center', gap: '14px', width: '100%',
         padding: '12px 14px', borderRadius: V2.radiusMd, cursor: disabled ? 'not-allowed' : 'pointer',
-        background: 'rgba(255,255,255,0.045)', border: `1px solid ${V2.border}`,
-        opacity: disabled ? 0.55 : 1, transition: 'background 0.2s, border-color 0.2s',
+        background: focused && !disabled ? 'rgba(255,255,255,0.09)' : 'rgba(255,255,255,0.045)',
+        border: `1px solid ${focused && !disabled ? V2.brand : V2.border}`,
+        boxShadow: focused && !disabled ? `0 0 0 2px ${V2.brand}` : 'none',
+        opacity: disabled ? 0.55 : 1,
+        transition: 'background 0.2s, border-color 0.2s, box-shadow 0.15s',
       }}
     >
       <div className={`r-switch${checked ? ' r-switch--on' : ''}${disabled ? ' r-switch--disabled' : ''}`} style={{ display: 'inline-flex', alignItems: 'center', background: 'transparent', border: 'none', padding: 0 }}>
@@ -6304,7 +6317,7 @@ function RomSwitch({ checked, onChange, disabled, label, description }:
         </div>
       )}
       {inner}
-    </div>
+    </Focusable>
   );
   // The scoped <style> block carries the box-shadow sheen/glow + hover halo +
   // active-press squash that can't be expressed as inline styles.
