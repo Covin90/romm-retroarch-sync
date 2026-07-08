@@ -123,12 +123,22 @@ const _coverInflight = new Map<string, Promise<string | null>>(); // dedup in-fl
 const peekCover = (key: string): string | null | undefined =>
   _coverCache.has(key) ? _coverCache.get(key) : undefined;
 // Deduped fetch into the cache; safe to call from many tiles / prefetch at once.
-function awaitCover(key: string, fetcher: () => Promise<{ data_uri?: string } | null>): Promise<string | null> {
+// Only CONFIRMED results are cached: the backend returns success:false while it
+// is still connecting/authenticating (e.g. the window right after a self-update
+// reload). Caching that null would poison the tile to black until a fresh module
+// import (reopening the plugin). A soft failure is left uncached so the next
+// mount retries; a genuine "no cover" (success:true, data_uri:null) is cached.
+function awaitCover(key: string, fetcher: () => Promise<{ success?: boolean; data_uri?: string } | null>): Promise<string | null> {
   if (_coverCache.has(key)) return Promise.resolve(_coverCache.get(key)!);
   let p = _coverInflight.get(key);
   if (!p) {
     p = fetcher()
-      .then((r) => { const u = r?.data_uri || null; _coverCache.set(key, u); _coverInflight.delete(key); return u; })
+      .then((r) => {
+        const u = r?.data_uri || null;
+        if (r && r.success !== false) _coverCache.set(key, u);
+        _coverInflight.delete(key);
+        return u;
+      })
       .catch(() => { _coverInflight.delete(key); return null; });
     _coverInflight.set(key, p);
   }
@@ -272,10 +282,22 @@ function GameCover({ romId, hasCover, large = false, radius = V2.radiusArt, onLo
     if (!hasCover) { setDone(true); onLoaded?.(null); return; }
     const p = peekCover(ck);
     if (p !== undefined) { setUri(p); setDone(true); onLoaded?.(p); return; }
-    (async () => {
+    let attempts = 0;
+    const load = async () => {
       const u = await awaitCover(ck, () => qGetGameCover(romId, large));
-      if (alive) { setUri(u); onLoaded?.(u); setDone(true); }
-    })();
+      if (!alive) return;
+      // A null the cache DIDN'T keep is a soft failure (backend still connecting,
+      // e.g. right after a self-update reload). Retry with backoff rather than
+      // showing "No cover" until the user reopens the plugin. A confirmed result
+      // (cached) — real cover or genuine no-cover — is accepted immediately.
+      if (u === null && peekCover(ck) === undefined && attempts < 8) {
+        attempts++;
+        setTimeout(load, Math.min(500 * attempts, 3000));
+        return;
+      }
+      setUri(u); onLoaded?.(u); setDone(true);
+    };
+    load();
     return () => { alive = false; };
   }, [romId, large]);
   return (
@@ -302,10 +324,19 @@ function ScreenshotArt({ path, onLoaded, onRatio }:
   const [uri, setUri] = useState<string | null>(peekCover(ik) ?? null);
   useEffect(() => {
     let alive = true;
-    (async () => {
+    let attempts = 0;
+    const load = async () => {
       const u = await awaitCover(ik, () => qGetImage(path));
-      if (alive) { setUri(u); onLoaded?.(u); }
-    })();
+      if (!alive) return;
+      // Same soft-failure retry as GameCover (backend still connecting).
+      if (u === null && peekCover(ik) === undefined && attempts < 8) {
+        attempts++;
+        setTimeout(load, Math.min(500 * attempts, 3000));
+        return;
+      }
+      setUri(u); onLoaded?.(u);
+    };
+    load();
     return () => { alive = false; };
   }, [path]);
   return (
@@ -5746,13 +5777,14 @@ function CoresPage() {
   );
 }
 
-// ChannelSegment — joined Stable|Beta pill, styled 1:1 with the home V2NavBar
+// V2Segment — joined pill segmented control, styled 1:1 with the home V2NavBar
 // tab group: a white sliding indicator (measured per option), dpad left/right
 // navigation (flow-children), and the pill's own rounded shape as the focus
-// affordance — no box-shadow ring.
-function ChannelSegment({ value, onChange, disabled }:
-  { value: string; onChange: (v: string) => void; disabled?: boolean }) {
-  const opts = [{ id: 'stable', label: 'Stable' }, { id: 'beta', label: 'Beta' }];
+// affordance — no box-shadow ring. Used for the update channel and the setup
+// wizard's login/pair switch.
+function V2Segment({ options, value, onChange, disabled }:
+  { options: { id: string; label: string }[]; value: string; onChange: (v: string) => void; disabled?: boolean }) {
+  const opts = options;
   const activeIdx = Math.max(0, opts.findIndex((o) => o.id === value));
   const btnRefs = useRef<(HTMLDivElement | null)[]>([]);
   const [ind, setInd] = useState<{ left: number; width: number } | null>(null);
@@ -6225,7 +6257,8 @@ function SettingsPage() {
                 )}
               </div>
             </div>
-            <ChannelSegment value={channel} onChange={handleChannelChange} disabled={updating} />
+            <V2Segment options={[{ id: 'stable', label: 'Stable' }, { id: 'beta', label: 'Beta' }]}
+              value={channel} onChange={handleChannelChange} disabled={updating} />
           </div>
           {/* Action: full width, fixed height; fills with brand color while installing */}
           <UpdateActionBtn
@@ -6701,14 +6734,12 @@ function SetupWizard() {
           {step === 1 && (
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '14px', width: '100%' }}>
               <div style={{ fontSize: '20px', fontWeight: 700 }}>Connect to RomM</div>
-              {/* Login / Pair toggle — emphasized when active, surface when not. */}
-              <Focusable noFocusRing flow-children="horizontal" style={{ display: 'flex', justifyContent: 'center', gap: '8px' }}>
-                {(['login', 'pair'] as const).map((m) => (
-                  <GameActionButton key={m} variant={mode === m ? 'emphasized' : 'surface'}
-                    label={m === 'login' ? 'Username & password' : 'Pair code'} icon={null}
-                    onClick={() => { setMode(m); setTestResult(null); }} />
-                ))}
-              </Focusable>
+              {/* Login / Pair toggle — same segmented pill as the update channel. */}
+              <V2Segment
+                options={[{ id: 'login', label: 'Username & password' }, { id: 'pair', label: 'Pair code' }]}
+                value={mode}
+                onChange={(m) => { setMode(m as 'login' | 'pair'); setTestResult(null); }}
+              />
               <V2TextField label="RomM URL" value={url} onChange={onField(setUrl)} placeholder="https://romm.example.com" />
               {mode === 'login' ? (
                 <>
