@@ -5871,11 +5871,19 @@ function SettingsPage() {
           "",
         );
         toaster.toast({
-          title: `Installing v${updateInfo.latest}…`,
-          body: 'Decky is applying the update. The plugin will reload automatically.',
-          duration: 10000,
+          title: `Updated to v${updateInfo.latest}`,
+          body: 'Reloading the plugin to activate the new version…',
+          duration: 8000,
         });
         setUpdateInfo({ ...updateInfo, available: false });
+        // install_plugin already stops + re-imports the backend, but the running
+        // frontend can stay on the old JS bundle until an explicit reload (this
+        // is why Decky's plugin list has a manual Reload button). Force a clean
+        // reload so the new version is live without the user touching anything.
+        // This tears down our own UI — nothing after it runs, so it's last.
+        setTimeout(() => {
+          try { backend.call("loader/reload_plugin", "RomM RetroArch Sync"); } catch { /* ignore */ }
+        }, 1200);
         return;
       } catch (loaderErr) {
         console.warn('Loader install route unavailable, falling back to manual:', loaderErr);
