@@ -3346,6 +3346,10 @@ function OfflineBanner({ status }: { status: any }) {
 }
 
 function LibraryGroupsPage() {
+  // Reaching the library is the success signal for the post-update "reopen Home"
+  // breadcrumb — consume it here (not on plugin load) so it survives the double
+  // reload the installer causes. See the _LS_REOPEN_HOME consumer in definePlugin.
+  useEffect(() => { try { localStorage.removeItem(_LS_REOPEN_HOME); } catch { /* ignore */ } }, []);
   const [active, setActive] = useState<NavId>(_libLastTab);
   const [groups, setGroups] = useState<LibGroup[]>([]);
   const [loading, setLoading] = useState(true);
@@ -7154,13 +7158,16 @@ export default definePlugin(() => {
   } catch (e) { console.error('[RomM] net listeners', e); }
 
   // Just self-updated? Reopen the home page — the reload dropped the user out of
-  // our full-screen UI. Consume the flag once (recent only, so a stale flag from
-  // a crashed update doesn't hijack a normal launch).
+  // our full-screen UI. NOTE: the install triggers TWO plugin reloads in quick
+  // succession (Decky uninstall + reinstall), so we must NOT consume the flag on
+  // read — the first reload would clear it and the second (final) reload would
+  // never navigate. Instead we leave it set and re-attempt on every reload; the
+  // library page clears it once it actually mounts (see LibraryGroupsPage). The
+  // 90s freshness window keeps a stale flag from hijacking a later normal launch.
   try {
     const ts = Number(localStorage.getItem(_LS_REOPEN_HOME) || 0);
     if (ts) {
-      localStorage.removeItem(_LS_REOPEN_HOME);
-      if (Date.now() - ts < 60000) {
+      if (Date.now() - ts < 90000) {
         // Don't reopen Home on a fixed timer — the backend was just re-imported
         // by the update and spends several seconds reconnecting + loading the
         // library. Mounting the grid during that window fetches covers against a
@@ -7182,6 +7189,9 @@ export default definePlugin(() => {
           // Belt and braces: some Decky builds restore the QAM a beat later.
           setTimeout(() => { try { Navigation.CloseSideMenus(); } catch { /* ignore */ } }, 600);
         })();
+      } else {
+        // Stale flag from an old/abandoned update — drop it.
+        localStorage.removeItem(_LS_REOPEN_HOME);
       }
     }
   } catch { /* ignore */ }
