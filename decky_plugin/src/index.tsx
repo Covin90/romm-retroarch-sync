@@ -2255,6 +2255,8 @@ let _homeCache: {
 // silently refreshes in the background.
 const _LS_LIB_PREFIX = 'romm:libcache:v1:';
 const _LS_HOME_KEY = 'romm:homecache:v1';
+// Set right before a self-update reload; consumed once on startup to reopen home.
+const _LS_REOPEN_HOME = 'romm:reopen-home';
 const _LS_TTL_MS = 1000 * 60 * 60 * 24; // 24h; lists rarely churn, dots refresh on fetch
 const _lsAvail = (() => { try { return typeof localStorage !== 'undefined'; } catch { return false; } })();
 
@@ -5876,6 +5878,11 @@ function SettingsPage() {
           duration: 8000,
         });
         setUpdateInfo({ ...updateInfo, available: false });
+        // Leave a breadcrumb so the freshly-reloaded plugin reopens the home
+        // page (the reload drops the user out of our full-screen UI). Survives
+        // the reload because localStorage lives on the Chromium origin, not our
+        // torn-down JS context. Consumed once on startup below.
+        try { localStorage.setItem(_LS_REOPEN_HOME, String(Date.now())); } catch { /* ignore */ }
         // install_plugin already stops + re-imports the backend, but the running
         // frontend can stay on the old JS bundle until an explicit reload (this
         // is why Decky's plugin list has a manual Reload button). Force a clean
@@ -6881,6 +6888,22 @@ export default definePlugin(() => {
     window.addEventListener('offline', onNetOffline);
     window.addEventListener('online', onNetOnline);
   } catch (e) { console.error('[RomM] net listeners', e); }
+
+  // Just self-updated? Reopen the home page — the reload dropped the user out of
+  // our full-screen UI. Consume the flag once (recent only, so a stale flag from
+  // a crashed update doesn't hijack a normal launch).
+  try {
+    const ts = Number(localStorage.getItem(_LS_REOPEN_HOME) || 0);
+    if (ts) {
+      localStorage.removeItem(_LS_REOPEN_HOME);
+      if (Date.now() - ts < 60000) {
+        setTimeout(() => {
+          try { Navigation.Navigate("/romm-sync-library"); Navigation.CloseSideMenus(); }
+          catch (e) { console.error('[RomM] reopen home after update', e); }
+        }, 1500);
+      }
+    }
+  } catch { /* ignore */ }
 
   // Passive update check on load: if enabled, look for a newer release on the
   // selected channel and toast the user (no auto-install — they install from
