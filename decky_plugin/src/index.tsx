@@ -1376,12 +1376,13 @@ function NavLaunchButton({ iconSrc, label, onActivate }:
         display: 'inline-flex', alignItems: 'center', gap: '7px',
         height: '34px', padding: iconSrc ? '0 7px 0 5px' : '0 10px',
         borderRadius: V2.radiusPill, cursor: 'pointer',
-        background: active ? V2.surfaceHover : V2.surface,
+        // Focus affordance matches V2Segment: a pill-shaped tint layered over the
+        // surface fill, not a rectangular brand ring.
+        background: active ? 'rgba(255,255,255,0.10)' : V2.surface,
         color: active ? V2.fg : V2.fg2,
         fontSize: '13px', fontWeight: 600, whiteSpace: 'nowrap',
         border: `1px solid ${V2.borderStrong}`,
-        boxShadow: active ? `0 0 0 2px ${V2.brand}` : 'none',
-        transition: 'background 0.15s, color 0.15s, box-shadow 0.15s',
+        transition: 'background 0.15s, color 0.15s',
       }}
     >
       {iconSrc
@@ -1453,6 +1454,7 @@ function V2NavBar({ active, onTab, activeRef, chrome, onLaunchRd }:
   const btnRefs = useRef<(HTMLDivElement | null)[]>([]);
   const [ind, setInd] = useState<{ left: number; width: number } | null>(null);
   const [shown, setShown] = useState(false); // drives the first-load grow/fade-in
+  const [focusedIdx, setFocusedIdx] = useState<number | null>(null);
   const activeIdx = tabs.findIndex((t) => t.id === active);
   useEffect(() => {
     const el = btnRefs.current[activeIdx];
@@ -1506,14 +1508,20 @@ function V2NavBar({ active, onTab, activeRef, chrome, onLaunchRd }:
           {tabs.map(({ id, label, Icon }, i) => {
             const on = active === id;
             return (
-              <Focusable noFocusRing key={id} ref={on && activeRef ? activeRef : undefined} onActivate={() => onTab(id)} onClick={() => onTab(id)}>
+              <Focusable noFocusRing key={id} ref={on && activeRef ? activeRef : undefined}
+                onActivate={() => onTab(id)} onClick={() => onTab(id)}
+                onFocus={() => setFocusedIdx(i)} onBlur={() => setFocusedIdx(null)}
+                onMouseEnter={() => setFocusedIdx(i)} onMouseLeave={() => setFocusedIdx(null)}>
                 <div ref={(el) => { btnRefs.current[i] = el; }}
                   style={{
                     position: 'relative', zIndex: 1,
                     display: 'flex', alignItems: 'center', gap: '7px', padding: '7px 18px',
                     borderRadius: V2.radiusPill, fontSize: '13.5px', cursor: 'pointer',
                     fontWeight: on ? 600 : 500, color: on ? V2.bg : V2.fg2,
-                    transition: 'color 0.2s ease',
+                    // Same focus affordance as V2Segment: a pill-shaped tint on the
+                    // focused-but-not-active tab (the active tab has the indicator).
+                    background: (!on && focusedIdx === i) ? 'rgba(255,255,255,0.10)' : 'transparent',
+                    transition: 'color 0.2s ease, background 0.15s ease',
                   }}>
                   <Icon size={12} /><span>{label}</span>
                 </div>
@@ -1757,7 +1765,8 @@ function UserPill({ username, role, avatar }: { username: string; role: string; 
       onMouseEnter={() => setActive(true)} onMouseLeave={() => setActive(false)}
       style={{
         display: 'inline-flex', alignItems: 'center', gap: '8px',
-        background: active ? V2.surfaceHover : V2.surface,
+        // Same pill-shaped focus tint as V2Segment / the nav tabs.
+        background: active ? 'rgba(255,255,255,0.10)' : V2.surface,
         border: `1px solid ${V2.borderStrong}`,
         borderRadius: V2.radiusPill, padding: '3px 12px 3px 3px',
         color: V2.fg, cursor: 'pointer', transition: 'background 0.15s ease',
