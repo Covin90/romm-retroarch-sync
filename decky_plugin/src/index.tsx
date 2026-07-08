@@ -5746,42 +5746,60 @@ function CoresPage() {
   );
 }
 
-// ChannelSegment — joined Stable|Beta pill with a sliding brand highlight.
-// Reads as a setting (one control, two states) rather than two separate actions.
+// ChannelSegment — joined Stable|Beta pill, styled 1:1 with the home V2NavBar
+// tab group: a white sliding indicator (measured per option), dpad left/right
+// navigation (flow-children), and the pill's own rounded shape as the focus
+// affordance — no box-shadow ring.
 function ChannelSegment({ value, onChange, disabled }:
   { value: string; onChange: (v: string) => void; disabled?: boolean }) {
-  const opts = ['stable', 'beta'];
-  const idx = Math.max(0, opts.indexOf(value));
+  const opts = [{ id: 'stable', label: 'Stable' }, { id: 'beta', label: 'Beta' }];
+  const activeIdx = Math.max(0, opts.findIndex((o) => o.id === value));
+  const btnRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const [ind, setInd] = useState<{ left: number; width: number } | null>(null);
   const [focusedIdx, setFocusedIdx] = useState<number | null>(null);
+  useEffect(() => {
+    const el = btnRefs.current[activeIdx];
+    if (el) setInd({ left: el.offsetLeft, width: el.offsetWidth });
+  }, [activeIdx]);
   return (
-    <div style={{
-      position: 'relative', display: 'flex', flexShrink: 0, padding: '3px',
-      borderRadius: '999px', background: 'rgba(0,0,0,0.35)', border: `1px solid ${V2.border}`,
+    <Focusable noFocusRing flow-children="horizontal" style={{
+      position: 'relative', display: 'flex', flexShrink: 0, gap: '2px', padding: '4px',
+      background: V2.surface, border: `1px solid ${V2.borderStrong}`, borderRadius: V2.radiusPill,
       opacity: disabled ? 0.55 : 1,
     }}>
-      {/* sliding highlight */}
-      <div style={{
-        position: 'absolute', top: '3px', bottom: '3px',
-        left: `calc(${idx * 50}% + 3px)`, width: 'calc(50% - 6px)',
-        borderRadius: '999px', background: V2.brand,
-        transition: 'left 240ms cubic-bezier(0.22,1,0.36,1)',
-      }} />
-      {opts.map((o, i) => (
-        <Focusable key={o} noFocusRing
-          onActivate={() => !disabled && onChange(o)}
-          onClick={() => !disabled && onChange(o)}
-          onFocus={() => setFocusedIdx(i)} onBlur={() => setFocusedIdx(null)}
-          style={{
-            position: 'relative', zIndex: 1, padding: '4px 16px', borderRadius: '999px',
-            fontSize: '12px', fontWeight: 600, textAlign: 'center', cursor: disabled ? 'default' : 'pointer',
-            color: i === idx ? '#fff' : V2.fg2,
-            boxShadow: focusedIdx === i ? `0 0 0 2px ${V2.brand}` : 'none',
-            transition: 'color 200ms, box-shadow 150ms',
-          }}>
-          {o === 'stable' ? 'Stable' : 'Beta'}
-        </Focusable>
-      ))}
-    </div>
+      {/* White sliding indicator — same as the home nav */}
+      {ind && (
+        <div style={{
+          position: 'absolute', top: '4px', bottom: '4px',
+          left: `${ind.left}px`, width: `${ind.width}px`,
+          background: V2.fg, borderRadius: V2.radiusPill, zIndex: 0,
+          transition: 'left 0.28s cubic-bezier(0.22,1,0.36,1), width 0.28s cubic-bezier(0.22,1,0.36,1)',
+        }} />
+      )}
+      {opts.map(({ id, label }, i) => {
+        const on = activeIdx === i;
+        return (
+          <Focusable noFocusRing key={id}
+            onActivate={() => !disabled && onChange(id)}
+            onClick={() => !disabled && onChange(id)}
+            onFocus={() => setFocusedIdx(i)} onBlur={() => setFocusedIdx(null)}
+            onMouseEnter={() => setFocusedIdx(i)} onMouseLeave={() => setFocusedIdx(null)}>
+            <div ref={(el) => { btnRefs.current[i] = el; }}
+              style={{
+                position: 'relative', zIndex: 1, padding: '5px 16px', borderRadius: V2.radiusPill,
+                fontSize: '12.5px', textAlign: 'center', cursor: disabled ? 'default' : 'pointer',
+                fontWeight: on ? 600 : 500, color: on ? V2.bg : V2.fg2,
+                // Focus affordance is a pill-shaped tint (matches the shape),
+                // not a rectangular ring.
+                background: (!on && focusedIdx === i) ? 'rgba(255,255,255,0.10)' : 'transparent',
+                transition: 'color 0.2s ease, background 0.15s ease',
+              }}>
+              {label}
+            </div>
+          </Focusable>
+        );
+      })}
+    </Focusable>
   );
 }
 
