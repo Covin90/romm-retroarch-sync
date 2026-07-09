@@ -5890,8 +5890,8 @@ function V2Segment({ options, value, onChange, disabled }:
 // UpdateActionBtn — full-width fixed-height action button whose background
 // fills left→right with the brand color during install (progress lives IN the
 // button, so nothing below it shifts).
-function UpdateActionBtn({ label, icon, onClick, disabled, primary, progress }:
-  { label: string; icon: any; onClick: () => void; disabled?: boolean; primary?: boolean; progress?: number | null }) {
+function UpdateActionBtn({ label, icon, onClick, disabled, primary, progress, busy }:
+  { label: string; icon: any; onClick: () => void; disabled?: boolean; primary?: boolean; progress?: number | null; busy?: boolean }) {
   const [focused, setFocused] = useState(false);
   const filling = progress != null;
   return (
@@ -5908,10 +5908,20 @@ function UpdateActionBtn({ label, icon, onClick, disabled, primary, progress }:
         boxShadow: focused && !disabled ? `0 0 0 2px ${V2.brand}` : 'none',
         transition: 'box-shadow 0.15s, background 0.2s, border-color 0.2s',
       }}>
+      {/* Keyframes for the busy shimmer — scoped, defined inline so this works
+          regardless of which other components happen to be mounted. */}
+      <style>{`@keyframes uabShimmer { 0% { transform: translateX(-60%); } 100% { transform: translateX(160%); } }`}</style>
       {filling && (
         <div style={{
           position: 'absolute', inset: 0, width: `${Math.max(2, progress ?? 0)}%`,
           background: V2.brand, transition: 'width 0.3s ease',
+        }} />
+      )}
+      {busy && (
+        <div style={{
+          position: 'absolute', top: 0, bottom: 0, left: 0, width: '55%', zIndex: 2,
+          background: `linear-gradient(90deg, transparent 0%, ${filling || primary ? 'rgba(255,255,255,0.28)' : 'rgba(255,255,255,0.14)'} 50%, transparent 100%)`,
+          animation: 'uabShimmer 1.15s ease-in-out infinite', pointerEvents: 'none',
         }} />
       )}
       <div style={{
@@ -6290,6 +6300,7 @@ function SettingsPage() {
             disabled={checking || updating}
             primary={!!updateInfo?.available && !updating}
             progress={updating ? (installPct ?? 0) : null}
+            busy={checking || updating}
           />
           {updateInfo?.downloadedPath && (
             <div style={{ fontSize: '11px', color: V2.fgMuted, wordBreak: 'break-all' }}>
