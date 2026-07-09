@@ -2279,6 +2279,26 @@ let _libGameOrigin: string = "/romm-sync-library";
 // Remember which library tab the user was on, so backing out of a games page
 // returns to that tab (platforms/collections) instead of resetting to 'home'.
 let _libLastTab: NavId = 'home';
+
+// Play a Steam Deck UI sound (the same .wav files Big Picture / the Deck UI use
+// for its own navigation). Steam serves them from the SP window's loopback host,
+// so a plain Audio element reaches them. Everything is wrapped/swallowed: a
+// missing file or a blocked autoplay must never break navigation. Elements are
+// cached and cloned so rapid LB/RB presses can overlap instead of cutting off.
+const _navSoundCache: Record<string, HTMLAudioElement> = {};
+function playSteamSound(name: string) {
+  try {
+    let base = _navSoundCache[name];
+    if (!base) {
+      base = new Audio(`https://steamloopback.host/sounds/${name}.wav`);
+      base.preload = 'auto';
+      _navSoundCache[name] = base;
+    }
+    const a = base.cloneNode(true) as HTMLAudioElement;
+    a.volume = 1;
+    void a.play?.();
+  } catch { /* no audio → silent, never fatal */ }
+}
 // Per-group games cache (key: `${mode}:${groupKey}`) so paging to an already
 // prefetched neighbour shows its covers instantly — the grid slides in with real
 // content instead of popping in after an async fetch.
@@ -3460,6 +3480,7 @@ function LibraryGroupsPage() {
   const cycle = (dir: -1 | 1) => {
     const i = NAV_ORDER.indexOf(active);
     const next = NAV_ORDER[(i + dir + NAV_ORDER.length) % NAV_ORDER.length];
+    playSteamSound('deck_ui_tab_transition_01');   // native LB/RB tab-switch sound
     _libLastTab = next;
     setActive(next);
     requestAnimationFrame(() => { try { navPillRef.current?.focus(); } catch { } });
