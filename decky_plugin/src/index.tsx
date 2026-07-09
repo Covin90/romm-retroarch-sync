@@ -3522,8 +3522,22 @@ function LibraryGroupsPage() {
     else if (b === GamepadButton.SELECT) { playSteamSound('deck_ui_show_modal'); Navigation.Navigate("/romm-sync-settings"); }
     else if (b === GamepadButton.OPTIONS) openUserMenu();               // Y → account menu
     else if (b === GamepadButton.START) openUserMenu();                 // ☰ Start → account menu
-    else if (b === GamepadButton.SECONDARY && chrome.rdEnabled) launchRd(); // X → RetroDECK
   };
+  // X → RetroDECK, but through Steam's action-button dispatch (NOT the raw
+  // onButtonDown hook): onButtonDown sees every press in the tree, so it also
+  // fired when X was pressed on a game tile whose own onSecondaryButton opens
+  // the detail page — the tile opened Details AND RetroDECK launched over it.
+  // As an action handler, the focused tile consumes X first and this only runs
+  // when nothing focused claims it.
+  const onSecondary = chrome.rdEnabled ? launchRd : undefined;
+
+  // B at the library root: consume it and leave the plugin UI deliberately.
+  // Every inner page "backs out" by PUSHING /romm-sync-library (Steam's default
+  // NavigateBack misbehaves on custom Decky routes), so the history stack fills
+  // with our own routes — letting Steam's default back run here popped that
+  // stack and bounced the user between home and the page they just left,
+  // endlessly. Exiting to Steam's library breaks the loop.
+  const onExit = () => { try { Navigation.Navigate("/library/home"); } catch { /* ignore */ } };
 
   // Surface the page-level shortcuts in Steam's NATIVE bottom hint bar (not a
   // custom overlay). Settings goes through actionDescriptionMap because Select
@@ -3535,6 +3549,7 @@ function LibraryGroupsPage() {
   // the specific buttons it defines).
   return v2Page(
     <Focusable noFocusRing onButtonDown={onButtonDown}
+      onSecondaryButton={onSecondary} onCancelButton={onExit}
       actionDescriptionMap={{ [GamepadButton.SELECT]: 'Settings', [GamepadButton.START]: 'Account' }}
       onOptionsActionDescription="Account"
       onSecondaryActionDescription={chrome.rdEnabled ? 'RetroDECK' : undefined}>
