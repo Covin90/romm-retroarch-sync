@@ -4534,6 +4534,7 @@ function SaveDataTab({ romId }: { romId: number }) {
   // the selected save/state gets no highlight. Track the focused entry in JS
   // and paint the brand highlight explicitly (same approach as the nav tabs).
   const [focusedId, setFocusedId] = useState<number | null>(null);
+  const [pillFocus, setPillFocus] = useState<'saves' | 'states' | null>(null);
   const EASE = 'cubic-bezier(0.22,1,0.36,1)';
 
   const load = async (silent = false) => {
@@ -4628,16 +4629,22 @@ function SaveDataTab({ romId }: { romId: number }) {
 
   const pill = (id: 'saves' | 'states', label: string, count: number) => {
     const active = sub === id;
+    const focused = pillFocus === id;
     return (
       <Focusable noFocusRing
         key={id}
         onActivate={() => setSub(id)}
         onClick={() => setSub(id)}
+        onFocus={() => setPillFocus(id)} onBlur={() => setPillFocus((c) => c === id ? null : c)}
+        onMouseEnter={() => setPillFocus(id)} onMouseLeave={() => setPillFocus((c) => c === id ? null : c)}
         style={{
           display: 'inline-flex', alignItems: 'center', gap: '7px',
-          background: active ? V2.fg : V2.surface, border: `1px solid ${active ? V2.fg : V2.border}`,
+          background: active ? V2.fg : (focused ? V2.surfaceHover : V2.surface),
+          border: `1px solid ${active ? V2.fg : (focused ? V2.brand : V2.border)}`,
           borderRadius: V2.radiusPill, color: active ? V2.bg : V2.fg2,
           padding: '5px 14px', fontSize: '12px', fontWeight: 600, cursor: 'pointer',
+          boxShadow: focused ? `0 0 0 2px ${V2.brand}, 0 0 14px rgba(139,116,232,0.45)` : 'none',
+          transition: 'background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease',
         }}
       >
         {label}
