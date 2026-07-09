@@ -5049,14 +5049,66 @@ async function runLaunch(romId: number, gameName: string, disc: string | null,
   }
 }
 
-// A check glyph marking the disc a plain Play will currently boot.
-function discMark(active: boolean) {
-  return active
-    ? <FaCheck size={11} style={{ marginRight: '8px', color: V2.brand }} />
-    : <span style={{ display: 'inline-block', width: '11px', marginRight: '8px' }} />;
+// V2 glass picker — the disc/region selector in the app's own modal language
+// (same chrome as CollectionActionsModal / UserMenuModal) instead of Steam's
+// native context menu. Rows reuse UserMenuRow; the remembered/default entry
+// carries a check in the icon slot.
+function PickerModal({ title, items, closeModal }: {
+  title: string;
+  items: { key: string | number; label: string; active?: boolean; onSelect: () => void }[];
+  closeModal?: () => void;
+}) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { const t = setTimeout(() => panelRef.current?.focus(), 60); return () => clearTimeout(t); }, []);
+  return (
+    <ModalRoot bHideCloseIcon onCancel={closeModal} onEscKeypress={closeModal}
+      className="romm-modal-collapse" modalClassName="romm-modal-collapse">
+      <Focusable noFocusRing className="romm-ui"
+        onCancelButton={() => closeModal?.()}
+        onButtonDown={(e: any) => { if (e?.detail?.button === GamepadButton.CANCEL) closeModal?.(); }}
+        style={{
+          position: 'fixed', inset: 0, zIndex: 9999,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: 'rgba(7,7,15,0.45)',
+          WebkitBackdropFilter: 'blur(8px)', backdropFilter: 'blur(8px)',
+        }}>
+        <style>{`
+          ${V2_FOCUS_STYLE}
+          .romm-modal-collapse, .romm-modal-collapse > div {
+            background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important;
+          }
+          @keyframes umIn { from { opacity: 0; transform: translateY(-6px) scale(0.98); } to { opacity: 1; transform: none; } }
+        `}</style>
+        <div onClick={() => closeModal?.()} style={{ position: 'absolute', inset: 0 }} />
+        <Focusable noFocusRing autoFocus ref={panelRef} flow-children="vertical" style={{
+          position: 'relative', width: '340px', maxWidth: '90vw', boxSizing: 'border-box',
+          fontFamily: V2.font, color: V2.fg, padding: '8px',
+          display: 'flex', flexDirection: 'column',
+          background: 'linear-gradient(180deg, rgba(20,20,30,0.7) 0%, rgba(10,10,18,0.78) 100%)',
+          WebkitBackdropFilter: 'blur(28px) saturate(1.1)', backdropFilter: 'blur(28px) saturate(1.1)',
+          border: `1px solid rgba(255,255,255,0.12)`, borderRadius: V2.radiusCard,
+          boxShadow: '0 16px 48px rgba(0,0,0,0.55)',
+          maxHeight: '82vh', overflowY: 'auto',
+          animation: 'umIn 0.18s cubic-bezier(0.22,1,0.36,1)',
+        }}>
+          <div style={{
+            fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em',
+            color: V2.fgMuted, padding: '6px 8px 10px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+          }}>{title}</div>
+          <div style={{ height: '1px', background: V2.border, margin: '0 4px 4px' }} />
+          {items.map((it) => (
+            <UserMenuRow key={it.key}
+              icon={it.active ? <FaCheck size={14} style={{ color: V2.brand }} /> : null}
+              label={it.label}
+              onSelect={() => { closeModal?.(); it.onSelect(); }} />
+          ))}
+        </Focusable>
+      </Focusable>
+    </ModalRoot>
+  );
 }
 
-// Native context menu listing the bootable discs. The first item launches the
+// Picker listing the bootable discs (V2 modal). The first item launches the
 // .m3u playlist (in-game disc swap) when present, else disc 1. `last` is the
 // remembered disc (what a plain Play resumes) and is checkmarked. Choosing the
 // playlist persists the .m3u name so a later plain Play resumes the playlist.
@@ -5068,15 +5120,11 @@ function openDiscPicker(romId: number, gameName: string, discs: LocalDisc[],
   if (isRegion) {
     // Default to the remembered region, else the first one.
     const activeName = (last && discs.some((d) => d.name === last)) ? last : discs[0]?.name;
-    showContextMenu(
-      <Menu label="Select region">
-        {discs.map((d) => (
-          <MenuItem key={d.name} onSelected={() =>
-            runLaunch(romId, gameName, d.name, regionDisplayLabel(d.name), setBusy, onLaunched)}>
-            {discMark(d.name === activeName)}{regionDisplayLabel(d.name)}
-          </MenuItem>
-        ))}
-      </Menu>
+    showModal(
+      <PickerModal title="Select region" items={discs.map((d) => ({
+        key: d.name, label: regionDisplayLabel(d.name), active: d.name === activeName,
+        onSelect: () => runLaunch(romId, gameName, d.name, regionDisplayLabel(d.name), setBusy, onLaunched),
+      }))} />
     );
     return;
   }
@@ -5085,19 +5133,19 @@ function openDiscPicker(romId: number, gameName: string, discs: LocalDisc[],
   // The playlist is the active default when it is the remembered choice, or when
   // nothing is remembered yet (the implicit first-launch default).
   const m3uActive = !!m3u && (last === m3u.name || !last);
-  showContextMenu(
-    <Menu label="Select disc">
-      <MenuItem onSelected={() => runLaunch(romId, gameName, m3u ? m3u.name : null,
-        m3u ? 'All discs' : undefined, setBusy, onLaunched)}>
-        {discMark(m3uActive)}{m3u ? 'Play (all discs, in-game swap)' : 'Play (disc 1)'}
-      </MenuItem>
-      {pickable.map((d) => (
-        <MenuItem key={d.name} onSelected={() =>
-          runLaunch(romId, gameName, d.name, discDisplayLabel(d.name), setBusy, onLaunched)}>
-          {discMark(last === d.name)}{discDisplayLabel(d.name)}
-        </MenuItem>
-      ))}
-    </Menu>
+  showModal(
+    <PickerModal title="Select disc" items={[
+      {
+        key: '__all__', label: m3u ? 'Play (all discs, in-game swap)' : 'Play (disc 1)',
+        active: m3uActive,
+        onSelect: () => runLaunch(romId, gameName, m3u ? m3u.name : null,
+          m3u ? 'All discs' : undefined, setBusy, onLaunched),
+      },
+      ...pickable.map((d) => ({
+        key: d.name, label: discDisplayLabel(d.name), active: last === d.name,
+        onSelect: () => runLaunch(romId, gameName, d.name, discDisplayLabel(d.name), setBusy, onLaunched),
+      })),
+    ]} />
   );
 }
 
@@ -5117,17 +5165,14 @@ function openRegionPicker(
   });
   const all = [mainEntry, ...sorted];
 
-  showContextMenu(
-    <Menu label="Select region">
-      {all.map((entry) => (
-        <MenuItem key={entry.rom_id} onSelected={() => onSelected?.(entry.rom_id)}>
-          {entry.rom_id === lastUsedId ? '✓ ' : ''}
-          {entry.name}
-          {entry.rom_id !== romId && !downloadedIds.has(entry.rom_id) ? ' (not downloaded)' : ''}
-          {downloadedIds.has(entry.rom_id) ? ' ✓' : ''}
-        </MenuItem>
-      ))}
-    </Menu>
+  showModal(
+    <PickerModal title="Select region" items={all.map((entry) => ({
+      key: entry.rom_id,
+      label: entry.name
+        + (entry.rom_id !== romId && !downloadedIds.has(entry.rom_id) ? ' (not downloaded)' : ''),
+      active: entry.rom_id === lastUsedId,
+      onSelect: () => onSelected?.(entry.rom_id),
+    }))} />
   );
 }
 
