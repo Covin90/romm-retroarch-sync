@@ -4301,6 +4301,9 @@ type StatusFilter = 'all' | 'earned' | 'locked';
 function AchievementsTab({ achievements }: { achievements: Achievement[] }) {
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('all');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  // Which filter pill is focused, so it shows a highlight under the controller
+  // (the pills otherwise only reflect active/inactive, not focus).
+  const [filterFocus, setFilterFocus] = useState<string | null>(null);
   // Drive the summary progress bar from 0 → pct after mount so it animates in.
   const [barReady, setBarReady] = useState(false);
   useEffect(() => { const t = setTimeout(() => setBarReady(true), 60); return () => clearTimeout(t); }, []);
@@ -4350,14 +4353,20 @@ function AchievementsTab({ achievements }: { achievements: Achievement[] }) {
       else if (accent === 'locked') { bg = 'rgba(255,80,80,0.24)'; border = 'rgba(255,80,80,0.45)'; color = V2.fg; }
       else { bg = V2.fg; border = V2.fg; color = V2.bg; }
     }
+    const focused = filterFocus === key;
     return (
       <Focusable noFocusRing
         key={key}
         onActivate={onClick}
         onClick={onClick}
+        onFocus={() => setFilterFocus(key)} onBlur={() => setFilterFocus((c) => c === key ? null : c)}
+        onMouseEnter={() => setFilterFocus(key)} onMouseLeave={() => setFilterFocus((c) => c === key ? null : c)}
         style={{
-          background: bg, border: `1px solid ${border}`, borderRadius: V2.radiusPill,
+          background: focused && !active ? V2.surfaceHover : bg,
+          border: `1px solid ${focused ? V2.brand : border}`, borderRadius: V2.radiusPill,
           color, padding: '5px 13px', fontSize: '11.5px', fontWeight: 500, cursor: 'pointer',
+          transition: 'background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease',
+          ...V2Focus.flat(focused, { glow: true }),
         }}
       >
         {label}
