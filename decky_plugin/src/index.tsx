@@ -3523,7 +3523,7 @@ function LibraryGroupsPage() {
   // the specific buttons it defines).
   return v2Page(
     <Focusable noFocusRing onButtonDown={onButtonDown}
-      actionDescriptionMap={{ [GamepadButton.SELECT]: 'Settings' }}
+      actionDescriptionMap={{ [GamepadButton.SELECT]: 'Settings', [GamepadButton.START]: 'Account' }}
       onOptionsActionDescription="Account"
       onSecondaryActionDescription={chrome.rdEnabled ? 'RetroDECK' : undefined}>
       <V2NavBar active={active} onTab={onTab} activeRef={navPillRef} chrome={chrome} onLaunchRd={launchRd} />
@@ -5644,11 +5644,20 @@ function StatsPage() {
   const [stats, setStats] = useState<any | null>(null);
   const [query, setQuery] = useState('');
   const [sort, setSort] = useState<'name' | 'size' | 'count'>('size');
+  // Without an explicit mount focus, gamepad focus never enters the page, so
+  // nothing (search, sort, the rows) can be reached and it can't scroll. Anchor
+  // focus on the back button once content is up; flow-children drives the rest.
+  const rootRef = useRef<any>(null);
   useEffect(() => {
     (async () => {
       try { setStats(await getPluginStats()); } catch { setStats({}); }
     })();
   }, []);
+  useEffect(() => {
+    if (stats == null) return;
+    const t = setTimeout(() => { try { rootRef.current?.focus(); } catch { } }, 80);
+    return () => clearTimeout(t);
+  }, [stats]);
 
   const s = stats || {};
   const cards = [
@@ -5675,7 +5684,7 @@ function StatsPage() {
   ];
 
   return v2Page(
-    <Focusable noFocusRing
+    <Focusable noFocusRing autoFocus ref={rootRef} flow-children="vertical"
       onCancelButton={() => Navigation.Navigate("/romm-sync-library")}
       style={{ maxWidth: '760px', margin: '0 auto', padding: '20px 20px 0' }}>
       {/* Header */}
@@ -5697,7 +5706,7 @@ function StatsPage() {
 
         {/* Platforms breakdown — flush, no card chrome (matches RomM). */}
         <section style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <Focusable noFocusRing flow-children="horizontal" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <div style={{ flex: '0 1 360px', minWidth: 0 }}>
               <V2SearchField value={query} onChange={setQuery} />
             </div>
@@ -5718,7 +5727,7 @@ function StatsPage() {
                 );
               })}
             </Focusable>
-          </div>
+          </Focusable>
 
           <div style={{ display: 'flex', flexDirection: 'column' }}>
             {filtered.length === 0 ? (
