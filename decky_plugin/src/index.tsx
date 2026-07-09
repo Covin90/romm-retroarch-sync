@@ -3509,6 +3509,7 @@ function LibraryGroupsPage() {
     else if (b === GamepadButton.BUMPER_RIGHT) cycle(1);
     else if (b === GamepadButton.SELECT) Navigation.Navigate("/romm-sync-settings");
     else if (b === GamepadButton.OPTIONS) openUserMenu();               // Y → account menu
+    else if (b === GamepadButton.START) openUserMenu();                 // ☰ Start → account menu
     else if (b === GamepadButton.SECONDARY && chrome.rdEnabled) launchRd(); // X → RetroDECK
   };
 
@@ -5589,11 +5590,22 @@ type PlatStat = { slug: string; fs_slug?: string; name: string; rom_count: numbe
 // (spans full width, doubles as the divider; hidden on the last row).
 function PlatformStatRow({ p, total, last }: { p: PlatStat; total: number; last: boolean }) {
   const pct = total > 0 ? (p.fs_size_bytes / total) * 100 : 0;
+  // Focusable (even though it has no action) so the controller has something to
+  // move onto down the list — otherwise there's no focus target below the top
+  // controls and the page can't be scrolled with the dpad/stick.
+  const [focused, setFocused] = useState(false);
   return (
-    <div style={{
-      display: 'grid', gridTemplateColumns: 'auto 1fr auto', columnGap: '14px', rowGap: '12px',
-      alignItems: 'center', paddingTop: last ? undefined : '14px',
-    }}>
+    <Focusable noFocusRing
+      onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+      onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
+      style={{
+        display: 'grid', gridTemplateColumns: 'auto 1fr auto', columnGap: '14px', rowGap: '12px',
+        alignItems: 'center', paddingTop: last ? '10px' : '14px', paddingBottom: '10px',
+        paddingLeft: '10px', paddingRight: '10px', borderRadius: V2.radiusMd,
+        border: '1px solid transparent',
+        transition: 'background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease',
+        ...V2Focus.row(focused),
+      }}>
       <div style={{
         flexShrink: 0, width: '32px', height: '32px',
         display: 'flex', alignItems: 'center', justifyContent: 'center', color: V2.fg2,
@@ -5624,7 +5636,7 @@ function PlatformStatRow({ p, total, last }: { p: PlatStat; total: number; last:
           <div style={{ height: '100%', width: `${pct}%`, background: V2.brand }} />
         </div>
       )}
-    </div>
+    </Focusable>
   );
 }
 
