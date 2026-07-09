@@ -1452,6 +1452,11 @@ function V2NavBar({ active, onTab, activeRef, chrome, onLaunchRd }:
   const [shown, setShown] = useState(false); // drives the first-load grow/fade-in
   const [focusedIdx, setFocusedIdx] = useState<number | null>(null);
   const activeIdx = tabs.findIndex((t) => t.id === active);
+  // Drop any lingering focus tint when the active tab changes: on an LB/RB
+  // switch the old panel's unmount can leave focusedIdx pointing at the
+  // previous tab (its blur never fires), which kept that tab looking
+  // highlighted. A genuinely focused pill re-tints via its own onFocus.
+  useEffect(() => { setFocusedIdx(null); }, [active]);
   useEffect(() => {
     const el = btnRefs.current[activeIdx];
     if (el) {
@@ -3485,7 +3490,12 @@ function LibraryGroupsPage() {
     playSteamSound('deck_ui_tab_transition_01');   // native LB/RB tab-switch sound
     _libLastTab = next;
     setActive(next);
-    requestAnimationFrame(() => { try { navPillRef.current?.focus(); } catch { } });
+    // Re-focus repeatedly (same cadence as useAutoFocus), not just once: when
+    // the outgoing panel unmounts, Steam re-acquires gamepad focus on its own
+    // schedule and a single rAF focus loses that race — focus (and the pill
+    // tint) then sticks on the previous tab. Retrying beats the re-acquire.
+    [0, 60, 160, 320].forEach((d) =>
+      setTimeout(() => { try { navPillRef.current?.focus(); } catch { } }, d));
   };
 
   // Top-bar chrome (account + RetroDECK) is fetched here — not inside V2NavBar —
