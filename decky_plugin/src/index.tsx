@@ -821,12 +821,10 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
         // Wide (continue-playing) cards are a fixed-height 16:9 screenshot with
         // natural width; portrait cards keep the cover's 3:4 footprint.
         ...(wide ? { height: '176px', aspectRatio: String(shotRatio) } : {}),
-        transform: focused ? 'scale(1.04)' : 'scale(1)',
-        transition: 'transform 0.18s ease',
+        transform: 'scale(1)',
+        transition: 'transform 0.18s ease, box-shadow 0.18s ease',
         borderRadius: V2.radiusArt,
-        boxShadow: focused
-          ? `0 8px 28px rgba(0,0,0,0.4), 0 0 0 2px ${V2.brand}, 0 0 18px rgba(139,116,232,0.6)`
-          : 'none',
+        ...V2Focus.tile(focused),
       }}>
         {wide ? (
           <>
@@ -1195,10 +1193,9 @@ function CollectionTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: 
     >
       <div style={{
         position: 'relative', borderRadius: V2.radiusLg,
-        transform: focused ? 'scale(1.05)' : 'scale(1)', transition: 'transform 0.18s ease',
-        boxShadow: focused
-          ? `0 8px 28px rgba(0,0,0,0.4), 0 0 0 2px ${V2.brand}, 0 0 18px rgba(139,116,232,0.55)`
-          : '0 2px 8px rgba(0,0,0,0.35)',
+        transform: 'scale(1)', transition: 'transform 0.18s ease, box-shadow 0.18s ease',
+        boxShadow: '0 2px 8px rgba(0,0,0,0.35)',
+        ...V2Focus.tile(focused),
       }}>
         <CollectionMosaic covers={group.covers || []} />
         {/* Download ring + glyph while syncing — mirrors the game-cover affordance
@@ -1328,17 +1325,16 @@ function PlatformTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: (g
         cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center',
         gap: '12px', padding: '24px 16px 18px',
         background: focused ? V2.surface : 'rgba(255,255,255,0.045)',
-        border: `1px solid ${focused ? V2.brand : V2.border}`, borderRadius: V2.radiusCard,
-        transition: 'background 0.15s, border-color 0.15s, transform 0.15s',
-        boxShadow: focused
-          ? `0 8px 28px rgba(0,0,0,0.35), 0 0 0 2px ${V2.brand}, 0 0 18px rgba(139,116,232,0.55)`
-          : 'none',
+        border: `1px solid ${V2.border}`, borderRadius: V2.radiusCard,
+        transform: 'scale(1)',
+        transition: 'background 0.15s, border-color 0.15s, transform 0.15s, box-shadow 0.15s',
+        ...V2Focus.tile(focused),
       }}
     >
       <div style={{
         width: '72px', height: '72px', display: 'grid', placeItems: 'center',
         color: focused ? V2.brandHover : V2.fg2, opacity: focused ? 1 : 0.9,
-        transform: focused ? 'scale(1.05)' : 'scale(1)', transition: 'transform 0.15s, color 0.15s',
+        transition: 'color 0.15s',
       }}>
         <PlatformIcon slug={group.slug} fsSlug={group.fs_slug} size={72} />
       </div>
@@ -2119,8 +2115,8 @@ function RelatedGameCard({ game }: { game: { id: number; name: string; cover_url
       <div style={{
         width: '100%', aspectRatio: '3 / 4', borderRadius: V2.radiusArt, overflow: 'hidden',
         background: V2.coverPlaceholder, display: 'flex', alignItems: 'center', justifyContent: 'center',
-        transform: focused ? 'scale(1.05)' : 'scale(1)', transition: 'transform 0.18s ease, box-shadow 0.18s ease',
-        boxShadow: focused ? `0 8px 24px rgba(0,0,0,0.4), 0 0 0 2px ${V2.brand}` : 'none',
+        transform: 'scale(1)', transition: 'transform 0.18s ease, box-shadow 0.18s ease',
+        ...V2Focus.tile(focused),
       }}>
         {cover
           ? <img src={cover} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
@@ -2795,16 +2791,51 @@ const V2_FOCUS_STYLE = `
 // for the card grid. Note: hosts must NOT clip these (no overflow:hidden on the
 // immediate wrapper) or the outset glow gets cut off.
 const _EASE = 'cubic-bezier(0.22,1,0.36,1)';
+
+// ── Focus system ────────────────────────────────────────────────────────────
+// Single source of truth for how a focused (gamepad or mouse) element reads.
+// Gamepad focus under gamescope doesn't reliably fire CSS :focus-within, so most
+// call sites drive focus with JS state (onFocus/onBlur) and spread one of these
+// fragments; the .romm-row / .romm-tile CSS below is sourced from the SAME
+// constants so mouse (:hover/:focus-within) and gamepad focus render identically.
+//
+//   V2Focus.tile(f)   — card/tile-shaped things that pop toward you (scale)
+//   V2Focus.row(f)    — full-width list rows (lift instead of scale)
+//   V2Focus.field(f)  — text inputs: quiet halo, no lift/ring
+//   V2Focus.flat(f)   — buttons/pills: crisp ring, no lift; opts.glow adds a
+//                       faint halo for filled/primary buttons
+//   V2Focus.segment(f)— selected-segment tint (nav tabs / channel switch); the
+//                       one intentional no-ring affordance
+const _RING = `0 0 0 2px ${V2.brand}`;
+const _GLOW = 'rgba(139,116,232,0.45)';
+const V2Focus = {
+  tile: (f: boolean) => f ? {
+    transform: 'scale(1.04)', borderColor: V2.brand,
+    boxShadow: `0 8px 28px rgba(0,0,0,0.4), ${_RING}, 0 0 18px rgba(139,116,232,0.55)`,
+  } : {},
+  row: (f: boolean) => f ? {
+    background: V2.surfaceHover, borderColor: V2.brand, transform: 'translateY(-1px)',
+    boxShadow: `0 8px 22px rgba(0,0,0,0.4), ${_RING}, 0 0 16px ${_GLOW}`,
+  } : {},
+  field: (f: boolean) => f ? {
+    borderColor: V2.brand, boxShadow: `0 0 0 3px rgba(139,116,232,0.22)`,
+  } : {},
+  flat: (f: boolean, opts?: { glow?: boolean }) => f ? {
+    boxShadow: opts?.glow ? `${_RING}, 0 0 14px rgba(139,116,232,0.35)` : _RING,
+  } : {},
+  segment: (f: boolean) => f ? { background: 'rgba(255,255,255,0.10)' } : {},
+};
+
 const V2_ROW_STYLE = `
   .romm-row { background: ${V2.surface}; border: 1px solid ${V2.border}; transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ${_EASE}, box-shadow 0.15s ease; }
   .romm-row:hover, .romm-row:focus-within {
     background: ${V2.surfaceHover}; border-color: ${V2.brand}; transform: translateY(-1px);
-    box-shadow: 0 0 0 2px ${V2.brand}, 0 0 16px rgba(139,116,232,0.45);
+    box-shadow: 0 8px 22px rgba(0,0,0,0.4), ${_RING}, 0 0 16px ${_GLOW};
   }
   .romm-tile { background: ${V2.surface}; border: 1px solid ${V2.border}; transition: background 0.15s ease, transform 0.15s ${_EASE}, box-shadow 0.15s ease, border-color 0.15s ease; }
   .romm-tile:hover, .romm-tile:focus-within {
     background: ${V2.surfaceHover}; transform: translateY(-2px); border-color: ${V2.brand};
-    box-shadow: 0 8px 22px rgba(0,0,0,0.4), 0 0 0 2px ${V2.brand}, 0 0 16px rgba(139,116,232,0.45);
+    box-shadow: 0 8px 22px rgba(0,0,0,0.4), ${_RING}, 0 0 16px ${_GLOW};
   }
 `;
 
@@ -2864,9 +2895,9 @@ const V2SearchField = forwardRef(function V2SearchField(
         display: 'flex', alignItems: 'stretch', height: '40px', overflow: 'hidden',
         borderRadius: V2.radiusMd,
         background: V2.bgElevated,
-        border: `1px solid ${focused ? V2.brand : V2.border}`,
-        boxShadow: focused ? `0 0 0 3px rgba(139,116,232,0.22)` : 'none',
+        border: `1px solid ${V2.border}`,
         transition: 'background 0.2s, border-color 0.2s, box-shadow 0.2s',
+        ...V2Focus.field(focused),
       }}>
         <div style={{
           display: 'flex', alignItems: 'center', padding: '0 11px', flexShrink: 0,
@@ -2922,9 +2953,9 @@ function V2TextField({ label, value, onChange, password, placeholder, icon, mono
         display: 'flex', alignItems: 'center', gap: '10px', height: '40px', padding: '0 12px',
         borderRadius: V2.radiusMd,
         background: focused ? V2.surfaceHover : 'rgba(255,255,255,0.045)',
-        border: `1px solid ${focused ? V2.brand : V2.border}`,
-        boxShadow: focused ? `0 0 0 3px rgba(139,116,232,0.22)` : 'none',
+        border: `1px solid ${V2.border}`,
         transition: 'background 0.2s, border-color 0.2s, box-shadow 0.2s',
+        ...V2Focus.field(focused),
       }}>
         {icon && <span style={{ flexShrink: 0, color: focused ? V2.brandHover : V2.fgMuted, display: 'inline-flex' }}>{icon}</span>}
         <div style={{ flex: '1 1 auto', minWidth: 0 }}
@@ -2967,9 +2998,9 @@ function PairCodeField({ label, value, onChange }:
         display: 'flex', alignItems: 'center', justifyContent: 'center', height: '40px', padding: '0 12px',
         borderRadius: V2.radiusMd,
         background: focused ? V2.surfaceHover : 'rgba(255,255,255,0.045)',
-        border: `1px solid ${focused ? V2.brand : V2.border}`,
-        boxShadow: focused ? `0 0 0 3px rgba(139,116,232,0.22)` : 'none',
+        border: `1px solid ${V2.border}`,
         transition: 'background 0.2s, border-color 0.2s, box-shadow 0.2s',
+        ...V2Focus.field(focused),
       }}>
         <div style={{ position: 'relative', display: 'inline-block', width: '100%' }}
           onFocusCapture={() => setFocused(true)}
@@ -4210,11 +4241,9 @@ function ScreenshotThumb({ paths, index }: { paths: string[]; index: number; }) 
       style={{
         cursor: 'pointer', position: 'relative', aspectRatio: '16 / 9',
         borderRadius: V2.radiusChip, overflow: 'hidden', background: V2.surface,
-        transform: focused ? 'scale(1.02)' : 'scale(1)',
+        transform: 'scale(1)',
         transition: 'transform 0.18s ease, box-shadow 0.18s ease',
-        boxShadow: focused
-          ? `0 8px 24px rgba(0,0,0,0.4), 0 0 0 2px ${V2.brand}`
-          : 'none',
+        ...V2Focus.tile(focused),
       }}>
       {uri ? (
         <img src={uri} loading="lazy" style={{
@@ -4643,8 +4672,8 @@ function SaveDataTab({ romId }: { romId: number }) {
           border: `1px solid ${active ? V2.fg : (focused ? V2.brand : V2.border)}`,
           borderRadius: V2.radiusPill, color: active ? V2.bg : V2.fg2,
           padding: '5px 14px', fontSize: '12px', fontWeight: 600, cursor: 'pointer',
-          boxShadow: focused ? `0 0 0 2px ${V2.brand}, 0 0 14px rgba(139,116,232,0.45)` : 'none',
           transition: 'background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease',
+          ...V2Focus.flat(focused && !active, { glow: true }),
         }}
       >
         {label}
@@ -4730,10 +4759,7 @@ function SaveDataTab({ romId }: { romId: number }) {
                         style={{
                           display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', textAlign: 'left',
                           padding: '10px 13px', cursor: 'pointer', borderRadius: V2.radiusMd,
-                          ...(focusedId === e.id ? {
-                            background: V2.surfaceHover, borderColor: V2.brand, transform: 'translateY(-1px)',
-                            boxShadow: `0 0 0 2px ${V2.brand}, 0 0 16px rgba(139,116,232,0.45)`,
-                          } : {}),
+                          ...V2Focus.row(focusedId === e.id),
                         }}
                       >
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', minWidth: 0 }}>
@@ -4788,10 +4814,7 @@ function SaveDataTab({ romId }: { romId: number }) {
                           display: 'flex', flexDirection: 'column', cursor: 'pointer', overflow: 'hidden',
                           borderRadius: V2.radiusLg,
                           '--sd-i': Math.min(idx, 14),
-                          ...(focusedId === e.id ? {
-                            background: V2.surfaceHover, borderColor: V2.brand, transform: 'translateY(-2px)',
-                            boxShadow: `0 8px 22px rgba(0,0,0,0.4), 0 0 0 2px ${V2.brand}, 0 0 16px rgba(139,116,232,0.45)`,
-                          } : {}),
+                          ...V2Focus.row(focusedId === e.id),
                         } as any}
                       >
                         <div className={loadingShot ? 'sd-shimmer' : ''} style={{ position: 'relative', aspectRatio: '16 / 9', backgroundColor: V2.coverPlaceholder, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
@@ -5928,8 +5951,8 @@ function UpdateActionBtn({ label, icon, onClick, disabled, primary, progress, bu
         borderRadius: V2.radiusMd, border: `1px solid ${filling ? V2.brand : V2.border}`,
         background: primary && !filling ? V2.brand : V2.surface,
         opacity: disabled && !filling ? 0.55 : 1, cursor: disabled ? 'default' : 'pointer',
-        boxShadow: focused && !disabled ? `0 0 0 2px ${V2.brand}` : 'none',
         transition: 'box-shadow 0.15s, background 0.2s, border-color 0.2s',
+        ...V2Focus.flat(focused && !disabled, { glow: primary || filling }),
       }}>
       {/* Keyframes for the busy shimmer — scoped, defined inline so this works
           regardless of which other components happen to be mounted. */}
@@ -6639,9 +6662,9 @@ function RomSwitch({ checked, onChange, disabled, label, description }:
         padding: '12px 14px', borderRadius: V2.radiusMd, cursor: disabled ? 'not-allowed' : 'pointer',
         background: focused && !disabled ? 'rgba(255,255,255,0.09)' : 'rgba(255,255,255,0.045)',
         border: `1px solid ${focused && !disabled ? V2.brand : V2.border}`,
-        boxShadow: focused && !disabled ? `0 0 0 2px ${V2.brand}` : 'none',
         opacity: disabled ? 0.55 : 1,
         transition: 'background 0.2s, border-color 0.2s, box-shadow 0.15s',
+        ...V2Focus.flat(focused && !disabled),
       }}
     >
       <div className={`r-switch${checked ? ' r-switch--on' : ''}${disabled ? ' r-switch--disabled' : ''}`} style={{ display: 'inline-flex', alignItems: 'center', background: 'transparent', border: 'none', padding: 0 }}>
