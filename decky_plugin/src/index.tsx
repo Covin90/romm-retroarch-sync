@@ -3509,7 +3509,7 @@ function LibraryGroupsPage() {
     const b = evt?.detail?.button;
     if (b === GamepadButton.BUMPER_LEFT) cycle(-1);
     else if (b === GamepadButton.BUMPER_RIGHT) cycle(1);
-    else if (b === GamepadButton.SELECT) { playSteamSound('deck_ui_navigation'); Navigation.Navigate("/romm-sync-settings"); }
+    else if (b === GamepadButton.SELECT) { playSteamSound('deck_ui_show_modal'); Navigation.Navigate("/romm-sync-settings"); }
     else if (b === GamepadButton.OPTIONS) openUserMenu();               // Y → account menu
     else if (b === GamepadButton.START) openUserMenu();                 // ☰ Start → account menu
     else if (b === GamepadButton.SECONDARY && chrome.rdEnabled) launchRd(); // X → RetroDECK
@@ -3936,7 +3936,7 @@ function LibraryGamesPage() {
     if (b === GamepadButton.BUMPER_LEFT) cycle(-1);
     else if (b === GamepadButton.BUMPER_RIGHT) cycle(1);
     else if (b === GamepadButton.OPTIONS) toggleSync(); // Y
-    else if (b === GamepadButton.SELECT) { playSteamSound('deck_ui_navigation'); Navigation.Navigate("/romm-sync-settings"); }
+    else if (b === GamepadButton.SELECT) { playSteamSound('deck_ui_show_modal'); Navigation.Navigate("/romm-sync-settings"); }
   };
   // Back → library index. Use onCancelButton (not a CANCEL case in onButtonDown):
   // it CONSUMES the B press so Steam's default router-back doesn't ALSO fire and
@@ -5215,7 +5215,7 @@ function GameDetailPage() {
     const b = evt?.detail?.button;
     if (b === GamepadButton.BUMPER_LEFT) cycleTab(-1);
     else if (b === GamepadButton.BUMPER_RIGHT) cycleTab(1);
-    else if (b === GamepadButton.SELECT) { playSteamSound('deck_ui_navigation'); Navigation.Navigate("/romm-sync-settings"); }
+    else if (b === GamepadButton.SELECT) { playSteamSound('deck_ui_show_modal'); Navigation.Navigate("/romm-sync-settings"); }
   };
   // Back returns to the page this game was opened from (collection/platform games
   // page or the library index). onCancelButton CONSUMES B so Steam's default
@@ -5590,25 +5590,17 @@ type PlatStat = { slug: string; fs_slug?: string; name: string; rom_count: numbe
 
 // PlatformsStatsSection row: icon · name + meta · size + pct · progress bar
 // (spans full width, doubles as the divider; hidden on the last row).
-function PlatformStatRow({ p, total, last }: { p: PlatStat; total: number; last: boolean }) {
+function PlatformStatRow({ p, total }: { p: PlatStat; total: number }) {
   const pct = total > 0 ? (p.fs_size_bytes / total) * 100 : 0;
-  // Focusable (even though it has no action) so the controller has something to
-  // move onto down the list — otherwise there's no focus target below the top
-  // controls and the page can't be scrolled with the dpad/stick.
-  const [focused, setFocused] = useState(false);
+  // Same system as the achievements list: a shared .romm-row (CSS drives the
+  // focus/hover highlight via :focus-within) plus an empty onActivate so the
+  // row registers as a gamepad nav target. No JS focus state or inline border —
+  // that's what left a stray border on blur.
   return (
-    <Focusable noFocusRing
-      onActivate={() => { }}
-      onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
-      onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
-      style={{
-        display: 'grid', gridTemplateColumns: 'auto 1fr auto', columnGap: '14px', rowGap: '12px',
-        alignItems: 'center', paddingTop: last ? '10px' : '14px', paddingBottom: '10px',
-        paddingLeft: '10px', paddingRight: '10px', borderRadius: V2.radiusMd,
-        border: '1px solid transparent',
-        transition: 'background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease',
-        ...V2Focus.row(focused),
-      }}>
+    <Focusable noFocusRing onActivate={() => { }} className="romm-row" style={{
+      display: 'grid', gridTemplateColumns: 'auto 1fr auto', columnGap: '14px', rowGap: '12px',
+      alignItems: 'center', padding: '12px 14px', borderRadius: V2.radiusMd,
+    }}>
       <div style={{
         flexShrink: 0, width: '32px', height: '32px',
         display: 'flex', alignItems: 'center', justifyContent: 'center', color: V2.fg2,
@@ -5634,11 +5626,9 @@ function PlatformStatRow({ p, total, last }: { p: PlatStat; total: number; last:
         </div>
         <div style={{ fontSize: '11px', color: V2.fgFaint }}>{pct.toFixed(1)}%</div>
       </div>
-      {!last && (
-        <div style={{ gridColumn: '1 / -1', height: '3px', background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
-          <div style={{ height: '100%', width: `${pct}%`, background: V2.brand }} />
-        </div>
-      )}
+      <div style={{ gridColumn: '1 / -1', height: '3px', borderRadius: '2px', background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
+        <div style={{ height: '100%', width: `${pct}%`, background: V2.brand }} />
+      </div>
     </Focusable>
   );
 }
@@ -5720,7 +5710,7 @@ function StatsPage() {
             </div>
           </Focusable>
 
-          <Focusable noFocusRing flow-children="vertical" style={{ display: 'flex', flexDirection: 'column' }}>
+          <Focusable noFocusRing flow-children="vertical" style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
             {filtered.length === 0 ? (
               <div style={{
                 display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
@@ -5728,8 +5718,8 @@ function StatsPage() {
               }}>
                 <FaBoxOpen size={22} /><span>{q ? 'No matching platforms' : 'No platforms'}</span>
               </div>
-            ) : filtered.map((p, i) => (
-              <PlatformStatRow key={p.slug} p={p} total={total} last={i === filtered.length - 1} />
+            ) : filtered.map((p) => (
+              <PlatformStatRow key={p.slug} p={p} total={total} />
             ))}
           </Focusable>
         </section>
