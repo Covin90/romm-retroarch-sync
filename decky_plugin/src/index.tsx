@@ -4530,6 +4530,10 @@ function SaveDataTab({ romId }: { romId: number }) {
   // shots[id]: 'loading' while fetching, '' once resolved with no screenshot,
   // otherwise the data URI. Absence means not yet requested.
   const [shots, setShots] = useState<Record<number, string>>({});
+  // Gamepad focus under gamescope doesn't reliably fire CSS :focus-within, so
+  // the selected save/state gets no highlight. Track the focused entry in JS
+  // and paint the brand highlight explicitly (same approach as the nav tabs).
+  const [focusedId, setFocusedId] = useState<number | null>(null);
   const EASE = 'cubic-bezier(0.22,1,0.36,1)';
 
   const load = async (silent = false) => {
@@ -4714,9 +4718,15 @@ function SaveDataTab({ romId }: { romId: number }) {
                         className="romm-row"
                         onActivate={() => openRestore(e)}
                         onClick={() => openRestore(e)}
+                        onFocus={() => setFocusedId(e.id)} onBlur={() => setFocusedId((c) => c === e.id ? null : c)}
+                        onMouseEnter={() => setFocusedId(e.id)} onMouseLeave={() => setFocusedId((c) => c === e.id ? null : c)}
                         style={{
                           display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', textAlign: 'left',
                           padding: '10px 13px', cursor: 'pointer', borderRadius: V2.radiusMd,
+                          ...(focusedId === e.id ? {
+                            background: V2.surfaceHover, borderColor: V2.brand, transform: 'translateY(-1px)',
+                            boxShadow: `0 0 0 2px ${V2.brand}, 0 0 16px rgba(139,116,232,0.45)`,
+                          } : {}),
                         }}
                       >
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', minWidth: 0 }}>
@@ -4765,10 +4775,16 @@ function SaveDataTab({ romId }: { romId: number }) {
                         className="romm-tile sd-fade"
                         onActivate={() => openRestore(e)}
                         onClick={() => openRestore(e)}
+                        onFocus={() => setFocusedId(e.id)} onBlur={() => setFocusedId((c) => c === e.id ? null : c)}
+                        onMouseEnter={() => setFocusedId(e.id)} onMouseLeave={() => setFocusedId((c) => c === e.id ? null : c)}
                         style={{
                           display: 'flex', flexDirection: 'column', cursor: 'pointer', overflow: 'hidden',
                           borderRadius: V2.radiusLg,
                           '--sd-i': Math.min(idx, 14),
+                          ...(focusedId === e.id ? {
+                            background: V2.surfaceHover, borderColor: V2.brand, transform: 'translateY(-2px)',
+                            boxShadow: `0 8px 22px rgba(0,0,0,0.4), 0 0 0 2px ${V2.brand}, 0 0 16px rgba(139,116,232,0.45)`,
+                          } : {}),
                         } as any}
                       >
                         <div className={loadingShot ? 'sd-shimmer' : ''} style={{ position: 'relative', aspectRatio: '16 / 9', backgroundColor: V2.coverPlaceholder, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
