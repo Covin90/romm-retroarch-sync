@@ -5996,6 +5996,7 @@ function UpdateActionBtn({ label, icon, onClick, disabled, primary, progress, bu
       onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
       style={{
         position: 'relative', overflow: 'hidden', width: '100%', height: '40px',
+        boxSizing: 'border-box',
         borderRadius: V2.radiusMd, border: `1px solid ${filling ? V2.brand : V2.border}`,
         background: primary && !filling ? V2.brand : V2.surface,
         opacity: disabled && !filling ? 0.55 : 1, cursor: disabled ? 'default' : 'pointer',
@@ -6707,6 +6708,9 @@ function RomSwitch({ checked, onChange, disabled, label, description }:
       onMouseLeave={() => setFocused(false)}
       style={{
         display: 'flex', alignItems: 'center', gap: '14px', width: '100%',
+        // border-box: this webview defaults to content-box, so 100% width plus
+        // the 14px side padding + 1px border overflowed the parent card.
+        boxSizing: 'border-box',
         padding: '12px 14px', borderRadius: V2.radiusMd, cursor: disabled ? 'not-allowed' : 'pointer',
         background: focused && !disabled ? 'rgba(255,255,255,0.09)' : 'rgba(255,255,255,0.045)',
         border: `1px solid ${focused && !disabled ? V2.brand : V2.border}`,
