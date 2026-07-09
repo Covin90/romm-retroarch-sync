@@ -4917,6 +4917,11 @@ async function launchGameSmart(romId: number, disc: string | null = null,
       const prep = await prepareSteamLaunch(romId, disc, siblingRomId);
       if (prep?.steam_host) {
         _rommLaunchPending = true;
+        // Mark the session active HERE, not only in the GameActionStart
+        // intercept: on some Steam builds RunGame-initiated launches don't
+        // fire GameActionStart, and then the app-lifetime end-watch would
+        // never navigate back to the Game Browser.
+        _rommSessionActive = true;
         try {
           // A non-Steam shortcut is launched by its 64-bit gameID, not the bare
           // 32-bit appid: gameID = (appid << 32) | 0x02000000 (shortcut tag).
@@ -4926,6 +4931,7 @@ async function launchGameSmart(romId: number, disc: string | null = null,
           return { success: true, message: 'Launching' };
         } catch (e) {
           _rommLaunchPending = false;
+          _rommSessionActive = false;
           console.error('[RomM] RunGame', e);
         }
       } else if (prep && prep.success === false && prep.steam_host === false
@@ -7247,17 +7253,26 @@ function registerRommSessionEndWatch() {
       try {
         if (data?.bRunning) return;            // only care about stop events
         if (!_rommSessionActive) return;       // not our emulator session
-        const aid = Number(data?.unAppID);
-        let mine = aid === _rommAppId;
-        if (!mine) { try { mine = _rommAppIds().includes(aid); } catch { /* ignore */ } }
-        if (!mine) { try { mine = _isRommName(_appName(aid)); } catch { /* ignore */ } }
+        // Like the launch intercept, the notification may carry the 64-bit
+        // gameID rather than the bare 32-bit appid — the appid is its high
+        // dword. Check both representations.
+        const raw = Number(data?.unAppID);
+        const hi = Math.floor(raw / 4294967296);
+        const candidates = hi > 0 ? [raw, hi] : [raw];
+        let mine = candidates.some((a) => a === _rommAppId);
+        if (!mine) { try { const ids = _rommAppIds(); mine = candidates.some((a) => ids.includes(a)); } catch { /* ignore */ } }
+        if (!mine) { try { mine = candidates.some((a) => _isRommName(_appName(a))); } catch { /* ignore */ } }
         if (!mine) return;
         _rommSessionActive = false;
         if (_rommNavTimer != null) { try { clearTimeout(_rommNavTimer); } catch { /* ignore */ } }
+        // Delay the navigate: right after a game exits, Steam performs its own
+        // navigation back to the Big Picture home/library. Navigating at t=0
+        // loses that race and the user still lands on home. Waiting lets
+        // Steam's transition finish first so our route is the one that sticks.
         _rommNavTimer = setTimeout(() => {
           _rommNavTimer = null;
           try { Navigation.Navigate("/romm-sync-library"); Navigation.CloseSideMenus(); } catch (e) { console.error('[RomM] nav', e); }
-        }, 0);
+        }, 900);
       } catch (e) { console.error('[RomM] sessionEnd', e); }
     });
   } catch (e) { console.error('[RomM] registerRommSessionEndWatch', e); }
