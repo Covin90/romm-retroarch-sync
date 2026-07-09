@@ -6239,34 +6239,6 @@ function SettingsPage() {
         </V2SettingsSection>
       )}
 
-      <V2SettingsSection title="Account">
-        {!confirmLogout ? (
-          <V2SettingsRow
-            icon={<FaUndo size={16} />}
-            title="Log out"
-            subtitle={serverInfo ? `Signed in as ${serverInfo}` : 'Sign out and return to setup.'}
-            onClick={() => setConfirmLogout(true)}
-            danger
-          />
-        ) : (
-          <div style={{
-            display: 'flex', flexDirection: 'column', gap: '12px', padding: '16px',
-            borderRadius: V2.radiusCard, background: 'rgba(255,80,80,0.08)',
-            border: `1px solid rgba(255,80,80,0.40)`,
-          }}>
-            <div style={{ fontSize: '13px', color: V2.fg2, lineHeight: 1.4 }}>
-              How do you want to log out? You'll return to the setup wizard either way.
-            </div>
-            <GameActionButton icon={<FaUndo size={14} />} label={loggingOut ? 'Logging out…' : 'Log out (keep downloads)'}
-              onClick={() => handleLogout(false)} disabled={loggingOut} />
-            <GameActionButton icon={<FaTrash size={14} />} label={loggingOut ? 'Logging out…' : 'Log out & delete all downloads'}
-              variant="danger" onClick={() => handleLogout(true)} disabled={loggingOut} />
-            <GameActionButton icon={<FaTimes size={14} />} label="Cancel"
-              onClick={() => setConfirmLogout(false)} disabled={loggingOut} />
-          </div>
-        )}
-      </V2SettingsSection>
-
       <V2SettingsSection title="Updates">
         <div style={{
           display: 'flex', flexDirection: 'column', gap: '12px', padding: '16px',
@@ -6348,6 +6320,34 @@ function SettingsPage() {
             description="Show a notification when an update is available for the selected channel."
           />
         </div>
+      </V2SettingsSection>
+
+      <V2SettingsSection title="Account">
+        {!confirmLogout ? (
+          <V2SettingsRow
+            icon={<FaUndo size={16} />}
+            title="Log out"
+            subtitle={serverInfo ? `Signed in as ${serverInfo}` : 'Sign out and return to setup.'}
+            onClick={() => setConfirmLogout(true)}
+            danger
+          />
+        ) : (
+          <div style={{
+            display: 'flex', flexDirection: 'column', gap: '12px', padding: '16px',
+            borderRadius: V2.radiusCard, background: 'rgba(255,80,80,0.08)',
+            border: `1px solid rgba(255,80,80,0.40)`,
+          }}>
+            <div style={{ fontSize: '13px', color: V2.fg2, lineHeight: 1.4 }}>
+              How do you want to log out? You'll return to the setup wizard either way.
+            </div>
+            <GameActionButton icon={<FaUndo size={14} />} label={loggingOut ? 'Logging out…' : 'Log out (keep downloads)'}
+              onClick={() => handleLogout(false)} disabled={loggingOut} />
+            <GameActionButton icon={<FaTrash size={14} />} label={loggingOut ? 'Logging out…' : 'Log out & delete all downloads'}
+              variant="danger" onClick={() => handleLogout(true)} disabled={loggingOut} />
+            <GameActionButton icon={<FaTimes size={14} />} label="Cancel"
+              onClick={() => setConfirmLogout(false)} disabled={loggingOut} />
+          </div>
+        )}
       </V2SettingsSection>
 
       <V2SettingsSection title="Debug">
