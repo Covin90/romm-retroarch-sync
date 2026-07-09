@@ -5719,7 +5719,7 @@ function StatsPage() {
             </div>
           </Focusable>
 
-          <div style={{ display: 'flex', flexDirection: 'column' }}>
+          <Focusable noFocusRing flow-children="vertical" style={{ display: 'flex', flexDirection: 'column' }}>
             {filtered.length === 0 ? (
               <div style={{
                 display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
@@ -5730,7 +5730,7 @@ function StatsPage() {
             ) : filtered.map((p, i) => (
               <PlatformStatRow key={p.slug} p={p} total={total} last={i === filtered.length - 1} />
             ))}
-          </div>
+          </Focusable>
         </section>
       </div>
     </Focusable>,
