@@ -5646,7 +5646,6 @@ function StatsPage() {
   const [stats, setStats] = useState<any | null>(null);
   const [query, setQuery] = useState('');
   const [sort, setSort] = useState<'name' | 'size' | 'count'>('size');
-  const [sortFocus, setSortFocus] = useState<'name' | 'size' | 'count' | null>(null);
   // Without an explicit mount focus, gamepad focus never enters the page, so
   // nothing (search, sort, the rows) can be reached and it can't scroll. Focus a
   // concrete child (the search field) — focusing the container itself doesn't
@@ -5714,28 +5713,10 @@ function StatsPage() {
             <div style={{ flex: '0 1 360px', minWidth: 0 }}>
               <V2SearchField ref={searchRef} value={query} onChange={setQuery} />
             </div>
-            {/* Segmented sort (RSliderBtnGroup) */}
-            <Focusable noFocusRing flow-children="horizontal" style={{
-              marginLeft: 'auto', display: 'flex', gap: '2px', padding: '4px',
-              background: V2.surface, border: `1px solid ${V2.borderStrong}`, borderRadius: V2.radiusPill,
-            }}>
-              {sortItems.map((it) => {
-                const on = sort === it.id;
-                const sf = sortFocus === it.id;
-                return (
-                  <Focusable noFocusRing key={it.id} onActivate={() => setSort(it.id)} onClick={() => setSort(it.id)}
-                    onFocus={() => setSortFocus(it.id)} onBlur={() => setSortFocus((c) => c === it.id ? null : c)}
-                    onMouseEnter={() => setSortFocus(it.id)} onMouseLeave={() => setSortFocus((c) => c === it.id ? null : c)}
-                    style={{
-                      padding: '6px 14px', borderRadius: V2.radiusPill, fontSize: '12.5px', cursor: 'pointer',
-                      fontWeight: on ? 600 : 500, color: on ? V2.bg : V2.fg2,
-                      background: on ? V2.fg : (sf ? 'rgba(255,255,255,0.10)' : 'transparent'),
-                      boxShadow: sf && !on ? `0 0 0 2px ${V2.brand}` : 'none',
-                      transition: 'background 0.2s, color 0.2s, box-shadow 0.15s',
-                    }}>{it.label}</Focusable>
-                );
-              })}
-            </Focusable>
+            {/* Same segmented pill control as the update channel / setup switch. */}
+            <div style={{ marginLeft: 'auto' }}>
+              <V2Segment options={sortItems} value={sort} onChange={(v) => setSort(v as any)} />
+            </div>
           </Focusable>
 
           <div style={{ display: 'flex', flexDirection: 'column' }}>
