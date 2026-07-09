@@ -2298,31 +2298,55 @@ const _gpHistory = (): any => {
   try { return (Router as any)?.WindowStore?.GamepadUIMainWindowInstance?.m_history; }
   catch { return undefined; }
 };
-const _isPluginPath = (p: any) => typeof p === 'string' && p.startsWith('/romm-sync');
-// Back out of a plugin page: pop when the previous entry is one of ours (the
-// normal case — it's the page that pushed us here), else push the fallback
-// route (e.g. Settings opened from the QAM sits directly on a Steam page).
-function navBack(fallback: string) {
+// Timestamp of the last pop WE initiated. RouteGuard uses it to tell "the user
+// backed out of a plugin page" (expected — render normally) apart from "Steam's
+// own back walked into a plugin history entry" (unexpected — keep popping).
+let _expectedPopAt = 0;
+// Pop one history entry: react-router v5 history has goBack(), the newer
+// history lib has back(); Steam's native NavigateBack as a last resort.
+function _histBack(h: any): boolean {
   try {
-    const h = _gpHistory();
-    if (typeof h?.goBack === 'function'
-      && _isPluginPath(h?.entries?.[(h.index ?? 0) - 1]?.pathname)) { h.goBack(); return; }
+    if (typeof h?.goBack === 'function') { h.goBack(); return true; }
+    if (typeof h?.back === 'function') { h.back(); return true; }
   } catch { /* ignore */ }
-  try { Navigation.Navigate(fallback); } catch { /* ignore */ }
+  try { Navigation.NavigateBack(); return true; } catch { /* ignore */ }
+  return false;
 }
-// Leave the plugin UI from the library root: pop the whole consecutive run of
-// /romm-sync-* entries in one jump, landing on the Steam page the user came
-// from — so a further B press there is Steam's own, not a hop back into us.
+// Back out of a plugin page by genuinely POPPING the router history (pushing
+// the origin route instead is what polluted the history and made Steam's own
+// B walk back into the plugin). The entry below is the page that pushed us —
+// a plugin page or, for e.g. Settings opened from the QAM, the Steam page the
+// user was on; both are correct destinations.
+function navBack(fallback: string) {
+  _expectedPopAt = Date.now();
+  if (!_histBack(_gpHistory())) {
+    try { Navigation.Navigate(fallback); } catch { /* ignore */ }
+  }
+}
+// B at the library root: leave the plugin with an UNEXPECTED pop — if the
+// entry below is another plugin page (e.g. stale entries left by an earlier
+// visit or a pre-update build), its RouteGuard keeps the cascade going until
+// a real Steam page is on top.
 function navExitPlugin() {
-  try {
-    const h = _gpHistory();
-    if (Array.isArray(h?.entries) && typeof h.index === 'number' && typeof h.go === 'function') {
-      let n = 0;
-      for (let i = h.index; i >= 0 && _isPluginPath(h.entries[i]?.pathname); i--) n++;
-      if (n > 0 && h.index - n >= 0) { h.go(-n); return; }
-    }
-  } catch { /* ignore */ }
-  try { Navigation.Navigate("/library/home"); } catch { /* ignore */ }
+  _expectedPopAt = 0;
+  _histBack(_gpHistory());
+}
+// Wraps every plugin route. A plugin page entered via a history POP we did not
+// initiate means Steam's back navigation surfaced one of our history entries
+// (possibly stale, from before a plugin update) — immediately pop again, so B
+// cascades through plugin entries and always lands on a real Steam page. All
+// intentional entries into the plugin arrive via PUSH and render normally.
+function RouteGuard({ children }: { children: any }) {
+  useEffect(() => {
+    try {
+      const h = _gpHistory();
+      if (h?.action === 'POP') {
+        if (Date.now() - _expectedPopAt < 1500) _expectedPopAt = 0;
+        else _histBack(h);
+      }
+    } catch { /* ignore */ }
+  }, []);
+  return children;
 }
 
 // Play a Steam Deck UI sound (the same .wav files Big Picture / the Deck UI use
@@ -7348,14 +7372,17 @@ function registerRommSessionEndWatch() {
 }
 
 export default definePlugin(() => {
-  routerHook.addRoute("/romm-sync-setup", () => <SetupWizard />, { exact: true });
-  routerHook.addRoute("/romm-sync-settings", () => <SettingsPage />, { exact: true });
-  routerHook.addRoute("/romm-sync-stats", () => <StatsPage />, { exact: true });
-  routerHook.addRoute("/romm-sync-cores", () => <CoresPage />, { exact: true });
-  routerHook.addRoute("/romm-sync-config", () => <ConfigPage />, { exact: true });
-  routerHook.addRoute("/romm-sync-library", () => <LibraryGroupsPage />, { exact: true });
-  routerHook.addRoute("/romm-sync-library/:key", () => <LibraryGamesPage />, { exact: true });
-  routerHook.addRoute("/romm-sync-game/:romId", () => <GameDetailPage />, { exact: true });
+  // Every route is wrapped in RouteGuard: a page surfaced by a history POP the
+  // plugin didn't initiate (Steam's own back walking into one of our entries,
+  // fresh or stale) immediately pops again — see RouteGuard.
+  routerHook.addRoute("/romm-sync-setup", () => <RouteGuard><SetupWizard /></RouteGuard>, { exact: true });
+  routerHook.addRoute("/romm-sync-settings", () => <RouteGuard><SettingsPage /></RouteGuard>, { exact: true });
+  routerHook.addRoute("/romm-sync-stats", () => <RouteGuard><StatsPage /></RouteGuard>, { exact: true });
+  routerHook.addRoute("/romm-sync-cores", () => <RouteGuard><CoresPage /></RouteGuard>, { exact: true });
+  routerHook.addRoute("/romm-sync-config", () => <RouteGuard><ConfigPage /></RouteGuard>, { exact: true });
+  routerHook.addRoute("/romm-sync-library", () => <RouteGuard><LibraryGroupsPage /></RouteGuard>, { exact: true });
+  routerHook.addRoute("/romm-sync-library/:key", () => <RouteGuard><LibraryGamesPage /></RouteGuard>, { exact: true });
+  routerHook.addRoute("/romm-sync-game/:romId", () => <RouteGuard><GameDetailPage /></RouteGuard>, { exact: true });
 
   // Register the launch intercept IMMEDIATELY — independent of tile
   // reconciliation.  The intercept checks the appid/name at fire time, so it
