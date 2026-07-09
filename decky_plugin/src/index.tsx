@@ -6239,17 +6239,6 @@ function SettingsPage() {
         </V2SettingsSection>
       )}
 
-      <V2SettingsSection title="Debug">
-        <V2SettingsRow
-          icon={<FaBug size={16} />}
-          title="Enable debug logging"
-          subtitle="Write logs to ~/.config/romm-retroarch-sync/decky_debug.log"
-          onClick={loading ? undefined : () => handleLoggingToggle(!loggingEnabled)}
-          right={<V2Switch checked={loggingEnabled} />}
-          disabled={loading}
-        />
-      </V2SettingsSection>
-
       <V2SettingsSection title="Account">
         {!confirmLogout ? (
           <V2SettingsRow
@@ -6359,6 +6348,17 @@ function SettingsPage() {
             description="Show a notification when an update is available for the selected channel."
           />
         </div>
+      </V2SettingsSection>
+
+      <V2SettingsSection title="Debug">
+        <V2SettingsRow
+          icon={<FaBug size={16} />}
+          title="Enable debug logging"
+          subtitle="Write logs to ~/.config/romm-retroarch-sync/decky_debug.log"
+          onClick={loading ? undefined : () => handleLoggingToggle(!loggingEnabled)}
+          right={<V2Switch checked={loggingEnabled} />}
+          disabled={loading}
+        />
       </V2SettingsSection>
 
       <V2SettingsSection title="About">
