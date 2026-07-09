@@ -3509,7 +3509,7 @@ function LibraryGroupsPage() {
     const b = evt?.detail?.button;
     if (b === GamepadButton.BUMPER_LEFT) cycle(-1);
     else if (b === GamepadButton.BUMPER_RIGHT) cycle(1);
-    else if (b === GamepadButton.SELECT) Navigation.Navigate("/romm-sync-settings");
+    else if (b === GamepadButton.SELECT) { playSteamSound('deck_ui_navigation'); Navigation.Navigate("/romm-sync-settings"); }
     else if (b === GamepadButton.OPTIONS) openUserMenu();               // Y → account menu
     else if (b === GamepadButton.START) openUserMenu();                 // ☰ Start → account menu
     else if (b === GamepadButton.SECONDARY && chrome.rdEnabled) launchRd(); // X → RetroDECK
@@ -3936,7 +3936,7 @@ function LibraryGamesPage() {
     if (b === GamepadButton.BUMPER_LEFT) cycle(-1);
     else if (b === GamepadButton.BUMPER_RIGHT) cycle(1);
     else if (b === GamepadButton.OPTIONS) toggleSync(); // Y
-    else if (b === GamepadButton.SELECT) Navigation.Navigate("/romm-sync-settings");
+    else if (b === GamepadButton.SELECT) { playSteamSound('deck_ui_navigation'); Navigation.Navigate("/romm-sync-settings"); }
   };
   // Back → library index. Use onCancelButton (not a CANCEL case in onButtonDown):
   // it CONSUMES the B press so Steam's default router-back doesn't ALSO fire and
@@ -5215,7 +5215,7 @@ function GameDetailPage() {
     const b = evt?.detail?.button;
     if (b === GamepadButton.BUMPER_LEFT) cycleTab(-1);
     else if (b === GamepadButton.BUMPER_RIGHT) cycleTab(1);
-    else if (b === GamepadButton.SELECT) Navigation.Navigate("/romm-sync-settings");
+    else if (b === GamepadButton.SELECT) { playSteamSound('deck_ui_navigation'); Navigation.Navigate("/romm-sync-settings"); }
   };
   // Back returns to the page this game was opened from (collection/platform games
   // page or the library index). onCancelButton CONSUMES B so Steam's default
@@ -5598,6 +5598,7 @@ function PlatformStatRow({ p, total, last }: { p: PlatStat; total: number; last:
   const [focused, setFocused] = useState(false);
   return (
     <Focusable noFocusRing
+      onActivate={() => { }}
       onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
       onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
       style={{
