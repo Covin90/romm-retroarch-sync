@@ -4,6 +4,7 @@ import {
   PanelSectionRow,
   TextField,
   Navigation,
+  Router,
   staticClasses,
   DialogButton,
   Focusable,
@@ -2285,6 +2286,45 @@ let _libGameOrigin: string = "/romm-sync-library";
 // returns to that tab (platforms/collections) instead of resetting to 'home'.
 let _libLastTab: NavId = 'home';
 
+// ── History-aware back navigation ────────────────────────────────────────────
+// Navigation.Navigate always PUSHES a history entry. Backing out of our pages
+// by pushing the origin route filled the router history with /romm-sync-*
+// entries, so after leaving the plugin, B in Steam's OWN library popped that
+// polluted stack and dragged the user back into the plugin (endless loop).
+// The fix is to genuinely POP our entries. The Gamepad UI's react-router
+// history is undocumented but reachable; everything is feature-detected with
+// the old push as fallback.
+const _gpHistory = (): any => {
+  try { return (Router as any)?.WindowStore?.GamepadUIMainWindowInstance?.m_history; }
+  catch { return undefined; }
+};
+const _isPluginPath = (p: any) => typeof p === 'string' && p.startsWith('/romm-sync');
+// Back out of a plugin page: pop when the previous entry is one of ours (the
+// normal case — it's the page that pushed us here), else push the fallback
+// route (e.g. Settings opened from the QAM sits directly on a Steam page).
+function navBack(fallback: string) {
+  try {
+    const h = _gpHistory();
+    if (typeof h?.goBack === 'function'
+      && _isPluginPath(h?.entries?.[(h.index ?? 0) - 1]?.pathname)) { h.goBack(); return; }
+  } catch { /* ignore */ }
+  try { Navigation.Navigate(fallback); } catch { /* ignore */ }
+}
+// Leave the plugin UI from the library root: pop the whole consecutive run of
+// /romm-sync-* entries in one jump, landing on the Steam page the user came
+// from — so a further B press there is Steam's own, not a hop back into us.
+function navExitPlugin() {
+  try {
+    const h = _gpHistory();
+    if (Array.isArray(h?.entries) && typeof h.index === 'number' && typeof h.go === 'function') {
+      let n = 0;
+      for (let i = h.index; i >= 0 && _isPluginPath(h.entries[i]?.pathname); i--) n++;
+      if (n > 0 && h.index - n >= 0) { h.go(-n); return; }
+    }
+  } catch { /* ignore */ }
+  try { Navigation.Navigate("/library/home"); } catch { /* ignore */ }
+}
+
 // Play a Steam Deck UI sound (the same .wav files Big Picture / the Deck UI use
 // for its own navigation). Steam serves them from the SP window's loopback host,
 // so a plain Audio element reaches them. Everything is wrapped/swallowed: a
@@ -3537,7 +3577,7 @@ function LibraryGroupsPage() {
   // with our own routes — letting Steam's default back run here popped that
   // stack and bounced the user between home and the page they just left,
   // endlessly. Exiting to Steam's library breaks the loop.
-  const onExit = () => { try { Navigation.Navigate("/library/home"); } catch { /* ignore */ } };
+  const onExit = navExitPlugin;
 
   // Surface the page-level shortcuts in Steam's NATIVE bottom hint bar (not a
   // custom overlay). Settings goes through actionDescriptionMap because Select
@@ -3966,7 +4006,7 @@ function LibraryGamesPage() {
   // Back → library index. Use onCancelButton (not a CANCEL case in onButtonDown):
   // it CONSUMES the B press so Steam's default router-back doesn't ALSO fire and
   // pop us right back into this platform.
-  const onBack = () => Navigation.Navigate("/romm-sync-library");
+  const onBack = () => navBack("/romm-sync-library");
 
   const jumpTo = (g: LibGroup) => {
     const from = siblings.findIndex((s) => s.key === group?.key);
@@ -5260,7 +5300,7 @@ function GameDetailPage() {
   // Back returns to the page this game was opened from (collection/platform games
   // page or the library index). onCancelButton CONSUMES B so Steam's default
   // router-back doesn't also fire (which would land somewhere else entirely).
-  const onBack = () => Navigation.Navigate(_libGameOrigin);
+  const onBack = () => navBack(_libGameOrigin);
 
   return v2Page(
     <Focusable noFocusRing onButtonDown={onButtonDown} onCancelButton={onBack} style={{ padding: '20px 16px' }}>
@@ -5719,11 +5759,11 @@ function StatsPage() {
 
   return v2Page(
     <Focusable noFocusRing
-      onCancelButton={() => Navigation.Navigate("/romm-sync-library")}
+      onCancelButton={() => navBack("/romm-sync-library")}
       style={{ maxWidth: '760px', margin: '0 auto', padding: '20px 20px 80px' }}>
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '24px' }}>
-        <GameActionButton icon={<FaChevronLeft size={16} />} onClick={() => Navigation.Navigate("/romm-sync-library")} />
+        <GameActionButton icon={<FaChevronLeft size={16} />} onClick={() => navBack("/romm-sync-library")} />
         <div style={{ fontSize: '24px', fontWeight: 800, letterSpacing: '-0.01em' }}>Stats</div>
       </div>
 
@@ -5907,11 +5947,11 @@ function CoresPage() {
 
   return v2Page(
     <Focusable noFocusRing
-      onCancelButton={() => Navigation.Navigate("/romm-sync-library")}
+      onCancelButton={() => navBack("/romm-sync-library")}
       style={{ maxWidth: '760px', margin: '0 auto', padding: '20px 20px 0' }}>
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '24px' }}>
-        <GameActionButton icon={<FaChevronLeft size={16} />} onClick={() => Navigation.Navigate("/romm-sync-library")} />
+        <GameActionButton icon={<FaChevronLeft size={16} />} onClick={() => navBack("/romm-sync-library")} />
         <div style={{ fontSize: '24px', fontWeight: 800, letterSpacing: '-0.01em' }}>Emulator Cores</div>
       </div>
 
@@ -6339,11 +6379,11 @@ function SettingsPage() {
 
   return v2Page(
     <Focusable noFocusRing
-      onCancelButton={() => Navigation.Navigate("/romm-sync-library")}
+      onCancelButton={() => navBack("/romm-sync-library")}
       style={{ maxWidth: '760px', margin: '0 auto', padding: '20px 20px 0' }}>
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '24px' }}>
-        <GameActionButton icon={<FaChevronLeft size={16} />} onClick={() => Navigation.Navigate("/romm-sync-library")} />
+        <GameActionButton icon={<FaChevronLeft size={16} />} onClick={() => navBack("/romm-sync-library")} />
         <div style={{ fontSize: '24px', fontWeight: 800, letterSpacing: '-0.01em' }}>Settings</div>
       </div>
 
