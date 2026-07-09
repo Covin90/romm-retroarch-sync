@@ -2864,7 +2864,7 @@ function v2Page(children: any, bgUri: string | null = null) {
     <div className="romm-ui" style={{
       fontFamily: V2.font, color: V2.fg, background: V2.bg,
       position: 'relative', overflowY: 'auto', height: 'calc(100vh - 40px)',
-      marginTop: '40px', scrollPaddingTop: '120px',
+      marginTop: '40px', scrollPaddingTop: '120px', scrollPaddingBottom: '80px',
     }}>
       <style>{V2_FOCUS_STYLE}{V2_ROW_STYLE}</style>
       <V2Bg uri={bgUri} />
@@ -5680,7 +5680,7 @@ function StatsPage() {
   return v2Page(
     <Focusable noFocusRing
       onCancelButton={() => Navigation.Navigate("/romm-sync-library")}
-      style={{ maxWidth: '760px', margin: '0 auto', padding: '20px 20px 0' }}>
+      style={{ maxWidth: '760px', margin: '0 auto', padding: '20px 20px 80px' }}>
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '24px' }}>
         <GameActionButton icon={<FaChevronLeft size={16} />} onClick={() => Navigation.Navigate("/romm-sync-library")} />
