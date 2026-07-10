@@ -7202,7 +7202,15 @@ function touchRommRecency() {
     const aid = _rommAppId ?? _rommAppIds()[0];
     if (aid == null) return;
     const ov = (window as any).appStore?.GetAppOverviewByAppID?.(aid);
-    if (ov) ov.rt_last_time_played = Math.floor(Date.now() / 1000);
+    if (!ov) return;
+    ov.rt_last_time_played = Math.floor(Date.now() / 1000);
+    // The recents carousel can exclude apps with zero recorded playtime, and a
+    // plain field write doesn't always notify the (MobX-backed) collections.
+    // Give the tile a minute of playtime and poke the store's change hooks so
+    // the home row actually re-sorts without needing a real session first.
+    if (!Number(ov.minutes_playtime_forever)) ov.minutes_playtime_forever = "1";
+    try { ov.OnAppOverviewChanged?.(); } catch { /* ignore */ }
+    try { (window as any).appStore?.m_mapApps?.set?.(Number(aid), ov); } catch { /* ignore */ }
   } catch { /* ignore */ }
 }
 
@@ -7297,6 +7305,10 @@ async function reconcileRommTile(): Promise<number | null> {
   _rommAppId = liveId;
   registerRommLaunchIntercept();
   ensureRommArtwork(liveId);
+  // Keep the tile visible in the home row's Recent Games across restarts: the
+  // recency stamp is in-memory, so re-assert it whenever we reconcile (plugin
+  // load included) rather than only when the browser opens.
+  touchRommRecency();
   return liveId;
 }
 
