@@ -3551,6 +3551,20 @@ function LibraryGroupsPage() {
   // re-anchor focus on the persistent active nav pill — otherwise Steam eats the
   // next bumper press to re-acquire focus (the "press twice to switch" bug).
   const navPillRef = useRef<any>(null);
+
+  // Returning from an emulator session: the session-end watch navigated here,
+  // but after a game exits Steam re-acquires gamepad focus onto its own chrome
+  // on a slower schedule than a plain tab switch — the page renders with no
+  // visible selection and the dpad does nothing predictable. Pull focus onto
+  // the persistent nav pill with a longer retry tail than useAutoFocus.
+  useEffect(() => {
+    if (!_rommReturnFocusPending) return;
+    _rommReturnFocusPending = false;
+    const timers = [0, 100, 250, 500, 900, 1500].map((d) =>
+      setTimeout(() => { try { navPillRef.current?.focus(); } catch { } }, d));
+    return () => timers.forEach(clearTimeout);
+  }, []);
+
   const cycle = (dir: -1 | 1) => {
     const i = NAV_ORDER.indexOf(active);
     const next = NAV_ORDER[(i + dir + NAV_ORDER.length) % NAV_ORDER.length];
@@ -7146,6 +7160,11 @@ let _rommLaunchPending = false;
 // Steam-tracked child). When that session ends we want to return to the Game
 // Browser, not leave the user dropped on the Steam/Big-Picture library.
 let _rommSessionActive = false;
+// Set when the session-end watch navigates back to the Game Browser: the route
+// remounts without gamepad focus (Steam parks it on its own chrome after a game
+// exits), leaving the user unable to see or move a selection. The library root
+// consumes this on mount and pulls focus onto the nav pill.
+let _rommReturnFocusPending = false;
 let _rommLifetimeReg: { unregister: () => void } | null = null;
 // Guards the startup setup-wizard auto-open so it fires at most once per session.
 let _setupAutoOpened = false;
@@ -7470,6 +7489,7 @@ function registerRommSessionEndWatch() {
         // Steam's transition finish first so our route is the one that sticks.
         _rommNavTimer = setTimeout(() => {
           _rommNavTimer = null;
+          _rommReturnFocusPending = true;
           try { Navigation.Navigate("/romm-sync-library"); Navigation.CloseSideMenus(); } catch (e) { console.error('[RomM] nav', e); }
         }, 900);
       } catch (e) { console.error('[RomM] sessionEnd', e); }
