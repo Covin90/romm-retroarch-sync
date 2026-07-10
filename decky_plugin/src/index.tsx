@@ -575,10 +575,26 @@ function ProgressRing({ pct, size = 40, stroke = 3, glow = false, children }:
 // navigation node inside Steam's FocusNavController trees and take focus
 // through the controller itself (BTakeFocus). All internals are undocumented,
 // hence the fully defensive access — worst case this degrades to focus().
+// Taking focus through the nav controller (BTakeFocus) sets Steam's gamepad
+// focus + DOM activeElement, but does NOT emit a bubbling focus event — so
+// React's onFocus never fires and our tiles' focused STATE stays false. The
+// tile then highlights (CSS :focus-within) yet its focus-gated overlays (play
+// button, download scrim, etc.) stay hidden. Fire a synthetic focusin on the
+// newly-focused element so React updates its state, restoring the overlays.
+function _fireReactFocus(doc: any): void {
+  try {
+    const ae = doc?.activeElement;
+    if (!ae) return;
+    const FE = doc.defaultView?.FocusEvent || (window as any).FocusEvent;
+    ae.dispatchEvent(new FE('focusin', { bubbles: true }));
+  } catch { /* ignore */ }
+}
+
 function _forceGamepadFocus(el: any): void {
   try { el?.focus?.(); } catch { /* ignore */ }
   try {
     const fnc: any = (window as any).FocusNavController;
+    const doc: any = fnc?.m_ActiveContext?.m_rootWindow?.document;
     const ctxs: any[] = fnc?.m_rgAllContexts ?? (fnc?.m_ActiveContext ? [fnc.m_ActiveContext] : []);
     let pageTree: any = null;
     for (const ctx of ctxs) {
@@ -593,7 +609,7 @@ function _forceGamepadFocus(el: any): void {
           // Match by identity OR containment: the ref may point at a wrapper
           // whose actual focus-registered element is a descendant.
           if (nEl && el && (nEl === el || (typeof el.contains === 'function' && el.contains(nEl)))) {
-            try { if (n.BTakeFocus?.(3)) { console.info('[RomM] forceGamepadFocus: node focused'); return; } } catch { /* ignore */ }
+            try { if (n.BTakeFocus?.(3)) { _fireReactFocus(doc); return; } } catch { /* ignore */ }
           }
           const kids = n?.m_rgChildren;
           if (Array.isArray(kids)) for (const k of kids) stack.push(k);
@@ -603,8 +619,8 @@ function _forceGamepadFocus(el: any): void {
     // No node matched the target element — put focus SOMEWHERE visible on the
     // gamepad-UI page tree so the user isn't stranded with an invisible cursor.
     try {
-      const ok = pageTree?.m_Root?.BFocusFirstChild?.(3);
-      console.info('[RomM] forceGamepadFocus: fallback BFocusFirstChild =', ok);
+      pageTree?.m_Root?.BFocusFirstChild?.(3);
+      _fireReactFocus(doc);
     } catch { /* ignore */ }
   } catch (e) { console.error('[RomM] forceGamepadFocus', e); }
 }
@@ -846,7 +862,7 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
   };
 
   return (
-    <Focusable noFocusRing
+    <Focusable noFocusRing className="romm-gt-wrap"
       ref={focusRef}
       onActivate={() => {
         // A press that started on an overlay sub-button (Details / Delete) must
@@ -872,7 +888,7 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
       onMouseLeave={() => setFocused(false)}
       style={{ cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: '7px' }}
     >
-      <div style={{
+      <div className="romm-gt-cover" style={{
         position: 'relative', overflow: 'hidden',
         // Wide (continue-playing) cards are a fixed-height 16:9 screenshot with
         // natural width; portrait cards keep the cover's 3:4 footprint.
@@ -1235,7 +1251,7 @@ function CollectionTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: 
       : group.kind === 'favorite' ? { label: '★', bg: '#ff4f6b' }
         : null;
   return (
-    <Focusable noFocusRing
+    <Focusable noFocusRing className="romm-ct-wrap"
       ref={focusRef}
       onClick={() => onOpen(group)}
       onActivate={onActivate}
@@ -1247,7 +1263,7 @@ function CollectionTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: 
       onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
       style={{ cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: '8px' }}
     >
-      <div style={{
+      <div className="romm-ct-cover" style={{
         position: 'relative', borderRadius: V2.radiusLg,
         transform: 'scale(1)', transition: 'transform 0.18s ease, box-shadow 0.18s ease',
         boxShadow: '0 2px 8px rgba(0,0,0,0.35)',
@@ -1372,7 +1388,7 @@ function PlatformIcon({ slug, fsSlug, size }: { slug?: string | null; fsSlug?: s
 function PlatformTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: (g: LibGroup) => void; focusRef?: React.MutableRefObject<any> }) {
   const [focused, setFocused] = useState(false);
   return (
-    <Focusable noFocusRing
+    <Focusable noFocusRing className="romm-ptile-wrap"
       ref={focusRef}
       onActivate={() => onOpen(group)} onClick={() => onOpen(group)}
       onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
@@ -1381,8 +1397,11 @@ function PlatformTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: (g
     >
       {/* Visuals live on this inner wrapper — NOT the Focusable itself — so the
           gamepad-focusable box carries no ring of its own (Steam otherwise draws
-          a faint default outline over our brand ring). Mirrors GameTile. */}
-      <div style={{
+          a faint default outline over our brand ring). Mirrors GameTile. The
+          focused look is ALSO expressed as CSS :focus-within (romm-ptile-*
+          classes, see V2_ROW_STYLE) so a forced gamepad focus that skips React's
+          onFocus still highlights. */}
+      <div className="romm-ptile-v" style={{
         display: 'flex', flexDirection: 'column', alignItems: 'center',
         gap: '12px', padding: '24px 16px 18px',
         background: focused ? V2.surface : 'rgba(255,255,255,0.045)',
@@ -1391,14 +1410,14 @@ function PlatformTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: (g
         transition: 'background 0.15s, border-color 0.15s, transform 0.15s, box-shadow 0.15s',
         ...V2Focus.tile(focused),
       }}>
-        <div style={{
+        <div className="romm-ptile-ic" style={{
           width: '72px', height: '72px', display: 'grid', placeItems: 'center',
           color: focused ? V2.brandHover : V2.fg2, opacity: focused ? 1 : 0.9,
           transition: 'color 0.15s',
         }}>
           <PlatformIcon slug={group.slug} fsSlug={group.fs_slug} size={72} />
         </div>
-        <div style={{ fontSize: '12px', fontWeight: 600, textAlign: 'center', lineHeight: 1.35, color: focused ? V2.fg : V2.fg2 }}>
+        <div className="romm-ptile-lb" style={{ fontSize: '12px', fontWeight: 600, textAlign: 'center', lineHeight: 1.35, color: focused ? V2.fg : V2.fg2 }}>
           {group.label}
         </div>
         <div style={{ fontSize: '11px', color: V2.fgMuted }}>
@@ -2986,6 +3005,25 @@ const V2_ROW_STYLE = `
     background: ${V2.surfaceHover}; transform: translateY(-2px); border-color: ${V2.brand};
     box-shadow: 0 8px 22px rgba(0,0,0,0.4), ${_RING}, 0 0 16px ${_GLOW};
   }
+  /* Gamepad focus can be FORCED onto a tile (returning from an emulator
+     session) without firing React's onFocus, so the highlight must also be
+     reachable via CSS :focus-within — which matches whenever Steam marks the
+     tile focused, regardless of the React state. These !important rules win
+     over the inline base styles when the tile holds gamepad focus. */
+  .romm-ptile-wrap:hover .romm-ptile-v, .romm-ptile-wrap:focus-within .romm-ptile-v {
+    background: ${V2.surface} !important; border-color: ${V2.brand} !important; transform: scale(1.04) !important;
+    box-shadow: 0 8px 28px rgba(0,0,0,0.4), ${_RING}, 0 0 18px rgba(139,116,232,0.55) !important;
+  }
+  .romm-ptile-wrap:hover .romm-ptile-ic, .romm-ptile-wrap:focus-within .romm-ptile-ic { color: ${V2.brandHover} !important; opacity: 1 !important; }
+  .romm-ptile-wrap:hover .romm-ptile-lb, .romm-ptile-wrap:focus-within .romm-ptile-lb { color: ${V2.fg} !important; }
+  .romm-gt-wrap:hover .romm-gt-cover, .romm-gt-wrap:focus-within .romm-gt-cover {
+    transform: scale(1.04) !important;
+    box-shadow: 0 8px 28px rgba(0,0,0,0.4), ${_RING}, 0 0 18px rgba(139,116,232,0.55) !important;
+  }
+  .romm-ct-wrap:hover .romm-ct-cover, .romm-ct-wrap:focus-within .romm-ct-cover {
+    transform: scale(1.04) !important;
+    box-shadow: 0 8px 28px rgba(0,0,0,0.4), ${_RING}, 0 0 18px rgba(139,116,232,0.55) !important;
+  }
 `;
 
 function v2Page(children: any, bgUri: string | null = null) {
@@ -3238,7 +3276,17 @@ function SearchPanel({ onOpen, onBg }: { onOpen: (g: LibGame) => void; onBg: (ur
   // Land gamepad focus on the search field when the tab opens (same retry
   // cadence as the group grids) — entering Search with nothing highlighted
   // parked focus on the page-root container, which showed a stray outline.
-  const searchFieldRef = useAutoFocus(true, undefined);
+  // NOTE: deliberately a LOCAL effect, not useAutoFocus — useAutoFocus writes
+  // the shared _autoFocusFirstRef that the post-game return-focus effect reads
+  // as its target. Letting the search field register there meant returning from
+  // a game launched off the Search tab focused the empty field instead of a
+  // game (the "broke focus coming back from a game" regression).
+  const searchFieldRef = useRef<any>(null);
+  useEffect(() => {
+    const timers = [0, 60, 160, 320].map((d) =>
+      setTimeout(() => { try { searchFieldRef.current?.focus(); } catch { } }, d));
+    return () => timers.forEach(clearTimeout);
+  }, []);
 
   return (
     <div style={{ padding: '0 16px' }}>
@@ -3626,24 +3674,32 @@ function LibraryGroupsPage() {
     if (!_rommReturnFocusPending) return;
     _rommReturnFocusPending = false;
     // After a game exits Steam often parks gamepad focus on our ROOT Focusable
-    // (noFocusRing — buttons respond but nothing is highlighted), so "some
-    // element has .gpfocus" is not success. Poll until the target ITSELF holds
-    // focus, re-asserting each tick; back off the moment focus moves to any
-    // different element than last tick (the user is navigating), or after 8s.
-    // Target the active panel's first item (same element a fresh tab switch
-    // highlights — usually the first game); the nav pill is only a fallback
-    // while the panel is still loading.
+    // (noFocusRing — buttons respond but nothing is highlighted) or on its own
+    // chrome, so "some element has .gpfocus" is not success. Poll and re-assert
+    // focus onto the target, but ONLY while focus is somewhere unhelpful — the
+    // nav pill fallback or outside our UI (Steam chrome). The instant focus is
+    // on any real element inside our content (the target, OR a sibling tile the
+    // user has already navigated to), hand off and stop: re-forcing then would
+    // yank the user back to the first tile the moment they press a direction
+    // (the "press right → snaps back to the first game" bug). Give up after 8s.
     const started = Date.now();
-    let lastSeen: Element | null = null;
     const iv = setInterval(() => {
       try {
         if (Date.now() - started > 8000) { clearInterval(iv); return; }
         const first = _autoFocusFirstRef?.current;
         const target = (first && first.isConnected) ? first : navPillRef.current;
         const cur = _gpFocusEl();
-        if (target && cur && (cur === target || (typeof target.contains === 'function' && target.contains(cur)))) { clearInterval(iv); return; }
-        if (cur && lastSeen && cur !== lastSeen && cur !== navPillRef.current) { clearInterval(iv); return; }
-        lastSeen = cur;
+        // Done: focus reached a REAL target tile (not the nav-pill fallback,
+        // which is invisible — keep polling for the real first item then).
+        const onRealTarget = target && target !== navPillRef.current;
+        if (onRealTarget && cur && (cur === target || (typeof target.contains === 'function' && target.contains(cur)))) { clearInterval(iv); return; }
+        // Hand off: focus is on a real element inside our content that isn't the
+        // nav-pill fallback — the user is now driving, don't fight them.
+        const inOurUI = cur && typeof (cur as any).closest === 'function' && (cur as any).closest('.romm-ui');
+        const onNavPill = cur && navPillRef.current && (cur === navPillRef.current || (typeof navPillRef.current.contains === 'function' && navPillRef.current.contains(cur)));
+        if (inOurUI && !onNavPill) { clearInterval(iv); return; }
+        // Otherwise focus is nowhere useful (null / Steam chrome / nav pill) —
+        // keep pulling it to the target.
         if (target) _forceGamepadFocus(target);
       } catch { /* ignore */ }
     }, 250);
@@ -3656,12 +3712,16 @@ function LibraryGroupsPage() {
     playSteamSound('deck_ui_tab_transition_01');   // native LB/RB tab-switch sound
     _libLastTab = next;
     setActive(next);
-    // Re-focus repeatedly (same cadence as useAutoFocus), not just once: when
-    // the outgoing panel unmounts, Steam re-acquires gamepad focus on its own
-    // schedule and a single rAF focus loses that race — focus (and the pill
-    // tint) then sticks on the previous tab. Retrying beats the re-acquire.
-    [0, 60, 160, 320].forEach((d) =>
-      setTimeout(() => { try { navPillRef.current?.focus(); } catch { } }, d));
+    // Bridge the remount gap with a SINGLE pill focus, then hand off to the new
+    // panel's useAutoFocus (which retries onto its first item). This timer fires
+    // before the panel mounts, so its useAutoFocus runs afterwards and wins the
+    // final resting place — the first tile/field, matching a fresh tab switch.
+    // Don't keep re-focusing the pill on a retry ladder: that raced useAutoFocus
+    // and yanked focus back to the pill after the panel had already moved it,
+    // leaving BOTH the pill and the first item highlighted (the double-focus).
+    // The lone pill focus only lingers while the destination is still loading
+    // (no item to focus yet); once it loads, useAutoFocus takes over.
+    setTimeout(() => { try { navPillRef.current?.focus(); } catch { } }, 0);
   };
 
   // Top-bar chrome (account + RetroDECK) is fetched here — not inside V2NavBar —
