@@ -3560,9 +3560,20 @@ function LibraryGroupsPage() {
   useEffect(() => {
     if (!_rommReturnFocusPending) return;
     _rommReturnFocusPending = false;
-    const timers = [0, 100, 250, 500, 900, 1500].map((d) =>
-      setTimeout(() => { try { navPillRef.current?.focus(); } catch { } }, d));
-    return () => timers.forEach(clearTimeout);
+    // A fixed retry burst isn't enough here: Steam can strip gamepad focus
+    // again seconds after the running-app screen tears down. Poll until some
+    // element actually holds gamepad focus (Steam marks it with .gpfocus);
+    // while nothing does, keep re-asserting focus on the nav pill. Give up
+    // after 8s so a user already navigating isn't fought over.
+    const started = Date.now();
+    const iv = setInterval(() => {
+      try {
+        if (Date.now() - started > 8000) { clearInterval(iv); return; }
+        if (document.querySelector('.gpfocus')) { clearInterval(iv); return; }
+        navPillRef.current?.focus();
+      } catch { /* ignore */ }
+    }, 250);
+    return () => clearInterval(iv);
   }, []);
 
   const cycle = (dir: -1 | 1) => {
