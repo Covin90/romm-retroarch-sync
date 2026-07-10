@@ -7236,8 +7236,17 @@ async function cleanupRommShortcuts(): Promise<number | null> {
     const apps = _sc()?.Apps;
     const mine = _rommAppIds();
     if (mine.length === 0) return null;
-    const keep = mine[0];
-    for (const aid of mine.slice(1)) {
+    // Keep the tile the user has actually used (play history / recent-games
+    // placement lives on the appid), not whichever duplicate enumerates first.
+    const score = (aid: number): number => {
+      try {
+        const ov = (window as any).appStore?.GetAppOverviewByAppID?.(aid);
+        return (Number(ov?.rt_last_time_played) || 0) * 1e6
+          + (Number(ov?.minutes_playtime_forever) || 0);
+      } catch { return 0; }
+    };
+    const keep = mine.reduce((a, b) => (score(b) > score(a) ? b : a));
+    for (const aid of mine.filter((x) => x !== keep)) {
       try { await apps?.RemoveShortcut?.(aid); } catch (e) { console.error('[RomM] dedup remove', e); }
     }
     return keep;
