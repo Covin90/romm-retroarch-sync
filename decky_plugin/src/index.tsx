@@ -3238,7 +3238,17 @@ function SearchPanel({ onOpen, onBg }: { onOpen: (g: LibGame) => void; onBg: (ur
   // Land gamepad focus on the search field when the tab opens (same retry
   // cadence as the group grids) — entering Search with nothing highlighted
   // parked focus on the page-root container, which showed a stray outline.
-  const searchFieldRef = useAutoFocus(true, undefined);
+  // NOTE: deliberately a LOCAL effect, not useAutoFocus — useAutoFocus writes
+  // the shared _autoFocusFirstRef that the post-game return-focus effect reads
+  // as its target. Letting the search field register there meant returning from
+  // a game launched off the Search tab focused the empty field instead of a
+  // game (the "broke focus coming back from a game" regression).
+  const searchFieldRef = useRef<any>(null);
+  useEffect(() => {
+    const timers = [0, 60, 160, 320].map((d) =>
+      setTimeout(() => { try { searchFieldRef.current?.focus(); } catch { } }, d));
+    return () => timers.forEach(clearTimeout);
+  }, []);
 
   return (
     <div style={{ padding: '0 16px' }}>
