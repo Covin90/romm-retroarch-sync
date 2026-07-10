@@ -846,7 +846,7 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
   };
 
   return (
-    <Focusable noFocusRing
+    <Focusable noFocusRing className="romm-gt-wrap"
       ref={focusRef}
       onActivate={() => {
         // A press that started on an overlay sub-button (Details / Delete) must
@@ -872,7 +872,7 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
       onMouseLeave={() => setFocused(false)}
       style={{ cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: '7px' }}
     >
-      <div style={{
+      <div className="romm-gt-cover" style={{
         position: 'relative', overflow: 'hidden',
         // Wide (continue-playing) cards are a fixed-height 16:9 screenshot with
         // natural width; portrait cards keep the cover's 3:4 footprint.
@@ -1235,7 +1235,7 @@ function CollectionTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: 
       : group.kind === 'favorite' ? { label: '★', bg: '#ff4f6b' }
         : null;
   return (
-    <Focusable noFocusRing
+    <Focusable noFocusRing className="romm-ct-wrap"
       ref={focusRef}
       onClick={() => onOpen(group)}
       onActivate={onActivate}
@@ -1247,7 +1247,7 @@ function CollectionTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: 
       onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
       style={{ cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: '8px' }}
     >
-      <div style={{
+      <div className="romm-ct-cover" style={{
         position: 'relative', borderRadius: V2.radiusLg,
         transform: 'scale(1)', transition: 'transform 0.18s ease, box-shadow 0.18s ease',
         boxShadow: '0 2px 8px rgba(0,0,0,0.35)',
@@ -1372,7 +1372,7 @@ function PlatformIcon({ slug, fsSlug, size }: { slug?: string | null; fsSlug?: s
 function PlatformTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: (g: LibGroup) => void; focusRef?: React.MutableRefObject<any> }) {
   const [focused, setFocused] = useState(false);
   return (
-    <Focusable noFocusRing
+    <Focusable noFocusRing className="romm-ptile-wrap"
       ref={focusRef}
       onActivate={() => onOpen(group)} onClick={() => onOpen(group)}
       onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
@@ -1381,8 +1381,11 @@ function PlatformTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: (g
     >
       {/* Visuals live on this inner wrapper — NOT the Focusable itself — so the
           gamepad-focusable box carries no ring of its own (Steam otherwise draws
-          a faint default outline over our brand ring). Mirrors GameTile. */}
-      <div style={{
+          a faint default outline over our brand ring). Mirrors GameTile. The
+          focused look is ALSO expressed as CSS :focus-within (romm-ptile-*
+          classes, see V2_ROW_STYLE) so a forced gamepad focus that skips React's
+          onFocus still highlights. */}
+      <div className="romm-ptile-v" style={{
         display: 'flex', flexDirection: 'column', alignItems: 'center',
         gap: '12px', padding: '24px 16px 18px',
         background: focused ? V2.surface : 'rgba(255,255,255,0.045)',
@@ -1391,14 +1394,14 @@ function PlatformTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: (g
         transition: 'background 0.15s, border-color 0.15s, transform 0.15s, box-shadow 0.15s',
         ...V2Focus.tile(focused),
       }}>
-        <div style={{
+        <div className="romm-ptile-ic" style={{
           width: '72px', height: '72px', display: 'grid', placeItems: 'center',
           color: focused ? V2.brandHover : V2.fg2, opacity: focused ? 1 : 0.9,
           transition: 'color 0.15s',
         }}>
           <PlatformIcon slug={group.slug} fsSlug={group.fs_slug} size={72} />
         </div>
-        <div style={{ fontSize: '12px', fontWeight: 600, textAlign: 'center', lineHeight: 1.35, color: focused ? V2.fg : V2.fg2 }}>
+        <div className="romm-ptile-lb" style={{ fontSize: '12px', fontWeight: 600, textAlign: 'center', lineHeight: 1.35, color: focused ? V2.fg : V2.fg2 }}>
           {group.label}
         </div>
         <div style={{ fontSize: '11px', color: V2.fgMuted }}>
@@ -2985,6 +2988,25 @@ const V2_ROW_STYLE = `
   .romm-tile:hover, .romm-tile:focus-within {
     background: ${V2.surfaceHover}; transform: translateY(-2px); border-color: ${V2.brand};
     box-shadow: 0 8px 22px rgba(0,0,0,0.4), ${_RING}, 0 0 16px ${_GLOW};
+  }
+  /* Gamepad focus can be FORCED onto a tile (returning from an emulator
+     session) without firing React's onFocus, so the highlight must also be
+     reachable via CSS :focus-within — which matches whenever Steam marks the
+     tile focused, regardless of the React state. These !important rules win
+     over the inline base styles when the tile holds gamepad focus. */
+  .romm-ptile-wrap:hover .romm-ptile-v, .romm-ptile-wrap:focus-within .romm-ptile-v {
+    background: ${V2.surface} !important; border-color: ${V2.brand} !important; transform: scale(1.04) !important;
+    box-shadow: 0 8px 28px rgba(0,0,0,0.4), ${_RING}, 0 0 18px rgba(139,116,232,0.55) !important;
+  }
+  .romm-ptile-wrap:hover .romm-ptile-ic, .romm-ptile-wrap:focus-within .romm-ptile-ic { color: ${V2.brandHover} !important; opacity: 1 !important; }
+  .romm-ptile-wrap:hover .romm-ptile-lb, .romm-ptile-wrap:focus-within .romm-ptile-lb { color: ${V2.fg} !important; }
+  .romm-gt-wrap:hover .romm-gt-cover, .romm-gt-wrap:focus-within .romm-gt-cover {
+    transform: scale(1.04) !important;
+    box-shadow: 0 8px 28px rgba(0,0,0,0.4), ${_RING}, 0 0 18px rgba(139,116,232,0.55) !important;
+  }
+  .romm-ct-wrap:hover .romm-ct-cover, .romm-ct-wrap:focus-within .romm-ct-cover {
+    transform: scale(1.04) !important;
+    box-shadow: 0 8px 28px rgba(0,0,0,0.4), ${_RING}, 0 0 18px rgba(139,116,232,0.55) !important;
   }
 `;
 
