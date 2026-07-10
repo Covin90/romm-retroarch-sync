@@ -6927,7 +6927,9 @@ function SetupWizard() {
       // The "RomM" Steam library tile is mandatory — ensure it exists before
       // navigating away (create if missing; reconcile repairs an existing one).
       try {
-        if ((await reconcileRommTile()) == null) await addRommShortcut();
+        // force=true: this is user-initiated (store is long since loaded),
+        // and a fresh install can legitimately have an empty shortcut list.
+        if ((await reconcileRommTile()) == null) await addRommShortcut(true);
       } catch (e) { console.error('[RomM] wizard steam tile', e); }
 
       if (mode === 'pair') {
@@ -7158,6 +7160,17 @@ function _shortcutAppIds(): number[] {
   return [];
 }
 
+// True once Steam's shortcut store is actually populated. Early in Steam
+// startup deckDesktopApps.apps can be missing or still empty; creating a
+// shortcut then duplicates a tile that already exists on disk but isn't
+// visible yet — the root cause of multiple "RomM" entries piling up.
+function _shortcutStoreReady(): boolean {
+  try {
+    const m = (window as any).collectionStore?.deckDesktopApps?.apps;
+    return !!m?.keys && Array.from(m.keys()).length > 0;
+  } catch { return false; }
+}
+
 function _appName(appid: number): string {
   try { return String((window as any).appStore?.GetAppOverviewByAppID?.(appid)?.display_name ?? ''); } catch { return ''; }
 }
@@ -7295,8 +7308,15 @@ async function ensureRommArtwork(appId: number) {
 }
 
 // Create the shortcut if missing; returns the appId (or null on failure).
-async function addRommShortcut(): Promise<number | null> {
+// `force` skips the store-readiness gate — used only as a last resort when the
+// store never reported ready (e.g. a user with zero non-Steam shortcuts, where
+// the empty store is legitimate and creating cannot duplicate anything).
+async function addRommShortcut(force = false): Promise<number | null> {
   try {
+    // Never create while the shortcut store is empty/unloaded: the existing
+    // RomM tile may simply not be visible yet, and AddShortcut here is exactly
+    // how duplicate "RomM" entries were piling up on each Steam restart.
+    if (!force && !_shortcutStoreReady()) return null;
     const apps = _sc()?.Apps;
     if (!apps?.AddShortcut) { toaster.toast({ title: 'RomM', body: 'Steam shortcuts API unavailable on this build.' }); return null; }
     const exe = await rommShortcutExe();
@@ -7517,12 +7537,17 @@ export default definePlugin(() => {
         // The tile is mandatory: ensure it EXISTS (create if missing), not just
         // reconcile. The shortcut store may not be ready this early, so retry
         // with exponential backoff until it is.
+        const MAX_ATTEMPTS = 8;
         const ensureTile = async (attempt: number) => {
           try {
             if ((await reconcileRommTile()) != null) return;   // found + repaired
-            if ((await addRommShortcut()) != null) return;     // created
+            // Create only once the shortcut store is populated — an empty
+            // store usually means "not loaded yet", and creating then
+            // duplicates the tile. On the final attempt force-create so a
+            // user with a genuinely empty shortcut list still gets the tile.
+            if ((await addRommShortcut(attempt >= MAX_ATTEMPTS)) != null) return;
           } catch (e) { console.error('[RomM] ensure tile', e); }
-          if (attempt < 5) {
+          if (attempt < MAX_ATTEMPTS) {
             const delay = Math.min(4000 * Math.pow(1.5, attempt), 15000);
             setTimeout(() => { ensureTile(attempt + 1); }, delay);
           }
