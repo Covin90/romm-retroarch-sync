@@ -3656,12 +3656,16 @@ function LibraryGroupsPage() {
     playSteamSound('deck_ui_tab_transition_01');   // native LB/RB tab-switch sound
     _libLastTab = next;
     setActive(next);
-    // Re-focus repeatedly (same cadence as useAutoFocus), not just once: when
-    // the outgoing panel unmounts, Steam re-acquires gamepad focus on its own
-    // schedule and a single rAF focus loses that race — focus (and the pill
-    // tint) then sticks on the previous tab. Retrying beats the re-acquire.
-    [0, 60, 160, 320].forEach((d) =>
-      setTimeout(() => { try { navPillRef.current?.focus(); } catch { } }, d));
+    // Bridge the remount gap with a SINGLE pill focus, then hand off to the new
+    // panel's useAutoFocus (which retries onto its first item). This timer fires
+    // before the panel mounts, so its useAutoFocus runs afterwards and wins the
+    // final resting place — the first tile/field, matching a fresh tab switch.
+    // Don't keep re-focusing the pill on a retry ladder: that raced useAutoFocus
+    // and yanked focus back to the pill after the panel had already moved it,
+    // leaving BOTH the pill and the first item highlighted (the double-focus).
+    // The lone pill focus only lingers while the destination is still loading
+    // (no item to focus yet); once it loads, useAutoFocus takes over.
+    setTimeout(() => { try { navPillRef.current?.focus(); } catch { } }, 0);
   };
 
   // Top-bar chrome (account + RetroDECK) is fetched here — not inside V2NavBar —
