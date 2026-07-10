@@ -569,6 +569,37 @@ function ProgressRing({ pct, size = 40, stroke = 3, glow = false, children }:
 // flips true (content loaded), it drops gamepad focus onto that item with a few
 // retries to beat Steam's default focus-acquisition — so a direction press moves
 // straight into the grid instead of needing a DOWN press out of the header.
+// Forcibly hand Steam's gamepad focus to `el`. Plain HTMLElement.focus() only
+// works while the gamepad UI's focus context is already inside our tree; right
+// after an emulator session ends it isn't, so we also locate the element's
+// navigation node inside Steam's FocusNavController trees and take focus
+// through the controller itself (BTakeFocus). All internals are undocumented,
+// hence the fully defensive access — worst case this degrades to focus().
+function _forceGamepadFocus(el: any): void {
+  try { el?.focus?.(); } catch { /* ignore */ }
+  try {
+    const fnc: any = (window as any).FocusNavController;
+    const trees: any[] = fnc?.m_ActiveContext?.m_rgGamepadNavigationTrees
+      ?? fnc?.m_rgGamepadNavigationTrees ?? [];
+    for (const t of trees) {
+      const root = t?.Root ?? t?.m_Root;
+      if (!root) continue;
+      const stack: any[] = [root];
+      while (stack.length) {
+        const n = stack.pop();
+        if (!n) continue;
+        const nEl = n.m_element ?? n.Element;
+        if (nEl === el) {
+          try { (n.BTakeFocus ?? n.TakeFocus)?.call(n, 3); } catch { /* ignore */ }
+          return;
+        }
+        const kids = n.m_rgChildren ?? n.Children;
+        if (Array.isArray(kids)) for (const k of kids) stack.push(k);
+      }
+    }
+  } catch (e) { console.error('[RomM] forceGamepadFocus', e); }
+}
+
 // The most recently readied auto-focus target (the active panel's first item);
 // the post-emulator-session focus restore aims here so the first game/group is
 // highlighted, matching what a normal tab switch lands on.
@@ -3584,7 +3615,7 @@ function LibraryGroupsPage() {
         if (target && cur === target) { clearInterval(iv); return; }
         if (cur && lastSeen && cur !== lastSeen && cur !== navPillRef.current) { clearInterval(iv); return; }
         lastSeen = cur;
-        target?.focus();
+        if (target) _forceGamepadFocus(target);
       } catch { /* ignore */ }
     }, 250);
     return () => clearInterval(iv);
