@@ -569,10 +569,15 @@ function ProgressRing({ pct, size = 40, stroke = 3, glow = false, children }:
 // flips true (content loaded), it drops gamepad focus onto that item with a few
 // retries to beat Steam's default focus-acquisition — so a direction press moves
 // straight into the grid instead of needing a DOWN press out of the header.
+// The most recently readied auto-focus target (the active panel's first item);
+// the post-emulator-session focus restore aims here so the first game/group is
+// highlighted, matching what a normal tab switch lands on.
+let _autoFocusFirstRef: React.MutableRefObject<any> | null = null;
 function useAutoFocus(ready: boolean, dep?: any) {
   const ref = useRef<any>(null);
   useEffect(() => {
     if (!ready) return;
+    _autoFocusFirstRef = ref;
     const timers = [0, 60, 160, 320].map((d) =>
       setTimeout(() => { try { ref.current?.focus(); } catch { } }, d));
     return () => timers.forEach(clearTimeout);
@@ -3562,20 +3567,24 @@ function LibraryGroupsPage() {
     _rommReturnFocusPending = false;
     // After a game exits Steam often parks gamepad focus on our ROOT Focusable
     // (noFocusRing — buttons respond but nothing is highlighted), so "some
-    // element has .gpfocus" is not success. Poll until the nav pill ITSELF
-    // holds focus, re-asserting each tick; back off the moment focus moves to
-    // any different element than last tick (the user is navigating), or after 8s.
+    // element has .gpfocus" is not success. Poll until the target ITSELF holds
+    // focus, re-asserting each tick; back off the moment focus moves to any
+    // different element than last tick (the user is navigating), or after 8s.
+    // Target the active panel's first item (same element a fresh tab switch
+    // highlights — usually the first game); the nav pill is only a fallback
+    // while the panel is still loading.
     const started = Date.now();
     let lastSeen: Element | null = null;
     const iv = setInterval(() => {
       try {
         if (Date.now() - started > 8000) { clearInterval(iv); return; }
-        const pill = navPillRef.current;
+        const first = _autoFocusFirstRef?.current;
+        const target = (first && first.isConnected) ? first : navPillRef.current;
         const cur = document.querySelector('.gpfocus');
-        if (pill && cur === pill) { clearInterval(iv); return; }
-        if (cur && lastSeen && cur !== lastSeen) { clearInterval(iv); return; }
+        if (target && cur === target) { clearInterval(iv); return; }
+        if (cur && lastSeen && cur !== lastSeen && cur !== navPillRef.current) { clearInterval(iv); return; }
         lastSeen = cur;
-        pill?.focus();
+        target?.focus();
       } catch { /* ignore */ }
     }, 250);
     return () => clearInterval(iv);
