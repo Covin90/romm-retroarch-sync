@@ -3489,6 +3489,9 @@ function LibraryGroupsPage() {
   // breadcrumb — consume it here (not on plugin load) so it survives the double
   // reload the installer causes. See the _LS_REOPEN_HOME consumer in definePlugin.
   useEffect(() => { try { localStorage.removeItem(_LS_REOPEN_HOME); } catch { /* ignore */ } }, []);
+  // Opening the Game Browser counts as "using RomM": surface the tile in the
+  // home row's Recent Games even when no emulator session runs this visit.
+  useEffect(() => { touchRommRecency(); }, []);
   const [active, setActive] = useState<NavId>(_libLastTab);
   const [groups, setGroups] = useState<LibGroup[]>([]);
   const [loading, setLoading] = useState(true);
@@ -5017,6 +5020,7 @@ async function launchGameSmart(romId: number, disc: string | null = null,
           // This is the same value GameActionStart reports back to the intercept.
           const gid = ((BigInt(appId) << 32n) | 0x2000000n).toString();
           await _sc()?.Apps?.RunGame?.(gid, "", -1, 100);
+          touchRommRecency();
           return { success: true, message: 'Launching' };
         } catch (e) {
           _rommLaunchPending = false;
@@ -7184,6 +7188,22 @@ function _isRommName(nm: string): boolean {
 
 function _rommAppIds(): number[] {
   return _shortcutAppIds().filter((aid) => _isRommName(_appName(aid)));
+}
+
+// Stamp "played just now" onto the RomM tile's overview so it surfaces in the
+// home row's Recent Games. Steam only records last-played for sessions it ran
+// to completion — bare tile clicks are terminated by the intercept before that
+// happens, and opening the browser from the Decky panel never touches the tile
+// at all. Writing rt_last_time_played on the in-memory overview is how Steam's
+// own recents sort is fed (same approach MoonDeck uses); real picked-game
+// sessions still persist it properly on exit.
+function touchRommRecency() {
+  try {
+    const aid = _rommAppId ?? _rommAppIds()[0];
+    if (aid == null) return;
+    const ov = (window as any).appStore?.GetAppOverviewByAppID?.(aid);
+    if (ov) ov.rt_last_time_played = Math.floor(Date.now() / 1000);
+  } catch { /* ignore */ }
 }
 
 // Every app overview Steam knows about (installed games + non-Steam shortcuts),
