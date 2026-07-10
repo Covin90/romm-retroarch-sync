@@ -3658,24 +3658,32 @@ function LibraryGroupsPage() {
     if (!_rommReturnFocusPending) return;
     _rommReturnFocusPending = false;
     // After a game exits Steam often parks gamepad focus on our ROOT Focusable
-    // (noFocusRing — buttons respond but nothing is highlighted), so "some
-    // element has .gpfocus" is not success. Poll until the target ITSELF holds
-    // focus, re-asserting each tick; back off the moment focus moves to any
-    // different element than last tick (the user is navigating), or after 8s.
-    // Target the active panel's first item (same element a fresh tab switch
-    // highlights — usually the first game); the nav pill is only a fallback
-    // while the panel is still loading.
+    // (noFocusRing — buttons respond but nothing is highlighted) or on its own
+    // chrome, so "some element has .gpfocus" is not success. Poll and re-assert
+    // focus onto the target, but ONLY while focus is somewhere unhelpful — the
+    // nav pill fallback or outside our UI (Steam chrome). The instant focus is
+    // on any real element inside our content (the target, OR a sibling tile the
+    // user has already navigated to), hand off and stop: re-forcing then would
+    // yank the user back to the first tile the moment they press a direction
+    // (the "press right → snaps back to the first game" bug). Give up after 8s.
     const started = Date.now();
-    let lastSeen: Element | null = null;
     const iv = setInterval(() => {
       try {
         if (Date.now() - started > 8000) { clearInterval(iv); return; }
         const first = _autoFocusFirstRef?.current;
         const target = (first && first.isConnected) ? first : navPillRef.current;
         const cur = _gpFocusEl();
-        if (target && cur && (cur === target || (typeof target.contains === 'function' && target.contains(cur)))) { clearInterval(iv); return; }
-        if (cur && lastSeen && cur !== lastSeen && cur !== navPillRef.current) { clearInterval(iv); return; }
-        lastSeen = cur;
+        // Done: focus reached a REAL target tile (not the nav-pill fallback,
+        // which is invisible — keep polling for the real first item then).
+        const onRealTarget = target && target !== navPillRef.current;
+        if (onRealTarget && cur && (cur === target || (typeof target.contains === 'function' && target.contains(cur)))) { clearInterval(iv); return; }
+        // Hand off: focus is on a real element inside our content that isn't the
+        // nav-pill fallback — the user is now driving, don't fight them.
+        const inOurUI = cur && typeof (cur as any).closest === 'function' && (cur as any).closest('.romm-ui');
+        const onNavPill = cur && navPillRef.current && (cur === navPillRef.current || (typeof navPillRef.current.contains === 'function' && navPillRef.current.contains(cur)));
+        if (inOurUI && !onNavPill) { clearInterval(iv); return; }
+        // Otherwise focus is nowhere useful (null / Steam chrome / nav pill) —
+        // keep pulling it to the target.
         if (target) _forceGamepadFocus(target);
       } catch { /* ignore */ }
     }, 250);
