@@ -587,6 +587,18 @@ function _fireReactFocus(doc: any): void {
     if (!ae) return;
     const FE = doc.defaultView?.FocusEvent || (window as any).FocusEvent;
     ae.dispatchEvent(new FE('focusin', { bubbles: true }));
+    // The blur side has no native event either: when the user later dpad-moves
+    // away, Steam unfocuses this node without any DOM focusout, so the React
+    // `focused` state set above sticks and the first tile stays highlighted.
+    // Watch for Steam's gpfocus class leaving the element and replay the blur.
+    const chk = setInterval(() => {
+      try {
+        if (ae.isConnected && ae.classList?.contains('gpfocus')) return;
+        clearInterval(chk);
+        ae.dispatchEvent(new FE('focusout', { bubbles: true }));
+      } catch { clearInterval(chk); }
+    }, 200);
+    setTimeout(() => clearInterval(chk), 600000);   // leak guard
   } catch { /* ignore */ }
 }
 
