@@ -575,10 +575,26 @@ function ProgressRing({ pct, size = 40, stroke = 3, glow = false, children }:
 // navigation node inside Steam's FocusNavController trees and take focus
 // through the controller itself (BTakeFocus). All internals are undocumented,
 // hence the fully defensive access — worst case this degrades to focus().
+// Taking focus through the nav controller (BTakeFocus) sets Steam's gamepad
+// focus + DOM activeElement, but does NOT emit a bubbling focus event — so
+// React's onFocus never fires and our tiles' focused STATE stays false. The
+// tile then highlights (CSS :focus-within) yet its focus-gated overlays (play
+// button, download scrim, etc.) stay hidden. Fire a synthetic focusin on the
+// newly-focused element so React updates its state, restoring the overlays.
+function _fireReactFocus(doc: any): void {
+  try {
+    const ae = doc?.activeElement;
+    if (!ae) return;
+    const FE = doc.defaultView?.FocusEvent || (window as any).FocusEvent;
+    ae.dispatchEvent(new FE('focusin', { bubbles: true }));
+  } catch { /* ignore */ }
+}
+
 function _forceGamepadFocus(el: any): void {
   try { el?.focus?.(); } catch { /* ignore */ }
   try {
     const fnc: any = (window as any).FocusNavController;
+    const doc: any = fnc?.m_ActiveContext?.m_rootWindow?.document;
     const ctxs: any[] = fnc?.m_rgAllContexts ?? (fnc?.m_ActiveContext ? [fnc.m_ActiveContext] : []);
     let pageTree: any = null;
     for (const ctx of ctxs) {
@@ -593,7 +609,7 @@ function _forceGamepadFocus(el: any): void {
           // Match by identity OR containment: the ref may point at a wrapper
           // whose actual focus-registered element is a descendant.
           if (nEl && el && (nEl === el || (typeof el.contains === 'function' && el.contains(nEl)))) {
-            try { if (n.BTakeFocus?.(3)) { console.info('[RomM] forceGamepadFocus: node focused'); return; } } catch { /* ignore */ }
+            try { if (n.BTakeFocus?.(3)) { _fireReactFocus(doc); return; } } catch { /* ignore */ }
           }
           const kids = n?.m_rgChildren;
           if (Array.isArray(kids)) for (const k of kids) stack.push(k);
@@ -603,8 +619,8 @@ function _forceGamepadFocus(el: any): void {
     // No node matched the target element — put focus SOMEWHERE visible on the
     // gamepad-UI page tree so the user isn't stranded with an invisible cursor.
     try {
-      const ok = pageTree?.m_Root?.BFocusFirstChild?.(3);
-      console.info('[RomM] forceGamepadFocus: fallback BFocusFirstChild =', ok);
+      pageTree?.m_Root?.BFocusFirstChild?.(3);
+      _fireReactFocus(doc);
     } catch { /* ignore */ }
   } catch (e) { console.error('[RomM] forceGamepadFocus', e); }
 }
