@@ -594,8 +594,19 @@ function _forceGamepadFocus(el: any): void {
   try { el?.focus?.(); } catch { /* ignore */ }
   try {
     const fnc: any = (window as any).FocusNavController;
-    const doc: any = fnc?.m_ActiveContext?.m_rootWindow?.document;
-    const ctxs: any[] = fnc?.m_rgAllContexts ?? (fnc?.m_ActiveContext ? [fnc.m_ActiveContext] : []);
+    // Verified live on-device: after an emulator session ends, Steam leaves the
+    // gamepad focus CONTEXT deactivated (m_ActiveContext === undefined) and no
+    // nav tree active — BTakeFocus then "succeeds" but paints no highlight
+    // (no .gpfocus class) and the user steers an invisible cursor. Reactivate
+    // the context and re-declare the main page tree active before focusing.
+    const ctx: any = fnc?.m_ActiveContext ?? fnc?.m_LastActiveContext ?? fnc?.m_rgAllContexts?.[0];
+    try { if (ctx && !ctx.BIsActive?.()) ctx.SetActive?.(true); } catch { /* ignore */ }
+    try {
+      const mainTree = ctx?.m_rgGamepadNavigationTrees?.find?.((t: any) => t?.m_ID === 'GamepadUI_Full_Root');
+      if (mainTree) ctx.SetActiveNavTree?.(mainTree);
+    } catch { /* ignore */ }
+    const doc: any = ctx?.m_rootWindow?.document;
+    const ctxs: any[] = fnc?.m_rgAllContexts ?? (ctx ? [ctx] : []);
     let pageTree: any = null;
     for (const ctx of ctxs) {
       for (const t of (ctx?.m_rgGamepadNavigationTrees ?? [])) {
@@ -630,8 +641,11 @@ function _forceGamepadFocus(el: any): void {
 // window's document, so .gpfocus queries there always come back empty.
 function _gpFocusEl(): Element | null {
   try {
-    const doc = (window as any).FocusNavController?.m_ActiveContext?.m_rootWindow?.document;
-    return doc?.querySelector?.('.gpfocus') ?? null;
+    const fnc: any = (window as any).FocusNavController;
+    // m_ActiveContext is undefined while the context is deactivated (the very
+    // state the post-session restore runs in) — fall back to the last one.
+    const ctx = fnc?.m_ActiveContext ?? fnc?.m_LastActiveContext ?? fnc?.m_rgAllContexts?.[0];
+    return ctx?.m_rootWindow?.document?.querySelector?.('.gpfocus') ?? null;
   } catch { return null; }
 }
 
