@@ -579,25 +579,44 @@ function _forceGamepadFocus(el: any): void {
   try { el?.focus?.(); } catch { /* ignore */ }
   try {
     const fnc: any = (window as any).FocusNavController;
-    const trees: any[] = fnc?.m_ActiveContext?.m_rgGamepadNavigationTrees
-      ?? fnc?.m_rgGamepadNavigationTrees ?? [];
-    for (const t of trees) {
-      const root = t?.Root ?? t?.m_Root;
-      if (!root) continue;
-      const stack: any[] = [root];
-      while (stack.length) {
-        const n = stack.pop();
-        if (!n) continue;
-        const nEl = n.m_element ?? n.Element;
-        if (nEl === el) {
-          try { (n.BTakeFocus ?? n.TakeFocus)?.call(n, 3); } catch { /* ignore */ }
-          return;
+    const ctxs: any[] = fnc?.m_rgAllContexts ?? (fnc?.m_ActiveContext ? [fnc.m_ActiveContext] : []);
+    let pageTree: any = null;
+    for (const ctx of ctxs) {
+      for (const t of (ctx?.m_rgGamepadNavigationTrees ?? [])) {
+        if (t?.m_ID === 'GamepadUI_Full_Root') pageTree = t;
+        const root = t?.m_Root;
+        if (!root) continue;
+        const stack: any[] = [root];
+        while (stack.length) {
+          const n = stack.pop();
+          const nEl = n?.m_element;
+          // Match by identity OR containment: the ref may point at a wrapper
+          // whose actual focus-registered element is a descendant.
+          if (nEl && el && (nEl === el || (typeof el.contains === 'function' && el.contains(nEl)))) {
+            try { if (n.BTakeFocus?.(3)) { console.info('[RomM] forceGamepadFocus: node focused'); return; } } catch { /* ignore */ }
+          }
+          const kids = n?.m_rgChildren;
+          if (Array.isArray(kids)) for (const k of kids) stack.push(k);
         }
-        const kids = n.m_rgChildren ?? n.Children;
-        if (Array.isArray(kids)) for (const k of kids) stack.push(k);
       }
     }
+    // No node matched the target element — put focus SOMEWHERE visible on the
+    // gamepad-UI page tree so the user isn't stranded with an invisible cursor.
+    try {
+      const ok = pageTree?.m_Root?.BFocusFirstChild?.(3);
+      console.info('[RomM] forceGamepadFocus: fallback BFocusFirstChild =', ok);
+    } catch { /* ignore */ }
   } catch (e) { console.error('[RomM] forceGamepadFocus', e); }
+}
+
+// The document that gamepad focus actually lives in. Plugin code runs in
+// Decky's SharedJSContext — its global `document` is NOT the Big Picture
+// window's document, so .gpfocus queries there always come back empty.
+function _gpFocusEl(): Element | null {
+  try {
+    const doc = (window as any).FocusNavController?.m_ActiveContext?.m_rootWindow?.document;
+    return doc?.querySelector?.('.gpfocus') ?? null;
+  } catch { return null; }
 }
 
 // The most recently readied auto-focus target (the active panel's first item);
@@ -3611,8 +3630,8 @@ function LibraryGroupsPage() {
         if (Date.now() - started > 8000) { clearInterval(iv); return; }
         const first = _autoFocusFirstRef?.current;
         const target = (first && first.isConnected) ? first : navPillRef.current;
-        const cur = document.querySelector('.gpfocus');
-        if (target && cur === target) { clearInterval(iv); return; }
+        const cur = _gpFocusEl();
+        if (target && cur && (cur === target || (typeof target.contains === 'function' && target.contains(cur)))) { clearInterval(iv); return; }
         if (cur && lastSeen && cur !== lastSeen && cur !== navPillRef.current) { clearInterval(iv); return; }
         lastSeen = cur;
         if (target) _forceGamepadFocus(target);
