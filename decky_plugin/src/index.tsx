@@ -582,11 +582,20 @@ function ProgressRing({ pct, size = 40, stroke = 3, glow = false, children }:
 // button, download scrim, etc.) stay hidden. Fire a synthetic focusin on the
 // newly-focused element so React updates its state, restoring the overlays.
 let _focusMirrorStop: (() => void) | null = null;
+// The element the mirror currently considers focused — module-level so a
+// mirror RESTART (every forced focus) can flush the previous element's
+// synthetic blur. Without this, tearing down the old observer before it
+// processed the pending gpfocus change loses that focusout forever and the
+// old element (e.g. a nav pill) keeps its React focused tint.
+let _focusMirrorCur: any = null;
 function _fireReactFocus(doc: any): void {
   try {
     const ae = doc?.activeElement;
     if (!ae) return;
     const FE = doc.defaultView?.FocusEvent || (window as any).FocusEvent;
+    if (_focusMirrorCur && _focusMirrorCur !== ae) {
+      try { _focusMirrorCur.dispatchEvent(new FE('focusout', { bubbles: true })); } catch { /* ignore */ }
+    }
     // After the post-session restore, Steam moves its gpfocus WITHOUT emitting
     // DOM focus events at all — not just for the forced element but for every
     // subsequent dpad move (tiles highlight via CSS but their React onFocus
@@ -596,6 +605,7 @@ function _fireReactFocus(doc: any): void {
     // handlers DO fire are harmless (state setters are idempotent).
     try { _focusMirrorStop?.(); } catch { /* ignore */ }
     let cur: any = ae;
+    _focusMirrorCur = ae;
     cur.dispatchEvent(new FE('focusin', { bubbles: true }));
     // React to the class change itself, not on a timer: a polling mirror lags
     // behind fast dpad movement, leaving the previous tile lit (double
@@ -607,6 +617,7 @@ function _fireReactFocus(doc: any): void {
         if (next === cur) return;
         if (cur) { try { cur.dispatchEvent(new FE('focusout', { bubbles: true })); } catch { /* ignore */ } }
         cur = next;
+        _focusMirrorCur = cur;
         if (cur) cur.dispatchEvent(new FE('focusin', { bubbles: true }));
       } catch { /* ignore */ }
     };
