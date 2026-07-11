@@ -7671,27 +7671,18 @@ function registerRommSessionEndWatch() {
         if (!mine) return;
         _rommSessionActive = false;
         if (_rommNavTimer != null) { try { clearTimeout(_rommNavTimer); } catch { /* ignore */ } }
-        // Delay the navigate: right after a game exits, Steam performs its own
-        // navigation back to the Big Picture home/library AND tears down /
-        // rebuilds the gamepad focus context. Navigating too early hijacks that
-        // transition mid-teardown and the page comes up in a degraded state
-        // where Steam delivers no focus events (the reason all the forced-focus
-        // machinery exists). So wait until the focus context reports active
-        // again — Steam has fully landed — and only then navigate; the page
-        // then behaves like a normal user navigation. Measured on-device
-        // (2026-07-11): Steam takes ~5.5s after app exit to reactivate the
-        // context unaided, so cap the wait at 8s and fall back to navigating
-        // anyway (the forced-focus path still covers that case).
-        const t0 = Date.now();
-        const go = () => {
+        // Delay the navigate just long enough to win the race against Steam's
+        // own post-exit transition, then go. Steam's gamepad focus context
+        // needs ~5.5s (measured on-device) to heal after an app exits and it
+        // delivers NO focus events until then — but making the user sit
+        // through that silently is worse than working around it, so we arrive
+        // early and the forced-focus + gpfocus mirror machinery bridges the
+        // gap until Steam recovers.
+        _rommNavTimer = setTimeout(() => {
           _rommNavTimer = null;
-          let healthy = false;
-          try { healthy = !!(window as any).FocusNavController?.m_ActiveContext; } catch { /* ignore */ }
-          if (!healthy && Date.now() - t0 < 8000) { _rommNavTimer = setTimeout(go, 250); return; }
           _rommReturnFocusPending = true;
           try { Navigation.Navigate("/romm-sync-library"); Navigation.CloseSideMenus(); } catch (e) { console.error('[RomM] nav', e); }
-        };
-        _rommNavTimer = setTimeout(go, 900);
+        }, 900);
       } catch (e) { console.error('[RomM] sessionEnd', e); }
     });
   } catch (e) { console.error('[RomM] registerRommSessionEndWatch', e); }
