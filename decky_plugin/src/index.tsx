@@ -1786,8 +1786,26 @@ function UserMenuModal({ username, role, avatar, closeModal }:
   { username: string; role: string; avatar: string | null; closeModal?: () => void }) {
   const panelRef = useRef<HTMLDivElement>(null);
   useEffect(() => { const t = setTimeout(() => { if (panelRef.current) _forceGamepadFocus(panelRef.current); }, 60); return () => clearTimeout(t); }, []);
+  const [refreshing, setRefreshing] = useState(false);
 
   const go = (route: string) => { closeModal?.(); Navigation.Navigate(route); };
+  const doRefresh = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      const res = await refreshFromRomm(false); // incremental
+      if (res?.success) {
+        toaster.toast({ title: 'RomM library refreshed', body: res.message || 'Up to date.' });
+        _broadcastLibRefresh();
+      } else {
+        toaster.toast({ title: 'Refresh failed', body: res?.message ?? 'Unknown error' });
+      }
+    } catch (e) {
+      toaster.toast({ title: 'Refresh failed', body: String(e) });
+    } finally {
+      setRefreshing(false);
+    }
+  };
   const doLogout = async () => {
     // Non-destructive logout (keeps downloaded files), matching RomM's simple
     // logout. The wipe-data variant stays in Settings.
@@ -1856,6 +1874,9 @@ function UserMenuModal({ username, role, avatar, closeModal }:
           <UserMenuRow icon={<FaChartBar size={15} />} label="Stats" onSelect={() => go("/romm-sync-stats")} />
           <UserMenuRow icon={<FaPuzzlePiece size={15} />} label="Emulator Cores" onSelect={() => go("/romm-sync-cores")} />
           <UserMenuRow icon={<FaCog size={15} />} label="Settings" onSelect={() => go("/romm-sync-settings")} />
+          <UserMenuRow
+            icon={<FaSync size={15} style={refreshing ? { animation: 'spin 1s linear infinite' } : undefined} />}
+            label={refreshing ? 'Refreshing…' : 'Refresh library'} disabled={refreshing} onSelect={doRefresh} />
           <div style={{ height: '1px', background: V2.border, margin: '4px 4px' }} />
           <UserMenuRow icon={<FaSignOutAlt size={15} />} label="Log out" danger onSelect={doLogout} />
         </Focusable>
@@ -2568,6 +2589,15 @@ function playSteamSound(name: string) {
 // prefetched neighbour shows its covers instantly — the grid slides in with real
 // content instead of popping in after an async fetch.
 const _libGamesCache = new Map<string, LibGame[]>();
+
+// Broadcast target for "the backend re-fetched from RomM, re-pull whatever's
+// on screen now" (fired after a manual Refresh from the account menu). The
+// Home/Groups panels stay mounted across tab switches (see below) and their
+// silent-refresh effects don't re-run just because a modal closed on top of
+// them, so without this a same-tab refresh would sit invisible until the
+// user actually switched tabs.
+const _libRefreshListeners = new Set<() => void>();
+function _broadcastLibRefresh() { _libRefreshListeners.forEach((l) => { try { l(); } catch { } }); }
 
 // Home tab data cache — survives tab-switch remounts so returning to Home paints
 // instantly (then refreshes silently) instead of flashing "Loading…".
@@ -3567,7 +3597,7 @@ function HomePanel({ onOpen, onOpenGroup, onBg, visible }:
 
   useEffect(() => {
     let alive = true;
-    (async () => {
+    const load = async () => {
       try {
         const [h, p, c] = await Promise.all([
           getHomeData(), getLibraryGroups('platform'), getLibraryGroups('collection'),
@@ -3594,8 +3624,12 @@ function HomePanel({ onOpen, onOpenGroup, onBg, visible }:
         persistHomeCache();
       } catch (e) { console.error('home load failed', e); }
       finally { if (alive) setLoading(false); }
-    })();
-    return () => { alive = false; };
+    };
+    load();
+    // Re-fetch on a manual "Refresh library" (account menu) so a same-tab
+    // refresh shows up immediately instead of waiting for a tab switch.
+    _libRefreshListeners.add(load);
+    return () => { alive = false; _libRefreshListeners.delete(load); };
     // Re-fetch when connectivity flips: offline filters the library to
     // downloaded-only, so the rows must rebuild without a tab switch.
   }, [offline]);
@@ -3712,8 +3746,8 @@ function GroupsPanel({ mode, visible, onOpenGroup, svcStatus }:
   const seq = useRef(0);
   useEffect(() => {
     if (!visible) return;
-    const s = ++seq.current;
-    (async () => {
+    const load = async () => {
+      const s = ++seq.current;
       try {
         const res = await getLibraryGroups(mode);
         if (s !== seq.current) return;
@@ -3732,7 +3766,12 @@ function GroupsPanel({ mode, visible, onOpenGroup, svcStatus }:
       } finally {
         if (s === seq.current) setLoading(false);
       }
-    })();
+    };
+    load();
+    // Re-fetch on a manual "Refresh library" (account menu) so a same-tab
+    // refresh shows up immediately instead of waiting for a tab switch.
+    _libRefreshListeners.add(load);
+    return () => { _libRefreshListeners.delete(load); };
   }, [visible, offline]);
 
   // visible in the ready flag so the focus grab refires on each return to the
