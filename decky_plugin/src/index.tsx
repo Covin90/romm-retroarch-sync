@@ -7672,14 +7672,25 @@ function registerRommSessionEndWatch() {
         _rommSessionActive = false;
         if (_rommNavTimer != null) { try { clearTimeout(_rommNavTimer); } catch { /* ignore */ } }
         // Delay the navigate: right after a game exits, Steam performs its own
-        // navigation back to the Big Picture home/library. Navigating at t=0
-        // loses that race and the user still lands on home. Waiting lets
-        // Steam's transition finish first so our route is the one that sticks.
-        _rommNavTimer = setTimeout(() => {
+        // navigation back to the Big Picture home/library AND tears down /
+        // rebuilds the gamepad focus context. Navigating too early hijacks that
+        // transition mid-teardown and the page comes up in a degraded state
+        // where Steam delivers no focus events (the reason all the forced-focus
+        // machinery exists). So wait until the focus context reports active
+        // again — Steam has fully landed — and only then navigate; the page
+        // then behaves like a normal user navigation. Cap the wait at 5s and
+        // fall back to navigating anyway (the forced-focus path still covers
+        // that case).
+        const t0 = Date.now();
+        const go = () => {
           _rommNavTimer = null;
+          let healthy = false;
+          try { healthy = !!(window as any).FocusNavController?.m_ActiveContext; } catch { /* ignore */ }
+          if (!healthy && Date.now() - t0 < 5000) { _rommNavTimer = setTimeout(go, 250); return; }
           _rommReturnFocusPending = true;
           try { Navigation.Navigate("/romm-sync-library"); Navigation.CloseSideMenus(); } catch (e) { console.error('[RomM] nav', e); }
-        }, 900);
+        };
+        _rommNavTimer = setTimeout(go, 900);
       } catch (e) { console.error('[RomM] sessionEnd', e); }
     });
   } catch (e) { console.error('[RomM] registerRommSessionEndWatch', e); }
