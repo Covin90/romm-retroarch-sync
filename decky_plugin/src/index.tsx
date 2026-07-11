@@ -4386,12 +4386,20 @@ function LibraryGamesPage() {
     );
   };
 
+  // ☰ Start opens the account menu here too, matching the library root so the
+  // shortcut is consistent across the whole browser.
+  const chrome = useNavChrome();
+  const openUserMenu = () => showModal(
+    <UserMenuModal username={chrome.username} role={chrome.role} avatar={chrome.avatar} />,
+  );
+
   const onButtonDown = (evt: any) => {
     const b = evt?.detail?.button;
     if (b === GamepadButton.BUMPER_LEFT) cycle(-1);
     else if (b === GamepadButton.BUMPER_RIGHT) cycle(1);
     else if (b === GamepadButton.OPTIONS) toggleSync(); // Y
     else if (b === GamepadButton.SELECT) { playSteamSound('deck_ui_show_modal'); Navigation.Navigate("/romm-sync-settings"); }
+    else if (b === GamepadButton.START) openUserMenu();                 // ☰ Start → account menu
   };
   // Back → library index. Use onCancelButton (not a CANCEL case in onButtonDown):
   // it CONSUMES the B press so Steam's default router-back doesn't ALSO fire and
@@ -4436,6 +4444,7 @@ function LibraryGamesPage() {
 
   return v2Page(
     <Focusable noFocusRing onButtonDown={onButtonDown} onCancelButton={onBack}
+      actionDescriptionMap={{ [GamepadButton.START]: 'Account' }}
       onOptionsActionDescription={isCollection && !isVirtual ? (isSynced ? 'Stop syncing' : 'Sync collection') : undefined}>
       <div style={{
         position: 'sticky', top: 0, zIndex: 50,
