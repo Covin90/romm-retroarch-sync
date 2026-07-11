@@ -682,6 +682,26 @@ function _forceGamepadFocus(el: any): void {
   } catch (e) { console.error('[RomM] forceGamepadFocus', e); }
 }
 
+// Summon Steam's virtual keyboard for an input that already has DOM focus.
+// Normally DialogInput shows it by itself on focus, but in the degraded
+// post-session state (focus context inactive) the show is suppressed even
+// though the input registers itself as the keyboard's target. Re-activate the
+// context and use the manager's own recovery hook to bring the keyboard up.
+function _summonVirtualKeyboard(): void {
+  setTimeout(() => {
+    try {
+      const fnc: any = (window as any).FocusNavController;
+      const ctx: any = fnc?.m_ActiveContext ?? fnc?.m_LastActiveContext ?? fnc?.m_rgAllContexts?.[0];
+      try { if (ctx && !ctx.BIsActive?.()) ctx.SetActive?.(true); } catch { /* ignore */ }
+      const vkm: any = (Router as any)?.WindowStore?.GamepadUIMainWindowInstance?.VirtualKeyboardManager;
+      if (!vkm) return;
+      const open = !!(vkm.m_bIsInlineVirtualKeyboardOpen?.m_currentValue ?? vkm.m_bIsInlineVirtualKeyboardOpen);
+      const modal = !!(vkm.m_bIsVirtualKeyboardModal?.m_currentValue ?? vkm.m_bIsVirtualKeyboardModal);
+      if (!open && !modal) vkm.RestoreVirtualKeyboardForLastActiveElement?.();
+    } catch { /* ignore */ }
+  }, 150);
+}
+
 // The document that gamepad focus actually lives in. Plugin code runs in
 // Decky's SharedJSContext — its global `document` is NOT the Big Picture
 // window's document, so .gpfocus queries there always come back empty.
@@ -3126,6 +3146,7 @@ const V2SearchField = forwardRef(function V2SearchField(
       onActivate={() => {
         const input = wrapperRef.current?.querySelector('input');
         if (input) input.focus();
+        _summonVirtualKeyboard();
       }}
       onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
       onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
