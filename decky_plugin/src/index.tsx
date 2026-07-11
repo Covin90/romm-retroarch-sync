@@ -7705,7 +7705,11 @@ function registerRommSessionEndWatch() {
           [500, 1100, 1900].forEach((d) => setTimeout(() => {
             try {
               const p = (Router as any)?.WindowStore?.GamepadUIMainWindowInstance?.m_history?.location?.pathname;
-              if (p && p !== "/romm-sync-library") nav();
+              // Only reclaim the screen from STEAM's post-exit navigation. Any
+              // /romm-sync-* route means the user is already navigating inside
+              // the plugin (e.g. straight into Settings) — yanking them back to
+              // the library here caused the "Settings opens then closes" bug.
+              if (p && !p.startsWith("/romm-sync")) nav();
             } catch { /* ignore */ }
           }, d));
         }, 250);
