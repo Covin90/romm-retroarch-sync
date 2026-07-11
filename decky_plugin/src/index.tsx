@@ -597,7 +597,11 @@ function _fireReactFocus(doc: any): void {
     try { _focusMirrorStop?.(); } catch { /* ignore */ }
     let cur: any = ae;
     cur.dispatchEvent(new FE('focusin', { bubbles: true }));
-    const iv = setInterval(() => {
+    // React to the class change itself, not on a timer: a polling mirror lags
+    // behind fast dpad movement, leaving the previous tile lit (double
+    // highlight) until the next tick. The observer fires in the same frame
+    // Steam moves the gpfocus marker.
+    const sync = () => {
       try {
         const next = doc.querySelector('.gpfocus');
         if (next === cur) return;
@@ -605,8 +609,11 @@ function _fireReactFocus(doc: any): void {
         cur = next;
         if (cur) cur.dispatchEvent(new FE('focusin', { bubbles: true }));
       } catch { /* ignore */ }
-    }, 150);
-    const stop = () => { clearInterval(iv); if (_focusMirrorStop === stop) _focusMirrorStop = null; };
+    };
+    const MO = doc.defaultView?.MutationObserver || (window as any).MutationObserver;
+    const obs = new MO(sync);
+    obs.observe(doc.body, { subtree: true, attributes: true, attributeFilter: ['class'] });
+    const stop = () => { try { obs.disconnect(); } catch { /* ignore */ } if (_focusMirrorStop === stop) _focusMirrorStop = null; };
     _focusMirrorStop = stop;
     setTimeout(stop, 600000);   // leak guard
   } catch { /* ignore */ }
