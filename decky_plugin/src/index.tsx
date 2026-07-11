@@ -649,6 +649,19 @@ function _fireReactFocus(doc: any): void {
 
 function _forceGamepadFocus(el: any): void {
   try { el?.focus?.(); } catch { /* ignore */ }
+  // Fast path — healthy state only. The degraded state this function exists
+  // for (post-emulator-session) is precisely characterized by the window
+  // being OS-unfocused: gamescope never returns focus to Steam's window, so
+  // document.hasFocus() stays false and focus() fires no DOM events. When the
+  // window IS focused and the context is active, the plain focus() above
+  // already landed gamepad focus natively — skip the full nav-tree DFS and
+  // the focus-mirror restart, which burn main-thread ms on every tab switch
+  // (×5: the pill bridge + 4 useAutoFocus retries), and more so now that all
+  // tab panels stay mounted and the tree holds every hidden panel's nodes.
+  try {
+    const ctx0: any = (window as any).FocusNavController?.m_ActiveContext;
+    if (ctx0?.BIsActive?.() && ctx0?.m_rootWindow?.document?.hasFocus?.()) return;
+  } catch { /* ignore */ }
   try {
     const fnc: any = (window as any).FocusNavController;
     // Verified live on-device: after an emulator session ends, Steam leaves the
