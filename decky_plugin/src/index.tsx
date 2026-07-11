@@ -2601,6 +2601,16 @@ function persistHomeCache() {
   try { localStorage.setItem(_LS_HOME_KEY, JSON.stringify({ t: Date.now(), v: _homeCache })); } catch { }
 }
 
+// Platforms/Collections index grids — same pattern as _homeCache: seed the grid
+// from cache on tab switch (no "Loading…" flash / full remount pop-in), then
+// refresh silently in the background.
+const _groupsCache: Record<string, LibGroup[] | undefined> = {};
+const _LS_GROUPS_KEY = 'romm:groupscache:v1';
+function persistGroupsCache() {
+  if (!_lsAvail) return;
+  try { localStorage.setItem(_LS_GROUPS_KEY, JSON.stringify({ t: Date.now(), v: _groupsCache })); } catch { }
+}
+
 // Hydrate both caches once at module load from any non-expired localStorage data.
 (function _hydrateBrowseCaches() {
   if (!_lsAvail) return;
@@ -2623,6 +2633,12 @@ function persistHomeCache() {
     const o = JSON.parse(localStorage.getItem(_LS_HOME_KEY) || 'null');
     if (o && o.v && (now - (o.t || 0)) < _LS_TTL_MS) _homeCache = o.v;
     else if (o) localStorage.removeItem(_LS_HOME_KEY);
+  } catch { }
+  try {
+    const o = JSON.parse(localStorage.getItem(_LS_GROUPS_KEY) || 'null');
+    if (o && o.v && (now - (o.t || 0)) < _LS_TTL_MS)
+      for (const k of Object.keys(o.v)) _groupsCache[k] = o.v[k];
+    else if (o) localStorage.removeItem(_LS_GROUPS_KEY);
   } catch { }
   try {
     const o = JSON.parse(localStorage.getItem(_LS_PLATICON) || 'null');
@@ -3541,10 +3557,23 @@ function HomePanel({ onOpen, onOpenGroup, onBg }:
           getHomeData(), getLibraryGroups('platform'), getLibraryGroups('collection'),
         ]);
         if (!alive) return;
-        const next = { ..._homeCache } as NonNullable<typeof _homeCache>;
-        if (h?.success) { setRecent(h.recent || []); setContinuePlaying(h.continue_playing || []); setDownloaded(h.downloaded_games || []); next.recent = h.recent || []; next.continuePlaying = h.continue_playing || []; next.downloaded = h.downloaded_games || []; }
-        if (p?.success) { setPlatforms(p.groups || []); next.platforms = p.groups || []; }
-        if (c?.success) { setCollections(c.groups || []); next.collections = c.groups || []; }
+        const prev = _homeCache;   // state mirrors this (seed + paired setStates)
+        const next = { ...prev } as NonNullable<typeof _homeCache>;
+        // Only setState when a list actually changed — the silent refresh runs
+        // on every tab switch back to Home, and unconditional setStates with
+        // fresh array identities re-rendered every tile (visible pop-in +
+        // stutter) even when the data was byte-identical to the cache seed.
+        const upd = <T,>(fresh: T, prev: T | undefined, set: (v: any) => void): T => {
+          if (JSON.stringify(fresh) !== JSON.stringify(prev)) set(fresh);
+          return fresh;
+        };
+        if (h?.success) {
+          next.recent = upd(h.recent || [], prev?.recent, setRecent);
+          next.continuePlaying = upd(h.continue_playing || [], prev?.continuePlaying, setContinuePlaying);
+          next.downloaded = upd(h.downloaded_games || [], prev?.downloaded, setDownloaded);
+        }
+        if (p?.success) next.platforms = upd(p.groups || [], prev?.platforms, setPlatforms);
+        if (c?.success) next.collections = upd(c.groups || [], prev?.collections, setCollections);
         _homeCache = next;
         persistHomeCache();
       } catch (e) { console.error('home load failed', e); }
@@ -3715,23 +3744,43 @@ function LibraryGroupsPage() {
   // home row's Recent Games even when no emulator session runs this visit.
   useEffect(() => { touchRommRecency(); }, []);
   const [active, setActive] = useState<NavId>(_libLastTab);
-  const [groups, setGroups] = useState<LibGroup[]>([]);
-  const [loading, setLoading] = useState(true);
+  const mode0 = _libLastTab === 'collections' ? 'collection' : 'platform';
+  const [groups, setGroups] = useState<LibGroup[]>(_groupsCache[mode0] || []);
+  const [loading, setLoading] = useState(!_groupsCache[mode0]);
   const [bgUri, setBgUri] = useState<string | null>(null);
   const svcStatus = useServiceStatus();
   const offline = svcStatus?.connection === 'offline_cached' || svcStatus?.connection === 'disconnected';
   const mode = active === 'collections' ? 'collection' : 'platform';
 
+  // Guards stale responses when the user bumper-cycles faster than the RPC:
+  // only the response for the CURRENTLY shown mode may touch state.
+  const loadSeq = useRef(0);
   const load = async (m: string) => {
-    setLoading(true);
+    const seq = ++loadSeq.current;
+    // Paint from cache immediately (no Loading flash), refresh silently below.
+    const cached = _groupsCache[m];
+    setGroups(cached || []);
+    setLoading(!cached);
     try {
       const res = await getLibraryGroups(m);
-      setGroups(res?.success ? (res.groups || []) : []);
+      if (seq !== loadSeq.current) return;
+      if (res?.success) {
+        const next: LibGroup[] = res.groups || [];
+        // Skip the setState when nothing changed — the silent refresh would
+        // otherwise re-render every tile in the grid on each tab switch.
+        if (JSON.stringify(next) !== JSON.stringify(_groupsCache[m])) {
+          _groupsCache[m] = next;
+          persistGroupsCache();
+          setGroups(next);
+        }
+      } else if (!cached) {
+        setGroups([]);
+      }
     } catch (e) {
       console.error('get_library_groups failed', e);
-      setGroups([]);
+      if (seq === loadSeq.current && !cached) setGroups([]);
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   };
 
