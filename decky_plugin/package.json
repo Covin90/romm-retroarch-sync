@@ -1,6 +1,6 @@
 {
   "name": "romm-retroarch-sync",
-  "version": "1.7.0-beta.74",
+  "version": "1.7.0-beta.75",
   "description": "Sync ROMs, saves and states between RomM and RetroArch on Steam Deck",
   "type": "module",
   "scripts": {

@@ -7671,18 +7671,27 @@ function registerRommSessionEndWatch() {
         if (!mine) return;
         _rommSessionActive = false;
         if (_rommNavTimer != null) { try { clearTimeout(_rommNavTimer); } catch { /* ignore */ } }
-        // Delay the navigate just long enough to win the race against Steam's
-        // own post-exit transition, then go. Steam's gamepad focus context
-        // needs ~5.5s (measured on-device) to heal after an app exits and it
-        // delivers NO focus events until then — but making the user sit
-        // through that silently is worse than working around it, so we arrive
-        // early and the forced-focus + gpfocus mirror machinery bridges the
-        // gap until Steam recovers.
-        _rommNavTimer = setTimeout(() => {
-          _rommNavTimer = null;
+        // Navigate back almost immediately. Steam runs its own post-exit
+        // navigation to Big Picture home on its own schedule — a single early
+        // Navigate can get stomped by it (that's why this used to wait 900ms).
+        // Instead: go at 250ms, then for the next ~2s re-assert our route if
+        // Steam moved it off. Steam's focus context also delivers NO focus
+        // events for ~5.5s after an app exits (measured on-device); the
+        // forced-focus + gpfocus mirror machinery bridges that gap.
+        const nav = () => {
           _rommReturnFocusPending = true;
           try { Navigation.Navigate("/romm-sync-library"); Navigation.CloseSideMenus(); } catch (e) { console.error('[RomM] nav', e); }
-        }, 900);
+        };
+        _rommNavTimer = setTimeout(() => {
+          _rommNavTimer = null;
+          nav();
+          [500, 1100, 1900].forEach((d) => setTimeout(() => {
+            try {
+              const p = (Router as any)?.WindowStore?.GamepadUIMainWindowInstance?.m_history?.location?.pathname;
+              if (p && p !== "/romm-sync-library") nav();
+            } catch { /* ignore */ }
+          }, d));
+        }, 250);
       } catch (e) { console.error('[RomM] sessionEnd', e); }
     });
   } catch (e) { console.error('[RomM] registerRommSessionEndWatch', e); }
