@@ -581,24 +581,34 @@ function ProgressRing({ pct, size = 40, stroke = 3, glow = false, children }:
 // tile then highlights (CSS :focus-within) yet its focus-gated overlays (play
 // button, download scrim, etc.) stay hidden. Fire a synthetic focusin on the
 // newly-focused element so React updates its state, restoring the overlays.
+let _focusMirrorStop: (() => void) | null = null;
 function _fireReactFocus(doc: any): void {
   try {
     const ae = doc?.activeElement;
     if (!ae) return;
     const FE = doc.defaultView?.FocusEvent || (window as any).FocusEvent;
-    ae.dispatchEvent(new FE('focusin', { bubbles: true }));
-    // The blur side has no native event either: when the user later dpad-moves
-    // away, Steam unfocuses this node without any DOM focusout, so the React
-    // `focused` state set above sticks and the first tile stays highlighted.
-    // Watch for Steam's gpfocus class leaving the element and replay the blur.
-    const chk = setInterval(() => {
+    // After the post-session restore, Steam moves its gpfocus WITHOUT emitting
+    // DOM focus events at all — not just for the forced element but for every
+    // subsequent dpad move (tiles highlight via CSS but their React onFocus
+    // never fires, so focus-gated overlays only ever showed on the first one).
+    // Mirror Steam's gpfocus marker into synthetic focusin/focusout pairs so
+    // React state follows the cursor. Duplicate events on tiles whose native
+    // handlers DO fire are harmless (state setters are idempotent).
+    try { _focusMirrorStop?.(); } catch { /* ignore */ }
+    let cur: any = ae;
+    cur.dispatchEvent(new FE('focusin', { bubbles: true }));
+    const iv = setInterval(() => {
       try {
-        if (ae.isConnected && ae.classList?.contains('gpfocus')) return;
-        clearInterval(chk);
-        ae.dispatchEvent(new FE('focusout', { bubbles: true }));
-      } catch { clearInterval(chk); }
-    }, 200);
-    setTimeout(() => clearInterval(chk), 600000);   // leak guard
+        const next = doc.querySelector('.gpfocus');
+        if (next === cur) return;
+        if (cur) { try { cur.dispatchEvent(new FE('focusout', { bubbles: true })); } catch { /* ignore */ } }
+        cur = next;
+        if (cur) cur.dispatchEvent(new FE('focusin', { bubbles: true }));
+      } catch { /* ignore */ }
+    }, 150);
+    const stop = () => { clearInterval(iv); if (_focusMirrorStop === stop) _focusMirrorStop = null; };
+    _focusMirrorStop = stop;
+    setTimeout(stop, 600000);   // leak guard
   } catch { /* ignore */ }
 }
 
