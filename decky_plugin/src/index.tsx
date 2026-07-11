@@ -3331,7 +3331,7 @@ function PairCodeField({ label, value, onChange }:
 
 // Search tab — debounced text filter over the whole library, results as a
 // cover-art grid (the nav 'Search' destination).
-function SearchPanel({ onOpen, onBg }: { onOpen: (g: LibGame) => void; onBg: (uri: string | null) => void }) {
+function SearchPanel({ onOpen, onBg, visible }: { onOpen: (g: LibGame) => void; onBg: (uri: string | null) => void; visible: boolean }) {
   // Minimum characters before we hit the backend. Browsing the whole library
   // (empty query) renders every cover tile, which tanks performance on big
   // collections — so search is gated until the user starts typing.
@@ -3406,12 +3406,15 @@ function SearchPanel({ onOpen, onBg }: { onOpen: (g: LibGame) => void; onBg: (ur
   // game (the "broke focus coming back from a game" regression).
   const searchFieldRef = useRef<any>(null);
   useEffect(() => {
+    // Panels stay mounted across tab switches (display:none) — refire the
+    // focus grab each time the tab becomes the visible one, not just on mount.
+    if (!visible) return;
     // _forceGamepadFocus, not focus(): silent while the window is OS-unfocused
     // after an emulator session (same as useAutoFocus).
     const timers = [0, 60, 160, 320].map((d) =>
       setTimeout(() => { try { if (searchFieldRef.current) _forceGamepadFocus(searchFieldRef.current); } catch { } }, d));
     return () => timers.forEach(clearTimeout);
-  }, []);
+  }, [visible]);
 
   return (
     <div style={{ padding: '0 16px' }}>
@@ -3536,8 +3539,8 @@ function CardRow({ icon, title, count, children }:
 
 // Home dashboard — faithful to RomM v2 Home.vue: horizontal CardRows
 // (Continue playing / Recently added / Platforms / Collections).
-function HomePanel({ onOpen, onOpenGroup, onBg }:
-  { onOpen: (g: LibGame) => void; onOpenGroup: (mode: string, g: LibGroup, gs: LibGroup[]) => void; onBg: (uri: string | null) => void }) {
+function HomePanel({ onOpen, onOpenGroup, onBg, visible }:
+  { onOpen: (g: LibGame) => void; onOpenGroup: (mode: string, g: LibGroup, gs: LibGroup[]) => void; onBg: (uri: string | null) => void; visible: boolean }) {
   // Seed from the module-level cache so re-mounting (tab switch back to Home)
   // paints instantly instead of flashing "Loading…" and refetching.
   const c0 = _homeCache;
@@ -3588,7 +3591,9 @@ function HomePanel({ onOpen, onOpenGroup, onBg }:
   // navigate straight in (no DOWN press needed off the nav bar).
   const firstList = continuePlaying.length ? 'cp' : downloaded.length ? 'dl'
     : recent.length ? 'rc' : platforms.length ? 'pf' : collections.length ? 'cl' : null;
-  const firstRef = useAutoFocus(!loading && firstList !== null, firstList);
+  // visible in the ready flag: the panel stays mounted while hidden, so the
+  // focus grab must refire on each return to the tab, not just on mount.
+  const firstRef = useAutoFocus(visible && !loading && firstList !== null, firstList);
 
   if (loading) {
     return (
@@ -3674,6 +3679,122 @@ function HomePanel({ onOpen, onOpenGroup, onBg }:
   );
 }
 
+// Platforms/Collections index grid — one component instance per mode, kept
+// mounted across tab switches (the parent hides inactive panels with
+// display:none) so switching back doesn't rebuild 150+ cover <img>s from
+// scratch: measured on-device, each remount inserted ~170–270 fresh imgs and
+// cost ~100–200ms of main-thread long tasks (the visible repopulation+stutter).
+function GroupsPanel({ mode, visible, onOpenGroup, svcStatus }:
+  { mode: 'platform' | 'collection'; visible: boolean; onOpenGroup: (mode: string, g: LibGroup, gs: LibGroup[]) => void; svcStatus: any }) {
+  const c0 = _groupsCache[mode];
+  const [groups, setGroups] = useState<LibGroup[]>(c0 || []);
+  const [loading, setLoading] = useState(!c0);
+  const offline = svcStatus?.connection === 'offline_cached' || svcStatus?.connection === 'disconnected';
+
+  // Silent refresh each time the tab becomes visible (and on connectivity
+  // flips while visible — offline filters the list to downloaded-only). The
+  // seq guard drops stale responses when the user bumper-cycles faster than
+  // the RPC; the JSON compare skips the setState (and the full grid
+  // re-render) when nothing changed, which is the common case.
+  const seq = useRef(0);
+  useEffect(() => {
+    if (!visible) return;
+    const s = ++seq.current;
+    (async () => {
+      try {
+        const res = await getLibraryGroups(mode);
+        if (s !== seq.current) return;
+        if (res?.success) {
+          const next: LibGroup[] = res.groups || [];
+          if (JSON.stringify(next) !== JSON.stringify(_groupsCache[mode])) {
+            _groupsCache[mode] = next;
+            persistGroupsCache();
+            setGroups(next);
+          }
+        } else if (!_groupsCache[mode]) {
+          setGroups([]);
+        }
+      } catch (e) {
+        console.error('get_library_groups failed', e);
+      } finally {
+        if (s === seq.current) setLoading(false);
+      }
+    })();
+  }, [visible, offline]);
+
+  // visible in the ready flag so the focus grab refires on each return to the
+  // tab (the panel no longer remounts).
+  const firstGroupRef = useAutoFocus(visible && !loading && groups.length > 0, mode);
+  const openGroup = (g: LibGroup) => onOpenGroup(mode, g, groups);
+
+  if (loading) {
+    return <div style={{ padding: '16px', color: V2.fgMuted, fontSize: '13px' }}>Loading…</div>;
+  }
+  if (groups.length === 0) {
+    return (
+      <div style={{ padding: '16px', color: V2.fgMuted, fontSize: '13px' }}>
+        {offline
+          ? (mode === 'collection'
+              ? "Collections aren't available offline — reconnect to browse them."
+              : 'No downloaded games yet. Reconnect to download from your library.')
+          : (mode === 'collection' ? 'No collections found on the server.' : 'No games found.')}
+      </div>
+    );
+  }
+  if (mode === 'platform') {
+    return (
+      <Focusable noFocusRing
+        style={{
+          display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))',
+          gap: '14px', padding: '0 16px',
+        }}
+      >
+        {groups.map((g, i) => <PlatformTile key={g.key} group={g} onOpen={openGroup} focusRef={i === 0 ? firstGroupRef : undefined} />)}
+      </Focusable>
+    );
+  }
+  // Collections, grouped into sections (Collections / Smart / Virtual) like
+  // RomM's collection index.
+  const sections: { title: string; kinds: string[] }[] = [
+    { title: 'Collections', kinds: ['favorite', 'collection'] },
+    { title: 'Smart', kinds: ['smart'] },
+    { title: 'Virtual', kinds: ['virtual'] },
+  ];
+  // Key of the very first rendered tile across all sections (gets focus).
+  let firstKey: string | null = null;
+  for (const s of sections) {
+    const it = groups.find((g) => s.kinds.includes(g.kind || 'collection'));
+    if (it) { firstKey = it.key; break; }
+  }
+  return (
+    <>
+      {sections.map((s) => {
+        const items = groups.filter((g) => s.kinds.includes(g.kind || 'collection'));
+        if (items.length === 0) return null;
+        return (
+          <div key={s.title} style={{ marginBottom: '6px' }}>
+            <div style={{
+              fontSize: '11px', fontWeight: 700, letterSpacing: '0.06em',
+              textTransform: 'uppercase', color: V2.fgMuted, padding: '6px 16px 10px',
+              display: 'flex', alignItems: 'center', gap: '6px',
+            }}>
+              <FaBookmark size={10} /><span>{s.title}</span>
+            </div>
+            <Focusable noFocusRing
+              style={{
+                display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(132px, 1fr))',
+                gap: '18px 16px', padding: '0 16px 8px',
+              }}
+            >
+              {items.map((g) => <CollectionTile key={g.key} group={g} onOpen={openGroup} focusRef={g.key === firstKey ? firstGroupRef : undefined} />)}
+            </Focusable>
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
 // Slim, full-width strip shown ONLY when the backend reports a non-online
 // connection state. It explains what offline means rather than just flagging an
 // error: cached browse + downloaded-game launch keep working, and any saves made
@@ -3744,62 +3865,14 @@ function LibraryGroupsPage() {
   // home row's Recent Games even when no emulator session runs this visit.
   useEffect(() => { touchRommRecency(); }, []);
   const [active, setActive] = useState<NavId>(_libLastTab);
-  const mode0 = _libLastTab === 'collections' ? 'collection' : 'platform';
-  const [groups, setGroups] = useState<LibGroup[]>(_groupsCache[mode0] || []);
-  const [loading, setLoading] = useState(!_groupsCache[mode0]);
   const [bgUri, setBgUri] = useState<string | null>(null);
   const svcStatus = useServiceStatus();
-  const offline = svcStatus?.connection === 'offline_cached' || svcStatus?.connection === 'disconnected';
-  const mode = active === 'collections' ? 'collection' : 'platform';
 
-  // Guards stale responses when the user bumper-cycles faster than the RPC:
-  // only the response for the CURRENTLY shown mode may touch state.
-  const loadSeq = useRef(0);
-  const load = async (m: string) => {
-    const seq = ++loadSeq.current;
-    // Paint from cache immediately (no Loading flash), refresh silently below.
-    const cached = _groupsCache[m];
-    setGroups(cached || []);
-    setLoading(!cached);
-    try {
-      const res = await getLibraryGroups(m);
-      if (seq !== loadSeq.current) return;
-      if (res?.success) {
-        const next: LibGroup[] = res.groups || [];
-        // Skip the setState when nothing changed — the silent refresh would
-        // otherwise re-render every tile in the grid on each tab switch.
-        if (JSON.stringify(next) !== JSON.stringify(_groupsCache[m])) {
-          _groupsCache[m] = next;
-          persistGroupsCache();
-          setGroups(next);
-        }
-      } else if (!cached) {
-        setGroups([]);
-      }
-    } catch (e) {
-      console.error('get_library_groups failed', e);
-      if (seq === loadSeq.current && !cached) setGroups([]);
-    } finally {
-      if (seq === loadSeq.current) setLoading(false);
-    }
-  };
-
-  // Only platforms/collections fetch groups; home/search are placeholders.
-  // Re-fetch on connectivity flip too — offline filters to downloaded-only, so
-  // the group list must rebuild without needing a tab switch.
-  useEffect(() => {
-    if (active === 'platforms' || active === 'collections') load(mode);
-  }, [active, offline]);
-
-  // Focus the first platform/collection tile once the index grid loads.
-  const isGroupTab = active === 'platforms' || active === 'collections';
-  const firstGroupRef = useAutoFocus(isGroupTab && !loading && groups.length > 0, active);
-
-  const openGroup = (g: LibGroup) => {
-    _libGroupHolder = { mode, group: g };
-    _libGroupsHolder = { mode, groups };
-    Navigation.Navigate(`/romm-sync-library/${encodeURIComponent(g.key)}`);
-  };
+  // Panels mount lazily on first visit, then STAY mounted (hidden with
+  // display:none) — see GroupsPanel's comment for the measured remount cost.
+  const seenRef = useRef<Record<string, boolean>>({});
+  seenRef.current[active] = true;
+  const seen = seenRef.current;
 
   // Home rows carry their own mode + sibling list (independent of the active tab).
   const openGroupFrom = (m: string, g: LibGroup, gs: LibGroup[]) => {
@@ -3951,69 +4024,21 @@ function LibraryGroupsPage() {
 
       <OfflineBanner status={svcStatus} />
 
-      {active === 'home' ? (
-        <HomePanel onOpen={openGame} onOpenGroup={openGroupFrom} onBg={setBgUri} />
-      ) : active === 'search' ? (
-        <SearchPanel onOpen={openGame} onBg={setBgUri} />
-      ) : loading ? (
-        <div style={{ padding: '16px', color: V2.fgMuted, fontSize: '13px' }}>Loading…</div>
-      ) : groups.length === 0 ? (
-        <div style={{ padding: '16px', color: V2.fgMuted, fontSize: '13px' }}>
-          {svcStatus?.connection === 'offline_cached' || svcStatus?.connection === 'disconnected'
-            ? (mode === 'collection'
-                ? "Collections aren't available offline — reconnect to browse them."
-                : 'No downloaded games yet. Reconnect to download from your library.')
-            : (mode === 'collection' ? 'No collections found on the server.' : 'No games found.')}
-        </div>
-      ) : mode === 'platform' ? (
-        <Focusable noFocusRing
-          style={{
-            display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))',
-            gap: '14px', padding: '0 16px',
-          }}
-        >
-          {groups.map((g, i) => <PlatformTile key={g.key} group={g} onOpen={openGroup} focusRef={i === 0 ? firstGroupRef : undefined} />)}
-        </Focusable>
-      ) : (
-        // Collections, grouped into sections (Collections / Smart / Virtual) like
-        // RomM's collection index.
-        (() => {
-          const sections: { title: string; kinds: string[] }[] = [
-            { title: 'Collections', kinds: ['favorite', 'collection'] },
-            { title: 'Smart', kinds: ['smart'] },
-            { title: 'Virtual', kinds: ['virtual'] },
-          ];
-          // Key of the very first rendered tile across all sections (gets focus).
-          let firstKey: string | null = null;
-          for (const s of sections) {
-            const it = groups.find((g) => s.kinds.includes(g.kind || 'collection'));
-            if (it) { firstKey = it.key; break; }
-          }
-          return sections.map((s) => {
-            const items = groups.filter((g) => s.kinds.includes(g.kind || 'collection'));
-            if (items.length === 0) return null;
-            return (
-              <div key={s.title} style={{ marginBottom: '6px' }}>
-                <div style={{
-                  fontSize: '11px', fontWeight: 700, letterSpacing: '0.06em',
-                  textTransform: 'uppercase', color: V2.fgMuted, padding: '6px 16px 10px',
-                  display: 'flex', alignItems: 'center', gap: '6px',
-                }}>
-                  <FaBookmark size={10} /><span>{s.title}</span>
-                </div>
-                <Focusable noFocusRing
-                  style={{
-                    display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(132px, 1fr))',
-                    gap: '18px 16px', padding: '0 16px 8px',
-                  }}
-                >
-                  {items.map((g) => <CollectionTile key={g.key} group={g} onOpen={openGroup} focusRef={g.key === firstKey ? firstGroupRef : undefined} />)}
-                </Focusable>
-              </div>
-            );
-          });
-        })()
-      )}
+      {/* All four panels stay mounted once visited; only the active one is
+          displayed. Unmounting on switch rebuilt every cover <img> and cost
+          ~100–200ms long tasks per switch (measured on-device). */}
+      <div style={{ display: active === 'home' ? undefined : 'none' }}>
+        {seen['home'] && <HomePanel visible={active === 'home'} onOpen={openGame} onOpenGroup={openGroupFrom} onBg={setBgUri} />}
+      </div>
+      <div style={{ display: active === 'platforms' ? undefined : 'none' }}>
+        {seen['platforms'] && <GroupsPanel mode="platform" visible={active === 'platforms'} onOpenGroup={openGroupFrom} svcStatus={svcStatus} />}
+      </div>
+      <div style={{ display: active === 'collections' ? undefined : 'none' }}>
+        {seen['collections'] && <GroupsPanel mode="collection" visible={active === 'collections'} onOpenGroup={openGroupFrom} svcStatus={svcStatus} />}
+      </div>
+      <div style={{ display: active === 'search' ? undefined : 'none' }}>
+        {seen['search'] && <SearchPanel visible={active === 'search'} onOpen={openGame} onBg={setBgUri} />}
+      </div>
     </Focusable>,
     bgUri,
   );
