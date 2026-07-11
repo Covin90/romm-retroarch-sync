@@ -1772,7 +1772,7 @@ function UserMenuRow({ icon, label, danger, disabled, onSelect }:
 function UserMenuModal({ username, role, avatar, closeModal }:
   { username: string; role: string; avatar: string | null; closeModal?: () => void }) {
   const panelRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { const t = setTimeout(() => panelRef.current?.focus(), 60); return () => clearTimeout(t); }, []);
+  useEffect(() => { const t = setTimeout(() => { if (panelRef.current) _forceGamepadFocus(panelRef.current); }, 60); return () => clearTimeout(t); }, []);
 
   const go = (route: string) => { closeModal?.(); Navigation.Navigate(route); };
   const doLogout = async () => {
@@ -1863,7 +1863,7 @@ function CollectionActionsModal({ title, isCollection, isVirtual, isSynced, miss
   }) {
   const panelRef = useRef<HTMLDivElement>(null);
   const [armed, setArmed] = useState(false);
-  useEffect(() => { const t = setTimeout(() => panelRef.current?.focus(), 60); return () => clearTimeout(t); }, []);
+  useEffect(() => { const t = setTimeout(() => { if (panelRef.current) _forceGamepadFocus(panelRef.current); }, 60); return () => clearTimeout(t); }, []);
   useEffect(() => { if (!armed) return; const t = setTimeout(() => setArmed(false), 4000); return () => clearTimeout(t); }, [armed]);
 
   const syncDisabled = syncing || missing === 0;
@@ -3390,8 +3390,10 @@ function SearchPanel({ onOpen, onBg }: { onOpen: (g: LibGame) => void; onBg: (ur
   // game (the "broke focus coming back from a game" regression).
   const searchFieldRef = useRef<any>(null);
   useEffect(() => {
+    // _forceGamepadFocus, not focus(): silent while the window is OS-unfocused
+    // after an emulator session (same as useAutoFocus).
     const timers = [0, 60, 160, 320].map((d) =>
-      setTimeout(() => { try { searchFieldRef.current?.focus(); } catch { } }, d));
+      setTimeout(() => { try { if (searchFieldRef.current) _forceGamepadFocus(searchFieldRef.current); } catch { } }, d));
     return () => timers.forEach(clearTimeout);
   }, []);
 
@@ -4128,7 +4130,7 @@ function LibraryGamesPage() {
     setSlideDir(dir);
     _libGroupHolder = { mode, group: next };
     setGroup(next);
-    requestAnimationFrame(() => { try { headerRef.current?.focus(); } catch { } });
+    requestAnimationFrame(() => { try { if (headerRef.current) _forceGamepadFocus(headerRef.current); } catch { } });
   };
   // Collection auto-sync toggle (Y). Keyed by collection name (== group.key).
   // Optimistic local override layered over the backend's `synced` flag so the
@@ -4838,7 +4840,7 @@ function RestoreModal({ romId, entry, shotUri, onDone, closeModal }: {
 
   // Move controller focus into the overlay (no ModalRoot to do it for us).
   useEffect(() => {
-    const t = setTimeout(() => cardRef.current?.focus(), 60);
+    const t = setTimeout(() => { if (cardRef.current) _forceGamepadFocus(cardRef.current); }, 60);
     return () => clearTimeout(t);
   }, []);
 
@@ -5337,7 +5339,7 @@ function PickerModal({ title, items, closeModal }: {
   closeModal?: () => void;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { const t = setTimeout(() => panelRef.current?.focus(), 60); return () => clearTimeout(t); }, []);
+  useEffect(() => { const t = setTimeout(() => { if (panelRef.current) _forceGamepadFocus(panelRef.current); }, 60); return () => clearTimeout(t); }, []);
   return (
     <ModalRoot bHideCloseIcon onCancel={closeModal} onEscKeypress={closeModal}
       className="romm-modal-collapse" modalClassName="romm-modal-collapse">
@@ -6076,7 +6078,7 @@ function StatsPage() {
   }, []);
   useEffect(() => {
     if (stats == null) return;
-    const t = setTimeout(() => { try { searchRef.current?.focus(); } catch { } }, 80);
+    const t = setTimeout(() => { try { if (searchRef.current) _forceGamepadFocus(searchRef.current); } catch { } }, 80);
     return () => clearTimeout(t);
   }, [stats]);
 
@@ -6170,7 +6172,7 @@ function CorePickerModal({ row, availableCores, onPick, closeModal }: {
   // RetroDECK has no entry for this system, so the list wouldn't be empty).
   const relevant = (row?.retrodeck_choices || []).filter((c: string) => availableCores.includes(c));
   const [showAll, setShowAll] = useState(relevant.length === 0);
-  useEffect(() => { const t = setTimeout(() => panelRef.current?.focus(), 60); return () => clearTimeout(t); }, []);
+  useEffect(() => { const t = setTimeout(() => { if (panelRef.current) _forceGamepadFocus(panelRef.current); }, 60); return () => clearTimeout(t); }, []);
 
   const q = query.trim().toLowerCase();
   const match = (c: string) => !q || c.toLowerCase().includes(q);
