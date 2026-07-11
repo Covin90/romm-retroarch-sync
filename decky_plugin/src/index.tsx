@@ -690,14 +690,22 @@ function _forceGamepadFocus(el: any): void {
 function _summonVirtualKeyboard(): void {
   setTimeout(() => {
     try {
-      const fnc: any = (window as any).FocusNavController;
-      const ctx: any = fnc?.m_ActiveContext ?? fnc?.m_LastActiveContext ?? fnc?.m_rgAllContexts?.[0];
-      try { if (ctx && !ctx.BIsActive?.()) ctx.SetActive?.(true); } catch { /* ignore */ }
-      const vkm: any = (Router as any)?.WindowStore?.GamepadUIMainWindowInstance?.VirtualKeyboardManager;
-      if (!vkm) return;
-      const open = !!(vkm.m_bIsInlineVirtualKeyboardOpen?.m_currentValue ?? vkm.m_bIsInlineVirtualKeyboardOpen);
-      const modal = !!(vkm.m_bIsVirtualKeyboardModal?.m_currentValue ?? vkm.m_bIsVirtualKeyboardModal);
-      if (!open && !modal) vkm.RestoreVirtualKeyboardForLastActiveElement?.();
+      const win: any = (Router as any)?.WindowStore?.GamepadUIMainWindowInstance;
+      const vkm: any = win?.VirtualKeyboardManager;
+      const doc: any = win?.BrowserWindow?.document;
+      const input: any = doc?.activeElement;
+      if (!vkm || !input || input.tagName !== 'INPUT') return;
+      if (vkm.m_bIsInlineVirtualKeyboardOpen?.m_currentValue) return;
+      // gamescope never returns OS focus to the Steam window after a game
+      // session (document.hasFocus() stays false), so input.focus() moves
+      // activeElement WITHOUT firing a DOM focus event — DialogInput's own
+      // focus listener never registers the input with the keyboard manager
+      // and nothing shows. Register + show it ourselves via the manager's
+      // ref factory (verified live on-device).
+      const ref = vkm.CreateVirtualKeyboardRef?.({
+        BIsElementValidForInput: () => doc.activeElement === input,
+      });
+      ref?.ShowVirtualKeyboard?.();
     } catch { /* ignore */ }
   }, 150);
 }
@@ -3076,31 +3084,33 @@ const V2Focus = {
 
 const V2_ROW_STYLE = `
   .romm-row { background: ${V2.surface}; border: 1px solid ${V2.border}; transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ${_EASE}, box-shadow 0.15s ease; }
-  .romm-row:hover, .romm-row:focus-within {
+  .romm-row:hover, .romm-row.gpfocuswithin {
     background: ${V2.surfaceHover}; border-color: ${V2.brand}; transform: translateY(-1px);
     box-shadow: 0 8px 22px rgba(0,0,0,0.4), ${_RING}, 0 0 16px ${_GLOW};
   }
   .romm-tile { background: ${V2.surface}; border: 1px solid ${V2.border}; transition: background 0.15s ease, transform 0.15s ${_EASE}, box-shadow 0.15s ease, border-color 0.15s ease; }
-  .romm-tile:hover, .romm-tile:focus-within {
+  .romm-tile:hover, .romm-tile.gpfocuswithin {
     background: ${V2.surfaceHover}; transform: translateY(-2px); border-color: ${V2.brand};
     box-shadow: 0 8px 22px rgba(0,0,0,0.4), ${_RING}, 0 0 16px ${_GLOW};
   }
   /* Gamepad focus can be FORCED onto a tile (returning from an emulator
      session) without firing React's onFocus, so the highlight must also be
-     reachable via CSS :focus-within — which matches whenever Steam marks the
-     tile focused, regardless of the React state. These !important rules win
-     over the inline base styles when the tile holds gamepad focus. */
-  .romm-ptile-wrap:hover .romm-ptile-v, .romm-ptile-wrap:focus-within .romm-ptile-v {
+     reachable via CSS. Keyed to Steam's own .gpfocuswithin marker — NOT DOM
+     :focus-within: gamescope leaves the window unfocused after a session, so
+     element.focus() (e.g. useAutoFocus on remount) moves DOM activeElement
+     silently and :focus-within would light a SECOND tile alongside the one
+     Steam actually has gamepad focus on. */
+  .romm-ptile-wrap:hover .romm-ptile-v, .romm-ptile-wrap.gpfocuswithin .romm-ptile-v {
     background: ${V2.surface} !important; border-color: ${V2.brand} !important; transform: scale(1.04) !important;
     box-shadow: 0 8px 28px rgba(0,0,0,0.4), ${_RING}, 0 0 18px rgba(139,116,232,0.55) !important;
   }
-  .romm-ptile-wrap:hover .romm-ptile-ic, .romm-ptile-wrap:focus-within .romm-ptile-ic { color: ${V2.brandHover} !important; opacity: 1 !important; }
-  .romm-ptile-wrap:hover .romm-ptile-lb, .romm-ptile-wrap:focus-within .romm-ptile-lb { color: ${V2.fg} !important; }
-  .romm-gt-wrap:hover .romm-gt-cover, .romm-gt-wrap:focus-within .romm-gt-cover {
+  .romm-ptile-wrap:hover .romm-ptile-ic, .romm-ptile-wrap.gpfocuswithin .romm-ptile-ic { color: ${V2.brandHover} !important; opacity: 1 !important; }
+  .romm-ptile-wrap:hover .romm-ptile-lb, .romm-ptile-wrap.gpfocuswithin .romm-ptile-lb { color: ${V2.fg} !important; }
+  .romm-gt-wrap:hover .romm-gt-cover, .romm-gt-wrap.gpfocuswithin .romm-gt-cover {
     transform: scale(1.04) !important;
     box-shadow: 0 8px 28px rgba(0,0,0,0.4), ${_RING}, 0 0 18px rgba(139,116,232,0.55) !important;
   }
-  .romm-ct-wrap:hover .romm-ct-cover, .romm-ct-wrap:focus-within .romm-ct-cover {
+  .romm-ct-wrap:hover .romm-ct-cover, .romm-ct-wrap.gpfocuswithin .romm-ct-cover {
     transform: scale(1.04) !important;
     box-shadow: 0 8px 28px rgba(0,0,0,0.4), ${_RING}, 0 0 18px rgba(139,116,232,0.55) !important;
   }
@@ -3754,6 +3764,11 @@ function LibraryGroupsPage() {
   useEffect(() => {
     if (!_rommReturnFocusPending) return;
     _rommReturnFocusPending = false;
+    // Steam's input pipeline swallows the first button press after a session
+    // to wake itself back up (the "press twice" bug: LB/RB, dpad, anything).
+    // Feed it a sacrificial virtual press of an unbound button (INVALID=0) so
+    // the wake-up happens now and the user's first real press lands.
+    try { (window as any).FocusNavController?.DispatchVirtualButtonClick?.(0, true); } catch { /* ignore */ }
     // After a game exits Steam often parks gamepad focus on our ROOT Focusable
     // (noFocusRing — buttons respond but nothing is highlighted) or on its own
     // chrome, so "some element has .gpfocus" is not success. Poll and re-assert
