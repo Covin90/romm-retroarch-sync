@@ -636,6 +636,10 @@ class Plugin:
                     is_md = _detect_multi_disc(local_path, is_downloaded)
                     self._available_games.append({
                         'name':            Path(file_name).stem if file_name else rom.get('name', 'Unknown'),
+                        # RomM's metadata title (e.g. "Mario Party 7") — used for
+                        # display; 'name' stays the filename stem because the
+                        # save-sync/local matching keys on it.
+                        'display_name':    rom.get('name'),
                         'rom_id':          rom.get('id'),
                         'platform':        rom.get('platform_name', 'Unknown'),
                         'platform_slug':   platform_slug,
@@ -1102,6 +1106,7 @@ class Plugin:
 
                             game_data = {
                                 'name': Path(file_name).stem if file_name else rom.get('name', 'Unknown'),
+                                'display_name': rom.get('name'),
                                 'rom_id': rom_id,
                                 'platform': rom.get('platform_name', 'Unknown'),
                                 'platform_slug': platform_slug,
@@ -1156,6 +1161,7 @@ class Plugin:
 
                         self._available_games.append({
                             'name':            Path(file_name).stem if file_name else rom.get('name', 'Unknown'),
+                            'display_name':    rom.get('name'),
                             'rom_id':          rom.get('id'),
                             'platform':        rom.get('platform_name', 'Unknown'),
                             'platform_slug':   platform_slug,
@@ -2214,7 +2220,7 @@ class Plugin:
             games = [
                 {
                     'rom_id':   g.get('rom_id'),
-                    'name':     g.get('name'),
+                    'name':     g.get('display_name') or g.get('name'),
                     'platform': _platform(g),
                 }
                 for g in (self._available_games or [])
@@ -2588,7 +2594,8 @@ class Plugin:
         dl = g.get('is_downloaded') if is_downloaded is None else is_downloaded
         s = {
             'rom_id':        g.get('rom_id') or g.get('id'),
-            'name':          g.get('name') or g.get('fs_name_no_ext') or g.get('fs_name') or 'Unknown',
+            # Prefer RomM's metadata title over the filename-derived 'name'.
+            'name':          g.get('display_name') or g.get('name') or g.get('fs_name_no_ext') or g.get('fs_name') or 'Unknown',
             'platform':      g.get('platform'),
             'is_downloaded': dl,
             'has_cover':     bool(g.get('cover_path') or g.get('path_cover_small')),
@@ -2629,7 +2636,7 @@ class Plugin:
                     local = idx.get(rid)
                     entry = {
                         'rom_id': rid,
-                        'name': (local or {}).get('name') or r.get('fs_name_no_ext') or r.get('name') or 'Unknown',
+                        'name': r.get('name') or (local or {}).get('display_name') or (local or {}).get('name') or r.get('fs_name_no_ext') or 'Unknown',
                         'platform': (local or {}).get('platform') or r.get('platform_name'),
                         'is_downloaded': bool(local and local.get('is_downloaded')),
                         'has_cover': bool(r.get('path_cover_small') or (local or {}).get('cover_path')),
@@ -2710,7 +2717,7 @@ class Plugin:
                     local = idx.get(rid)
                     entry = {
                         'rom_id': rid,
-                        'name': (local or {}).get('name') or r.get('fs_name_no_ext') or r.get('name') or 'Unknown',
+                        'name': r.get('name') or (local or {}).get('display_name') or (local or {}).get('name') or r.get('fs_name_no_ext') or 'Unknown',
                         'platform': (local or {}).get('platform') or r.get('platform_name'),
                         'is_downloaded': bool(local and local.get('is_downloaded')),
                         'has_cover': bool(r.get('path_cover_small') or (local or {}).get('cover_path')),
