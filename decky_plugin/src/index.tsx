@@ -7678,15 +7678,16 @@ function registerRommSessionEndWatch() {
         // where Steam delivers no focus events (the reason all the forced-focus
         // machinery exists). So wait until the focus context reports active
         // again — Steam has fully landed — and only then navigate; the page
-        // then behaves like a normal user navigation. Cap the wait at 5s and
-        // fall back to navigating anyway (the forced-focus path still covers
-        // that case).
+        // then behaves like a normal user navigation. Measured on-device
+        // (2026-07-11): Steam takes ~5.5s after app exit to reactivate the
+        // context unaided, so cap the wait at 8s and fall back to navigating
+        // anyway (the forced-focus path still covers that case).
         const t0 = Date.now();
         const go = () => {
           _rommNavTimer = null;
           let healthy = false;
           try { healthy = !!(window as any).FocusNavController?.m_ActiveContext; } catch { /* ignore */ }
-          if (!healthy && Date.now() - t0 < 5000) { _rommNavTimer = setTimeout(go, 250); return; }
+          if (!healthy && Date.now() - t0 < 8000) { _rommNavTimer = setTimeout(go, 250); return; }
           _rommReturnFocusPending = true;
           try { Navigation.Navigate("/romm-sync-library"); Navigation.CloseSideMenus(); } catch (e) { console.error('[RomM] nav', e); }
         };
