@@ -613,7 +613,24 @@ function _fireReactFocus(doc: any): void {
     const MO = doc.defaultView?.MutationObserver || (window as any).MutationObserver;
     const obs = new MO(sync);
     obs.observe(doc.body, { subtree: true, attributes: true, attributeFilter: ['class'] });
-    const stop = () => { try { obs.disconnect(); } catch { /* ignore */ } if (_focusMirrorStop === stop) _focusMirrorStop = null; };
+    // Steam can flip the focus context back to inactive while it's still
+    // healing (~5.5s after app exit); an inactive context swallows the next
+    // button press to reactivate itself — the "press LB/RB twice to switch
+    // tabs" bug. Keep re-asserting the context active through the healing
+    // window so every press lands on the first try, like a fresh open.
+    const ctxIv = setInterval(() => {
+      try {
+        const fnc: any = (window as any).FocusNavController;
+        const ctx: any = fnc?.m_ActiveContext ?? fnc?.m_LastActiveContext ?? fnc?.m_rgAllContexts?.[0];
+        if (ctx && !ctx.BIsActive?.()) ctx.SetActive?.(true);
+      } catch { /* ignore */ }
+    }, 300);
+    setTimeout(() => clearInterval(ctxIv), 8000);
+    const stop = () => {
+      try { obs.disconnect(); } catch { /* ignore */ }
+      try { clearInterval(ctxIv); } catch { /* ignore */ }
+      if (_focusMirrorStop === stop) _focusMirrorStop = null;
+    };
     _focusMirrorStop = stop;
     setTimeout(stop, 600000);   // leak guard
   } catch { /* ignore */ }
