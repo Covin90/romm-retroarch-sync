@@ -732,8 +732,13 @@ function useAutoFocus(ready: boolean, dep?: any) {
   useEffect(() => {
     if (!ready) return;
     _autoFocusFirstRef = ref;
+    // _forceGamepadFocus, not plain focus(): gamescope leaves the window
+    // OS-unfocused after an emulator session, so element.focus() fires no DOM
+    // focus event and Steam never converts it into gamepad focus — the panel
+    // would come up with nothing selected and the next press gets spent
+    // re-acquiring focus. In the healthy state it degrades to the same focus().
     const timers = [0, 60, 160, 320].map((d) =>
-      setTimeout(() => { try { ref.current?.focus(); } catch { } }, d));
+      setTimeout(() => { try { if (ref.current) _forceGamepadFocus(ref.current); } catch { } }, d));
     return () => timers.forEach(clearTimeout);
   }, [ready, dep]);
   return ref;
@@ -3817,7 +3822,10 @@ function LibraryGroupsPage() {
     // leaving BOTH the pill and the first item highlighted (the double-focus).
     // The lone pill focus only lingers while the destination is still loading
     // (no item to focus yet); once it loads, useAutoFocus takes over.
-    setTimeout(() => { try { navPillRef.current?.focus(); } catch { } }, 0);
+    // _forceGamepadFocus, not plain focus(): post-session the window is
+    // OS-unfocused (no DOM focus events), so focus() moves nothing gamepad-wise
+    // and Steam eats the next bumper press re-acquiring focus.
+    setTimeout(() => { try { if (navPillRef.current) _forceGamepadFocus(navPillRef.current); } catch { } }, 0);
   };
 
   // Top-bar chrome (account + RetroDECK) is fetched here — not inside V2NavBar —
