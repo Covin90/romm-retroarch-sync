@@ -7717,10 +7717,22 @@ function SetupWizard() {
         .wiz-dot { transition: width 0.32s cubic-bezier(.22,1,.36,1), background 0.32s ease; }
         .wiz-dot--active { animation: wizDot 0.32s ease; }
       `}</style>
-      <Focusable noFocusRing style={{
-        position: 'relative', zIndex: 2, width: '100%', maxWidth: '440px', margin: 'auto 0',
-        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '22px', textAlign: 'center',
-      }}>
+      <Focusable noFocusRing
+        // L1/R1 flip the login ↔ pair mode on the Connect step (mirrors the
+        // home page's bumper tab paging; the keycaps flank the segment pill).
+        onButtonDown={(evt: any) => {
+          if (step !== 1) return;
+          const b = evt?.detail?.button;
+          if (b === GamepadButton.BUMPER_LEFT || b === GamepadButton.BUMPER_RIGHT) {
+            playSteamSound('deck_ui_tab_transition_01');
+            setMode((m) => (m === 'login' ? 'pair' : 'login'));
+            setTestResult(null);
+          }
+        }}
+        style={{
+          position: 'relative', zIndex: 2, width: '100%', maxWidth: '440px', margin: 'auto 0',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '22px', textAlign: 'center',
+        }}>
         {/* Progress dots */}
         <div style={{ display: 'flex', justifyContent: 'center', gap: '8px' }}>
           {Array.from({ length: TOTAL }).map((_, i) => (
@@ -7748,12 +7760,17 @@ function SetupWizard() {
           {step === 1 && (
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '14px', width: '100%' }}>
               <div style={{ fontSize: '20px', fontWeight: 700 }}>Connect to RomM</div>
-              {/* Login / Pair toggle — same segmented pill as the update channel. */}
-              <V2Segment
-                options={[{ id: 'login', label: 'Username & password' }, { id: 'pair', label: 'Pair code' }]}
-                value={mode}
-                onChange={(m) => { setMode(m as 'login' | 'pair'); setTestResult(null); }}
-              />
+              {/* Login / Pair toggle — same segmented pill as the update channel,
+                  flanked by L1/R1 keycaps like the home nav: bumpers switch mode. */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
+                <Bumper label="L1" />
+                <V2Segment
+                  options={[{ id: 'login', label: 'Username & password' }, { id: 'pair', label: 'Pair code' }]}
+                  value={mode}
+                  onChange={(m) => { setMode(m as 'login' | 'pair'); setTestResult(null); }}
+                />
+                <Bumper label="R1" />
+              </div>
               <V2TextField label="RomM URL" value={url} onChange={onField(setUrl)} placeholder="https://romm.example.com" onKb={setKbRoom} />
               {mode === 'login' ? (
                 <>
@@ -7786,12 +7803,23 @@ function SetupWizard() {
               <div style={{ fontSize: '13px', color: V2.fg2, lineHeight: 1.6, maxWidth: '420px' }}>
                 <div>Where ROMs, saves and BIOS files live on this device.</div>
               </div>
-              <V2TextField label="ROM directory" value={romDir} onChange={setRomDir} onKb={setKbRoom} />
-              <GameActionButton variant="surface" label="Browse…" icon={null} onClick={browse(romDir, setRomDir)} />
-              <V2TextField label="Save directory" value={saveDir} onChange={setSaveDir} onKb={setKbRoom} />
-              <GameActionButton variant="surface" label="Browse…" icon={null} onClick={browse(saveDir, setSaveDir)} />
-              <V2TextField label="BIOS directory" value={biosDir} onChange={setBiosDir} onKb={setKbRoom} />
-              <GameActionButton variant="surface" label="Browse…" icon={null} onClick={browse(biosDir, setBiosDir)} />
+              {/* Field + Browse share a row: the stacked layout was taller than
+                  the viewport, which clipped the footer buttons and killed the
+                  centered spacing. flex-end aligns the button with the input box
+                  (the field's label sits above it). */}
+              {([
+                ['ROM directory', romDir, setRomDir],
+                ['Save directory', saveDir, setSaveDir],
+                ['BIOS directory', biosDir, setBiosDir],
+              ] as [string, string, (v: string) => void][]).map(([lbl, val, set]) => (
+                <Focusable key={lbl} noFocusRing flow-children="horizontal"
+                  style={{ display: 'flex', alignItems: 'flex-end', gap: '10px', width: '100%' }}>
+                  <div style={{ flex: '1 1 auto', minWidth: 0 }}>
+                    <V2TextField label={lbl} value={val} onChange={set} onKb={setKbRoom} />
+                  </div>
+                  <GameActionButton variant="surface" label="Browse…" icon={null} onClick={browse(val, set)} />
+                </Focusable>
+              ))}
               <V2TextField label="Device name" value={deviceName} onChange={setDeviceName} placeholder={deviceNameDefault} onKb={setKbRoom} />
               {footer(
                 <GameActionButton variant="emphasized" label="Next" icon={<FaChevronRight size={13} />} onClick={next} />
