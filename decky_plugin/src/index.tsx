@@ -5302,7 +5302,10 @@ function SaveDataTab({ romId }: { romId: number }) {
           borderRadius: V2.radiusPill, color: active ? V2.bg : V2.fg2,
           padding: '5px 14px', fontSize: '12px', fontWeight: 600, cursor: 'pointer',
           transition: 'background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease',
-          ...V2Focus.flat(focused && !active, { glow: true }),
+          // Ring on focus even when the pill is the ACTIVE one (like the
+          // achievements filters) — the tab-switch focus-pull lands here, and
+          // without the ring the landing was invisible.
+          ...V2Focus.flat(focused, { glow: true }),
         }}
       >
         {label}
@@ -5882,20 +5885,28 @@ function GameDetailPage() {
     const ni = (i < 0 ? 0 : i + dir + tabList.length) % tabList.length;
     setTab(tabList[ni].id);
     const seq = ++tabFocusSeq.current;
-    [60, 180, 400, 750].forEach((d) => setTimeout(() => {
+    // The ladder stretches to ~3s because Save Data mounts its content only
+    // after a fetch. Two guards keep it polite: it stops for good once focus
+    // is inside the content, and it stops if the user has meanwhile driven
+    // focus somewhere else themselves (any connected element that is neither
+    // where focus was at switch time nor a spot we parked it on).
+    const initial: any = _gpFocusEl();
+    let parked: any = null;
+    [60, 180, 400, 750, 1200, 2000, 3000].forEach((d) => setTimeout(() => {
       try {
         if (seq !== tabFocusSeq.current) return;      // superseded by a newer switch
         const host = tabContentRef.current;
         if (!host) return;
         const cur: any = _gpFocusEl();
-        if (cur && cur.isConnected && host.contains(cur)) return;  // already landed
+        if (cur && cur.isConnected && host.contains(cur)) { tabFocusSeq.current++; return; }  // landed — done
+        if (cur && cur.isConnected && cur !== initial && cur !== parked) { tabFocusSeq.current++; return; }  // user moved — don't fight
         // First LEAF focusable: containers (noFocusRing grids/lists) also carry
         // tabindex, but focusing them paints no highlight — skip to their first
         // real item.
         const nodes = Array.from(host.querySelectorAll('[tabindex]')) as HTMLElement[];
         const leaf = nodes.find((n) => !n.querySelector('[tabindex]'));
         if (leaf) { _forceGamepadFocus(leaf); return; }
-        if ((!cur || !cur.isConnected) && ctaRef.current) _forceGamepadFocus(ctaRef.current);
+        if ((!cur || !cur.isConnected) && ctaRef.current) { parked = ctaRef.current; _forceGamepadFocus(parked); }
       } catch { /* ignore */ }
     }, d));
   };
