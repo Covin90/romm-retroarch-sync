@@ -7544,6 +7544,14 @@ function SetupWizard() {
   // collapsing the keyboard restores the page to where the user left it instead
   // of staying scrolled down at wherever the focused field was lifted to.
   const kbRestScroll = useRef(0);
+  const collapseKbRoom = () => {
+    _setKbRoomRaw(false);
+    // After the padding collapses (next frame), glide back to the resting
+    // position — clamped implicitly by the now-shorter scroll range.
+    requestAnimationFrame(() => {
+      try { scrollHostRef.current?.scrollTo({ top: kbRestScroll.current, behavior: 'smooth' }); } catch { }
+    });
+  };
   const setKbRoom = (open: boolean) => {
     if (kbOffTimer.current) { clearTimeout(kbOffTimer.current); kbOffTimer.current = null; }
     if (open) {
@@ -7552,16 +7560,30 @@ function SetupWizard() {
         return true;
       });
     } else {
-      kbOffTimer.current = setTimeout(() => {
-        _setKbRoomRaw(false);
-        // After the padding collapses (next frame), glide back to the resting
-        // position — clamped implicitly by the now-shorter scroll range.
-        requestAnimationFrame(() => {
-          try { scrollHostRef.current?.scrollTo({ top: kbRestScroll.current, behavior: 'smooth' }); } catch { }
-        });
-      }, 450);
+      kbOffTimer.current = setTimeout(collapseKbRoom, 450);
     }
   };
+  // Field blur alone can't detect "keyboard dismissed with B": gamepad focus
+  // stays on the same field so onBlur never fires and the page stayed scrolled
+  // down. While the room is open, watch the keyboard manager's own open flag
+  // and collapse the moment it reports closed (after having been seen open, so
+  // the poll can't race the keyboard's open animation).
+  useEffect(() => {
+    if (!kbRoom) return;
+    let seenOpen = false;
+    const iv = setInterval(() => {
+      try {
+        const win: any = (Router as any)?.WindowStore?.GamepadUIMainWindowInstance;
+        const open = !!win?.VirtualKeyboardManager?.m_bIsInlineVirtualKeyboardOpen?.m_currentValue;
+        if (open) { seenOpen = true; return; }
+        if (seenOpen) {
+          if (kbOffTimer.current) { clearTimeout(kbOffTimer.current); kbOffTimer.current = null; }
+          collapseKbRoom();
+        }
+      } catch { /* ignore */ }
+    }, 250);
+    return () => clearInterval(iv);
+  }, [kbRoom]);
 
   useEffect(() => {
     (async () => {
