@@ -3332,8 +3332,8 @@ const V2SearchField = forwardRef(function V2SearchField(
 // V2TextField — labeled text input sharing the V2SearchField look (RomM
 // RTextField filled variant): rounded surface box, brand focus border + halo.
 // Used by the setup wizard so its fields match the library search bar.
-function V2TextField({ label, value, onChange, password, placeholder, icon, mono, maxLength, onKb }:
-  { label?: string; value: string; onChange: (v: string) => void; password?: boolean; placeholder?: string; icon?: any; mono?: boolean; maxLength?: number; onKb?: (open: boolean) => void }) {
+function V2TextField({ label, value, onChange, password, placeholder, icon, mono, maxLength, onKb, focusRef }:
+  { label?: string; value: string; onChange: (v: string) => void; password?: boolean; placeholder?: string; icon?: any; mono?: boolean; maxLength?: number; onKb?: (open: boolean) => void; focusRef?: React.MutableRefObject<any> }) {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const [focused, setFocused] = useState(false);
   const uid = useRef(`v2tf-${Math.random().toString(36).slice(2, 8)}`).current;
@@ -3376,7 +3376,7 @@ function V2TextField({ label, value, onChange, password, placeholder, icon, mono
     <Focusable
       noFocusRing
       className="wiz-field"
-      ref={(el: any) => { wrapperRef.current = el; }}
+      ref={(el: any) => { wrapperRef.current = el; if (focusRef) focusRef.current = el; }}
       onActivate={enterInput}
       onFocus={() => setFocused(true)} onBlur={leaveInput}
       onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
@@ -7539,6 +7539,10 @@ function SetupWizard() {
   // OFF is debounced: hopping from one field straight to another fires
   // blur(false) then activate(true), and collapsing the padding in between
   // would yank the scroll position around.
+  // Landing focus per step: Connect highlights the RomM URL field (mode already
+  // defaults to pair-code); the final step highlights Finish & open library.
+  const urlFocusRef = useAutoFocus(step === 1, step);
+  const finishFocusRef = useAutoFocus(step === 3, step);
   const [kbRoom, _setKbRoomRaw] = useState(false);
   const kbOffTimer = useRef<any>(null);
   const scrollHostRef = useRef<HTMLDivElement | null>(null);
@@ -7692,8 +7696,11 @@ function SetupWizard() {
       // Bottom padding is only inflated while a field is focused (kbRoom), giving
       // scrollIntoView room to lift the field clear of the keyboard overlay
       // without shifting the resting (unfocused) layout upward.
+      // 28px, not 40: the Folders step is the tallest and at 40px it overflowed
+      // the Deck's ~533px CSS viewport — margin:auto centering collapsed (no top
+      // space) and the footer clipped off-screen.
       display: 'flex', flexDirection: 'column', alignItems: 'center',
-      padding: kbRoom ? '40px 24px 52vh' : '40px 24px', overflowY: 'auto',
+      padding: kbRoom ? '28px 24px 52vh' : '28px 24px', overflowY: 'auto',
     }}>
       <V2Bg uri={null} />
       {/* romm-ui + this rule strip the CEF :focus outline that otherwise leaves a
@@ -7771,7 +7778,7 @@ function SetupWizard() {
                 />
                 <Bumper label="R1" />
               </div>
-              <V2TextField label="RomM URL" value={url} onChange={onField(setUrl)} placeholder="https://romm.example.com" onKb={setKbRoom} />
+              <V2TextField label="RomM URL" value={url} onChange={onField(setUrl)} placeholder="https://romm.example.com" onKb={setKbRoom} focusRef={urlFocusRef} />
               {mode === 'login' ? (
                 <>
                   <V2TextField label="Username" value={username} onChange={onField(setUsername)} onKb={setKbRoom} />
@@ -7798,10 +7805,10 @@ function SetupWizard() {
           )}
 
           {step === 2 && (
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px', width: '100%' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px', width: '100%' }}>
               <div style={{ fontSize: '20px', fontWeight: 700 }}>Folders</div>
-              <div style={{ fontSize: '13px', color: V2.fg2, lineHeight: 1.6, maxWidth: '420px' }}>
-                <div>Where ROMs, saves and BIOS files live on this device.</div>
+              <div style={{ fontSize: '13px', color: V2.fg2, lineHeight: 1.5, maxWidth: '420px' }}>
+                Where ROMs, saves and BIOS files live on this device.
               </div>
               {/* Field + Browse share a row: the stacked layout was taller than
                   the viewport, which clipped the footer buttons and killed the
@@ -7837,7 +7844,7 @@ function SetupWizard() {
                   : 'We\'ll save your connection and open your library.'}
               </div>
               {footer(
-                <GameActionButton variant="emphasized" disabled={busy}
+                <GameActionButton variant="emphasized" disabled={busy} focusRef={finishFocusRef}
                   label={busy ? 'Connecting…' : 'Finish & open library'}
                   icon={busy ? <FaSync size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <FaPlay size={13} style={{ marginLeft: '2px' }} />}
                   onClick={doFinish} />
