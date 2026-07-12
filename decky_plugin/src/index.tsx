@@ -1788,7 +1788,9 @@ function UserMenuModal({ username, role, avatar, closeModal }:
   useEffect(() => { const t = setTimeout(() => { if (panelRef.current) _forceGamepadFocus(panelRef.current); }, 60); return () => clearTimeout(t); }, []);
   const [refreshing, setRefreshing] = useState(false);
 
-  const go = (route: string) => { closeModal?.(); Navigation.Navigate(route); };
+  // In-library view when the library route hosts us (keeps the tabs tree
+  // mounted underneath), real navigation otherwise.
+  const go = (route: string) => { closeModal?.(); libNavigate(route); };
   const doRefresh = async () => {
     if (refreshing) return;
     setRefreshing(true);
@@ -2547,6 +2549,39 @@ function navBack(fallback: string) {
 function navExitPlugin() {
   _expectedPopAt = 0;
   _histBack(_gpHistory());
+}
+
+// ── In-library view switching (route-level keep-alive) ───────────────────────
+// Steam's router unmounts a route's entire tree on navigation, so every trip
+// into a platform grid / game detail / settings used to rebuild the four
+// keep-alive tab panels on the way back (~100–200ms of long tasks plus a
+// cover re-decode burst). Instead of leaving /romm-sync-library at all, the
+// inner pages now mount as views INSIDE that route (LibraryRootPage) while
+// the tabs tree stays mounted hidden underneath — same display:none trick
+// that made tab switching instant, extended one level up.
+// These module hooks are only set while LibraryRootPage is mounted; when they
+// are null (e.g. Settings opened from the QAM as a real route) callers fall
+// back to genuine navigation, preserving the old behavior.
+type LibView = 'grid' | 'game' | 'settings' | 'stats' | 'cores';
+let _libPushView: ((v: LibView) => void) | null = null;
+let _libPopView: (() => void) | null = null;
+const _libViewForRoute: Record<string, LibView> = {
+  '/romm-sync-settings': 'settings',
+  '/romm-sync-stats': 'stats',
+  '/romm-sync-cores': 'cores',
+};
+// Open a plugin page: as an in-library view when the library route hosts us,
+// as a real route otherwise (QAM entry points, stale fallbacks).
+function libNavigate(route: string) {
+  const v = _libViewForRoute[route];
+  if (v && _libPushView) { _libPushView(v); return; }
+  try { Navigation.Navigate(route); } catch { /* ignore */ }
+}
+// Back out of a plugin page: pop the in-library view stack when hosted,
+// otherwise genuinely pop the router history.
+function libBack(fallback: string) {
+  if (_libPopView) { _libPopView(); return; }
+  navBack(fallback);
 }
 // Wraps every plugin route. A plugin page entered via a history POP we did not
 // initiate means Steam's back navigation surfaced one of our history entries
@@ -3908,7 +3943,63 @@ function OfflineBanner({ status }: { status: any }) {
   );
 }
 
-function LibraryGroupsPage() {
+// Route component for /romm-sync-library. Hosts the tabs page permanently and
+// stacks the inner pages (game grid, game detail, settings family) on top as
+// internal views, so backing out of any of them re-shows the still-mounted
+// tabs tree instead of rebuilding it (see the LibView comment above).
+function LibraryRootPage() {
+  const [stack, setStack] = useState<LibView[]>([]);
+  const viewRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    _libPushView = (v) => setStack((s) => [...s, v]);
+    _libPopView = () => setStack((s) => s.slice(0, -1));
+    return () => { _libPushView = null; _libPopView = null; };
+  }, []);
+  const top = stack.length ? stack[stack.length - 1] : null;
+
+  // An internally pushed view gets no route-change focus pass from Steam (that
+  // only happens on real navigation), so pull gamepad focus onto its first
+  // focusable element — unless the page's own autofocus (e.g. the grid's first
+  // tile) already landed inside it. On pop, no work is needed here: the tab
+  // panels' useAutoFocus re-fires when their `visible` flips back on and lands
+  // on the first item, exactly what a route remount used to do.
+  useEffect(() => {
+    if (!top) return;
+    const timers = [80, 240, 500].map((d) => setTimeout(() => {
+      try {
+        const host = viewRef.current;
+        if (!host) return;
+        const cur = _gpFocusEl();
+        if (cur && host.contains(cur)) return;
+        const first = host.querySelector('[tabindex]') as HTMLElement | null;
+        if (first) _forceGamepadFocus(first);
+      } catch { /* ignore */ }
+    }, d));
+    return () => timers.forEach(clearTimeout);
+  }, [top]);
+
+  return (
+    <>
+      {/* Never unmounts while inside the library — that's the whole point.
+          display:none also keeps its hidden Focusables out of gamepad nav,
+          same as the tab panels' keep-alive. */}
+      <div style={{ display: top ? 'none' : undefined }}>
+        <LibraryGroupsPage covered={!!top} />
+      </div>
+      {top && (
+        <div ref={viewRef}>
+          {top === 'grid' && <LibraryGamesPage />}
+          {top === 'game' && <GameDetailPage />}
+          {top === 'settings' && <SettingsPage />}
+          {top === 'stats' && <StatsPage />}
+          {top === 'cores' && <CoresPage />}
+        </div>
+      )}
+    </>
+  );
+}
+
+function LibraryGroupsPage({ covered = false }: { covered?: boolean }) {
   // Reaching the library is the success signal for the post-update "reopen Home"
   // breadcrumb — consume it here (not on plugin load) so it survives the double
   // reload the installer causes. See the _LS_REOPEN_HOME consumer in definePlugin.
@@ -3930,14 +4021,16 @@ function LibraryGroupsPage() {
   const openGroupFrom = (m: string, g: LibGroup, gs: LibGroup[]) => {
     _libGroupHolder = { mode: m, group: g };
     _libGroupsHolder = { mode: m, groups: gs };
-    Navigation.Navigate(`/romm-sync-library/${encodeURIComponent(g.key)}`);
+    if (_libPushView) _libPushView('grid');
+    else Navigation.Navigate(`/romm-sync-library/${encodeURIComponent(g.key)}`);
   };
 
   const openGame = (g: LibGame) => {
     _libGameHolder = g;
     // Opened from the home/search/index grid → back returns to the library root.
     _libGameOrigin = "/romm-sync-library";
-    Navigation.Navigate(`/romm-sync-game/${g.rom_id}`);
+    if (_libPushView) _libPushView('game');
+    else Navigation.Navigate(`/romm-sync-game/${g.rom_id}`);
   };
 
   const onTab = (id: NavId) => { _libLastTab = id; setActive(id); };
@@ -4036,7 +4129,7 @@ function LibraryGroupsPage() {
     const b = evt?.detail?.button;
     if (b === GamepadButton.BUMPER_LEFT) cycle(-1);
     else if (b === GamepadButton.BUMPER_RIGHT) cycle(1);
-    else if (b === GamepadButton.SELECT) { playSteamSound('deck_ui_show_modal'); Navigation.Navigate("/romm-sync-settings"); }
+    else if (b === GamepadButton.SELECT) { playSteamSound('deck_ui_show_modal'); libNavigate("/romm-sync-settings"); }
     else if (b === GamepadButton.OPTIONS) openUserMenu();               // Y → account menu
     else if (b === GamepadButton.START) openUserMenu();                 // ☰ Start → account menu
   };
@@ -4078,18 +4171,21 @@ function LibraryGroupsPage() {
 
       {/* All four panels stay mounted once visited; only the active one is
           displayed. Unmounting on switch rebuilt every cover <img> and cost
-          ~100–200ms long tasks per switch (measured on-device). */}
+          ~100–200ms long tasks per switch (measured on-device). `covered`
+          (an inner view is stacked on top of this whole page) gates `visible`
+          too, so a hidden panel's useAutoFocus can't steal gamepad focus from
+          the view above when a silent refetch changes its first item. */}
       <div style={{ display: active === 'home' ? undefined : 'none' }}>
-        {seen['home'] && <HomePanel visible={active === 'home'} onOpen={openGame} onOpenGroup={openGroupFrom} onBg={setBgUri} />}
+        {seen['home'] && <HomePanel visible={!covered && active === 'home'} onOpen={openGame} onOpenGroup={openGroupFrom} onBg={setBgUri} />}
       </div>
       <div style={{ display: active === 'platforms' ? undefined : 'none' }}>
-        {seen['platforms'] && <GroupsPanel mode="platform" visible={active === 'platforms'} onOpenGroup={openGroupFrom} svcStatus={svcStatus} />}
+        {seen['platforms'] && <GroupsPanel mode="platform" visible={!covered && active === 'platforms'} onOpenGroup={openGroupFrom} svcStatus={svcStatus} />}
       </div>
       <div style={{ display: active === 'collections' ? undefined : 'none' }}>
-        {seen['collections'] && <GroupsPanel mode="collection" visible={active === 'collections'} onOpenGroup={openGroupFrom} svcStatus={svcStatus} />}
+        {seen['collections'] && <GroupsPanel mode="collection" visible={!covered && active === 'collections'} onOpenGroup={openGroupFrom} svcStatus={svcStatus} />}
       </div>
       <div style={{ display: active === 'search' ? undefined : 'none' }}>
-        {seen['search'] && <SearchPanel visible={active === 'search'} onOpen={openGame} onBg={setBgUri} />}
+        {seen['search'] && <SearchPanel visible={!covered && active === 'search'} onOpen={openGame} onBg={setBgUri} />}
       </div>
     </Focusable>,
     bgUri,
@@ -4211,7 +4307,8 @@ function LibraryGamesPage() {
     _libGameHolder = g;
     // Return to THIS collection/platform's games page when backing out.
     _libGameOrigin = group ? `/romm-sync-library/${encodeURIComponent(group.key)}` : "/romm-sync-library";
-    Navigation.Navigate(`/romm-sync-game/${g.rom_id}`);
+    if (_libPushView) _libPushView('game');
+    else Navigation.Navigate(`/romm-sync-game/${g.rom_id}`);
   };
   const openGameImplRef = useRef(openGameImpl);
   openGameImplRef.current = openGameImpl;
@@ -4430,13 +4527,13 @@ function LibraryGamesPage() {
     if (b === GamepadButton.BUMPER_LEFT) cycle(-1);
     else if (b === GamepadButton.BUMPER_RIGHT) cycle(1);
     else if (b === GamepadButton.OPTIONS) toggleSync(); // Y
-    else if (b === GamepadButton.SELECT) { playSteamSound('deck_ui_show_modal'); Navigation.Navigate("/romm-sync-settings"); }
+    else if (b === GamepadButton.SELECT) { playSteamSound('deck_ui_show_modal'); libNavigate("/romm-sync-settings"); }
     else if (b === GamepadButton.START) openActions();                  // ☰ Start → games-count actions menu (top-right)
   };
   // Back → library index. Use onCancelButton (not a CANCEL case in onButtonDown):
   // it CONSUMES the B press so Steam's default router-back doesn't ALSO fire and
   // pop us right back into this platform.
-  const onBack = () => navBack("/romm-sync-library");
+  const onBack = () => libBack("/romm-sync-library");
 
   const jumpTo = (g: LibGroup) => {
     const from = siblings.findIndex((s) => s.key === group?.key);
@@ -5772,12 +5869,12 @@ function GameDetailPage() {
     const b = evt?.detail?.button;
     if (b === GamepadButton.BUMPER_LEFT) cycleTab(-1);
     else if (b === GamepadButton.BUMPER_RIGHT) cycleTab(1);
-    else if (b === GamepadButton.SELECT) { playSteamSound('deck_ui_show_modal'); Navigation.Navigate("/romm-sync-settings"); }
+    else if (b === GamepadButton.SELECT) { playSteamSound('deck_ui_show_modal'); libNavigate("/romm-sync-settings"); }
   };
   // Back returns to the page this game was opened from (collection/platform games
   // page or the library index). onCancelButton CONSUMES B so Steam's default
   // router-back doesn't also fire (which would land somewhere else entirely).
-  const onBack = () => navBack(_libGameOrigin);
+  const onBack = () => libBack(_libGameOrigin);
 
   return v2Page(
     <Focusable noFocusRing onButtonDown={onButtonDown} onCancelButton={onBack} style={{ padding: '20px 16px' }}>
@@ -6236,11 +6333,11 @@ function StatsPage() {
 
   return v2Page(
     <Focusable noFocusRing
-      onCancelButton={() => navBack("/romm-sync-library")}
+      onCancelButton={() => libBack("/romm-sync-library")}
       style={{ maxWidth: '760px', margin: '0 auto', padding: '20px 20px 80px' }}>
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '24px' }}>
-        <GameActionButton icon={<FaChevronLeft size={16} />} onClick={() => navBack("/romm-sync-library")} />
+        <GameActionButton icon={<FaChevronLeft size={16} />} onClick={() => libBack("/romm-sync-library")} />
         <div style={{ fontSize: '24px', fontWeight: 800, letterSpacing: '-0.01em' }}>Stats</div>
       </div>
 
@@ -6424,11 +6521,11 @@ function CoresPage() {
 
   return v2Page(
     <Focusable noFocusRing
-      onCancelButton={() => navBack("/romm-sync-library")}
+      onCancelButton={() => libBack("/romm-sync-library")}
       style={{ maxWidth: '760px', margin: '0 auto', padding: '20px 20px 0' }}>
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '24px' }}>
-        <GameActionButton icon={<FaChevronLeft size={16} />} onClick={() => navBack("/romm-sync-library")} />
+        <GameActionButton icon={<FaChevronLeft size={16} />} onClick={() => libBack("/romm-sync-library")} />
         <div style={{ fontSize: '24px', fontWeight: 800, letterSpacing: '-0.01em' }}>Emulator Cores</div>
       </div>
 
@@ -6856,11 +6953,11 @@ function SettingsPage() {
 
   return v2Page(
     <Focusable noFocusRing
-      onCancelButton={() => navBack("/romm-sync-library")}
+      onCancelButton={() => libBack("/romm-sync-library")}
       style={{ maxWidth: '760px', margin: '0 auto', padding: '20px 20px 0' }}>
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '24px' }}>
-        <GameActionButton icon={<FaChevronLeft size={16} />} onClick={() => navBack("/romm-sync-library")} />
+        <GameActionButton icon={<FaChevronLeft size={16} />} onClick={() => libBack("/romm-sync-library")} />
         <div style={{ fontSize: '24px', fontWeight: 800, letterSpacing: '-0.01em' }}>Settings</div>
       </div>
 
@@ -7912,7 +8009,7 @@ export default definePlugin(() => {
   routerHook.addRoute("/romm-sync-stats", () => <RouteGuard><StatsPage /></RouteGuard>, { exact: true });
   routerHook.addRoute("/romm-sync-cores", () => <RouteGuard><CoresPage /></RouteGuard>, { exact: true });
   routerHook.addRoute("/romm-sync-config", () => <RouteGuard><ConfigPage /></RouteGuard>, { exact: true });
-  routerHook.addRoute("/romm-sync-library", () => <RouteGuard><LibraryGroupsPage /></RouteGuard>, { exact: true });
+  routerHook.addRoute("/romm-sync-library", () => <RouteGuard><LibraryRootPage /></RouteGuard>, { exact: true });
   routerHook.addRoute("/romm-sync-library/:key", () => <RouteGuard><LibraryGamesPage /></RouteGuard>, { exact: true });
   routerHook.addRoute("/romm-sync-game/:romId", () => <RouteGuard><GameDetailPage /></RouteGuard>, { exact: true });
 
