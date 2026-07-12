@@ -7732,7 +7732,12 @@ function SetupWizard() {
           onFocused={() => {
             const fromOutside = Date.now() - footerTouch.current > 250;
             touch();
-            if (fromOutside) { try { if (pRef.current) _forceGamepadFocus(pRef.current); } catch { /* ignore */ } }
+            // Deferred, twice: bouncing synchronously from inside Steam's focus
+            // pass let it finish bookkeeping on Back afterward — the ring drew
+            // on the primary but A still activated Back.
+            if (fromOutside) [30, 150].forEach((d) => setTimeout(() => {
+              try { if (pRef.current) _forceGamepadFocus(pRef.current); } catch { /* ignore */ }
+            }, d));
           }} />
         {p}
       </Focusable>
