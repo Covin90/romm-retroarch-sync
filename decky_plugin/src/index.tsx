@@ -3333,8 +3333,8 @@ const V2SearchField = forwardRef(function V2SearchField(
 // V2TextField — labeled text input sharing the V2SearchField look (RomM
 // RTextField filled variant): rounded surface box, brand focus border + halo.
 // Used by the setup wizard so its fields match the library search bar.
-function V2TextField({ label, value, onChange, password, placeholder, icon, mono, maxLength, onKb, focusRef }:
-  { label?: string; value: string; onChange: (v: string) => void; password?: boolean; placeholder?: string; icon?: any; mono?: boolean; maxLength?: number; onKb?: (open: boolean) => void; focusRef?: React.MutableRefObject<any> }) {
+function V2TextField({ label, value, onChange, password, placeholder, icon, mono, maxLength, onKb, focusRef, onEnter }:
+  { label?: string; value: string; onChange: (v: string) => void; password?: boolean; placeholder?: string; icon?: any; mono?: boolean; maxLength?: number; onKb?: (open: boolean) => void; focusRef?: React.MutableRefObject<any>; onEnter?: () => void }) {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const [focused, setFocused] = useState(false);
   const uid = useRef(`v2tf-${Math.random().toString(36).slice(2, 8)}`).current;
@@ -3381,6 +3381,9 @@ function V2TextField({ label, value, onChange, password, placeholder, icon, mono
       onActivate={enterInput}
       onFocus={() => setFocused(true)} onBlur={leaveInput}
       onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
+      // Enter on the on-screen keyboard (also R2, which Steam maps to Enter)
+      // reaches the input as a keydown — treat it as "submit this field".
+      onKeyDownCapture={onEnter ? (e: any) => { if (e.key === 'Enter') { e.preventDefault(); onEnter(); } } : undefined}
       style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%', scrollMarginTop: '12vh' }}
     >
       {label && <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: V2.fgMuted, textAlign: 'center' }}>{label}</div>}
@@ -3413,8 +3416,8 @@ function V2TextField({ label, value, onChange, password, placeholder, icon, mono
 // typed character replaces one `*` (rather than a placeholder that vanishes on
 // the first keystroke). A transparent, char-aligned input sits over the mask so
 // the caret lands on the next empty slot.
-function PairCodeField({ label, value, onChange, onKb }:
-  { label?: string; value: string; onChange: (v: string) => void; onKb?: (open: boolean) => void }) {
+function PairCodeField({ label, value, onChange, onKb, onEnter }:
+  { label?: string; value: string; onChange: (v: string) => void; onKb?: (open: boolean) => void; onEnter?: () => void }) {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const [focused, setFocused] = useState(false);
   const digits = value.replace(/-/g, '');
@@ -3452,6 +3455,7 @@ function PairCodeField({ label, value, onChange, onKb }:
       onActivate={enterInput}
       onFocus={() => setFocused(true)} onBlur={leaveInput}
       onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
+      onKeyDownCapture={onEnter ? (e: any) => { if (e.key === 'Enter') { e.preventDefault(); onEnter(); } } : undefined}
       style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%', scrollMarginTop: '12vh' }}
     >
       {label && <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: V2.fgMuted, textAlign: 'center' }}>{label}</div>}
@@ -7815,7 +7819,8 @@ function SetupWizard() {
                 <>
                   <V2TextField label="Username" value={username} onChange={onField(setUsername)} onKb={setKbRoom} />
                   <V2TextField label="Password" value={password} onChange={onField(setPassword)} password
-                    placeholder={hasPassword && !password ? 'Leave blank to keep saved' : undefined} onKb={setKbRoom} />
+                    placeholder={hasPassword && !password ? 'Leave blank to keep saved' : undefined} onKb={setKbRoom}
+                    onEnter={() => { if (canConnect) next(); }} />
                   {testResult && (
                     <div style={{ fontSize: '13px', color: testResult.success ? V2.success : V2.danger }}>
                       {testResult.success ? '✅' : '❌'} {testResult.message}
@@ -7827,7 +7832,8 @@ function SetupWizard() {
               ) : (
                 <>
                   <PairCodeField label="Pairing code" value={pairCode}
-                    onChange={(v) => setPairCode(formatPairCode(v))} onKb={setKbRoom} />
+                    onChange={(v) => setPairCode(formatPairCode(v))} onKb={setKbRoom}
+                    onEnter={() => { if (canConnect) next(); }} />
                 </>
               )}
               {footer(
