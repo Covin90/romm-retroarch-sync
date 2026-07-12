@@ -2015,10 +2015,18 @@ function Bumper({ label }: { label: string }) {
 
 // RomM RTabNav "underlined" variant — tabs over a bottom border with a 2px
 // brand underline that slides between the active tab (GameDetails tab strip).
-function V2TabNav({ tabs, active, onTab }:
-  { tabs: { id: string; label: string }[]; active: string; onTab: (id: string) => void }) {
+function V2TabNav({ tabs, active, onTab, activeRef }:
+  {
+    tabs: { id: string; label: string }[]; active: string; onTab: (id: string) => void;
+    // Exposes the ACTIVE pill's Focusable, so the host page can re-anchor
+    // gamepad focus here after an L1/R1 tab switch unmounts the focused content.
+    activeRef?: React.MutableRefObject<any>;
+  }) {
   const refs = useRef<(HTMLDivElement | null)[]>([]);
   const [ind, setInd] = useState<{ left: number; width: number } | null>(null);
+  // Gamepad focus under gamescope doesn't reliably fire CSS :focus-within, so
+  // track the focused pill in JS and paint it explicitly (same as the nav bar).
+  const [focusId, setFocusId] = useState<string | null>(null);
   const idx = tabs.findIndex((t) => t.id === active);
   useEffect(() => {
     const el = refs.current[idx];
@@ -2028,12 +2036,17 @@ function V2TabNav({ tabs, active, onTab }:
     <div style={{ position: 'relative', display: 'flex', gap: '2px', borderBottom: `1px solid ${V2.borderStrong}` }}>
       {tabs.map((t, i) => {
         const on = active === t.id;
+        const focused = focusId === t.id;
         return (
-          <Focusable noFocusRing key={t.id} onActivate={() => onTab(t.id)} onClick={() => onTab(t.id)}>
+          <Focusable noFocusRing key={t.id} ref={on ? activeRef : undefined}
+            onActivate={() => onTab(t.id)} onClick={() => onTab(t.id)}
+            onFocus={() => setFocusId(t.id)} onBlur={() => setFocusId((c) => c === t.id ? null : c)}
+            onMouseEnter={() => setFocusId(t.id)} onMouseLeave={() => setFocusId((c) => c === t.id ? null : c)}
+            style={{ borderRadius: `${V2.radiusMd} ${V2.radiusMd} 0 0`, ...V2Focus.segment(focused) }}>
             <div ref={(el) => { refs.current[i] = el; }}
               style={{
                 padding: '8px 18px', fontSize: '13px', cursor: 'pointer',
-                fontWeight: 500, color: on ? V2.fg : V2.fgMuted, transition: 'color 0.15s ease',
+                fontWeight: 500, color: on || focused ? V2.fg : V2.fgMuted, transition: 'color 0.15s ease',
               }}>
               {t.label}
             </div>
@@ -2096,11 +2109,12 @@ function V2Button({ children, onClick, variant = 'tonal', color, disabled }:
 // `danger` is a filled-danger pill for the delete-confirm step. Pill radius
 // throughout; controller focus paints a brand ring + slight scale.
 function GameActionButton({ icon, label, onClick, variant = 'surface', accent, disabled, progress,
-  onOptionsButton, optionsHint }:
+  onOptionsButton, optionsHint, focusRef }:
   {
     icon: any; label?: string; onClick: () => void;
     variant?: 'emphasized' | 'surface' | 'danger'; accent?: 'danger'; disabled?: boolean;
-    progress?: number | null; onOptionsButton?: () => void; optionsHint?: boolean
+    progress?: number | null; onOptionsButton?: () => void; optionsHint?: boolean;
+    focusRef?: React.MutableRefObject<any>;
   }) {
   const [active, setActive] = useState(false);
   const labelled = !!label;
@@ -2150,7 +2164,7 @@ function GameActionButton({ icon, label, onClick, variant = 'surface', accent, d
   const ring = dangerSurface ? V2.danger : V2.brand;
   const glow = active && !disabled ? { boxShadow: `0 0 0 2px ${ring}` } : {};
   return (
-    <Focusable noFocusRing
+    <Focusable noFocusRing ref={focusRef}
       onActivate={() => !disabled && onClick()}
       onClick={() => !disabled && onClick()}
       onOptionsButton={onOptionsButton ? () => !disabled && onOptionsButton() : undefined}
@@ -4852,7 +4866,7 @@ function ScreenshotThumb({ paths, index }: { paths: string[]; index: number; }) 
     <Focusable noFocusRing
       onActivate={open}
       onClick={open}
-      onFocus={() => setFocused(true)}
+      onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
       onMouseEnter={() => setFocused(true)}
       onMouseLeave={() => setFocused(false)}
       style={{
@@ -5697,6 +5711,11 @@ function GameDetailPage() {
   const globalDownloading = useIsDownloading(game?.rom_id ?? -1);
   const downloading = busy === 'download' || globalDownloading;
   const smoothPct = useSmoothNumber(dlPct, downloading);
+  // Land gamepad focus on the primary CTA (Play / Download) when the page
+  // opens. As an internal view (LibraryRootPage) there is no route change, so
+  // Steam gives us no focus pass — without this the generic view focus-pull
+  // could park focus on the page's invisible root Focusable.
+  const ctaRef = useAutoFocus(true, game?.rom_id);
 
   const load = async () => {
     if (!game) { setLoading(false); return; }
@@ -5860,10 +5879,22 @@ function GameDetailPage() {
   tabList.push({ id: 'metadata', label: 'Metadata' });
 
   // L1 / R1 page through the detail tabs (RomM pages detail tabs with bumpers).
+  // Switching tabs unmounts the old tab's content — if gamepad focus was inside
+  // it (a save row, a screenshot, an achievement) it dies with the tree and the
+  // user is left steering an invisible cursor. After the swap, if the focused
+  // element is gone, re-anchor on the ACTIVE tab pill (persistent, spatially
+  // where the user just acted). Focus that survived (CTA, tab pill) is left alone.
+  const tabPillRef = useRef<any>(null);
   const cycleTab = (dir: -1 | 1) => {
     const i = tabList.findIndex((t) => t.id === tab);
     const ni = (i < 0 ? 0 : i + dir + tabList.length) % tabList.length;
     setTab(tabList[ni].id);
+    setTimeout(() => {
+      try {
+        const cur: any = _gpFocusEl();
+        if ((!cur || !cur.isConnected) && tabPillRef.current) _forceGamepadFocus(tabPillRef.current);
+      } catch { /* ignore */ }
+    }, 60);
   };
   const onButtonDown = (evt: any) => {
     const b = evt?.detail?.button;
@@ -5941,7 +5972,7 @@ function GameDetailPage() {
               surface icon buttons for the secondary actions (Delete). */}
           <Focusable noFocusRing flow-children="horizontal" style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
             {!isDownloaded ? (
-              <GameActionButton variant="emphasized" disabled={!!busy || downloading} onClick={doDownload}
+              <GameActionButton variant="emphasized" focusRef={ctaRef} disabled={!!busy || downloading} onClick={doDownload}
                 progress={downloading ? (dlPct ?? 0) : undefined}
                 label={downloading
                   ? (dlPct != null ? `Downloading… ${smoothPct}%` : 'Downloading…')
@@ -5951,7 +5982,7 @@ function GameDetailPage() {
                   : <FaDownload size={15} />} />
             ) : !confirmDelete ? (
               <>
-                <GameActionButton variant="emphasized" disabled={!!busy}
+                <GameActionButton variant="emphasized" focusRef={ctaRef} disabled={!!busy}
                   onClick={() => doLaunch()}
                   onOptionsButton={isMultiDisc ? openDiscMenu : undefined}
                   optionsHint={isMultiDisc}
@@ -5990,7 +6021,7 @@ function GameDetailPage() {
 
           {/* Tabbed panel (RomM GameDetails: RTabNav + tab content). L1/R1 page tabs. */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <div style={{ flex: '1 1 auto', minWidth: 0 }}><V2TabNav tabs={tabList} active={tab} onTab={setTab} /></div>
+            <div style={{ flex: '1 1 auto', minWidth: 0 }}><V2TabNav tabs={tabList} active={tab} onTab={setTab} activeRef={tabPillRef} /></div>
             <Bumper label="L1" />
             <Bumper label="R1" />
           </div>
