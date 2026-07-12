@@ -16,7 +16,7 @@ import {
   MenuItem,
 } from "@decky/ui";
 import { callable, definePlugin, toaster, routerHook, openFilePicker, FileSelectionType } from "@decky/api";
-import { useState, useEffect, useLayoutEffect, useRef, useMemo, forwardRef, memo, type Ref, type ChangeEvent } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useMemo, forwardRef, memo, cloneElement, type Ref, type ChangeEvent } from "react";
 import { FaSync, FaTrash, FaCog, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaTimesCircle, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight, FaCheckCircle, FaUsers, FaExternalLinkAlt, FaPuzzlePiece, FaBoxOpen, FaClone, FaRedo, FaClock, FaCheck, FaEllipsisH, FaGlobe, FaChevronDown, FaChartBar, FaSignOutAlt } from "react-icons/fa";
 import { BsGearFill } from "react-icons/bs";
 import { MdVerified } from "react-icons/md";
@@ -2098,12 +2098,13 @@ function V2Button({ children, onClick, variant = 'tonal', color, disabled }:
 // `danger` is a filled-danger pill for the delete-confirm step. Pill radius
 // throughout; controller focus paints a brand ring + slight scale.
 function GameActionButton({ icon, label, onClick, variant = 'surface', accent, disabled, progress,
-  onOptionsButton, optionsHint, focusRef }:
+  onOptionsButton, optionsHint, focusRef, onFocused, onBlurred }:
   {
     icon: any; label?: string; onClick: () => void;
     variant?: 'emphasized' | 'surface' | 'danger'; accent?: 'danger'; disabled?: boolean;
     progress?: number | null; onOptionsButton?: () => void; optionsHint?: boolean;
     focusRef?: React.MutableRefObject<any>;
+    onFocused?: () => void; onBlurred?: () => void;
   }) {
   const [active, setActive] = useState(false);
   const labelled = !!label;
@@ -2158,7 +2159,7 @@ function GameActionButton({ icon, label, onClick, variant = 'surface', accent, d
       onClick={() => !disabled && onClick()}
       onOptionsButton={onOptionsButton ? () => !disabled && onOptionsButton() : undefined}
       onOptionsActionDescription={onOptionsButton ? 'Select disc' : undefined}
-      onFocus={() => setActive(true)} onBlur={() => setActive(false)}
+      onFocus={() => { setActive(true); onFocused?.(); }} onBlur={() => { setActive(false); onBlurred?.(); }}
       onMouseEnter={() => setActive(true)} onMouseLeave={() => setActive(false)}
       style={{ ...base, ...tone, ...glow }}
     >
@@ -6796,6 +6797,17 @@ function SettingsPage() {
   // When the log-out confirmation opens, land gamepad focus on its first option
   // instead of leaving the highlight parked on the (now-hidden) Log out row.
   const logoutFirstRef = useAutoFocus(confirmLogout, confirmLogout);
+  // And bring the expanded panel on-screen: the forced focus above doesn't make
+  // Steam scroll (only real navigation does), so without this the taller panel
+  // opens below the fold and the user has to scroll to it manually.
+  const confirmPanelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!confirmLogout) return;
+    const timers = [120, 400].map((d) => setTimeout(() => {
+      try { confirmPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch { /* ignore */ }
+    }, d));
+    return () => timers.forEach(clearTimeout);
+  }, [confirmLogout]);
   const [serverInfo, setServerInfo] = useState<string>('');
   const [rdDetected, setRdDetected] = useState<boolean>(false);
   const [rdButton, setRdButton] = useState<boolean>(false);
@@ -7202,7 +7214,7 @@ function SettingsPage() {
             danger
           />
         ) : (
-          <div style={{
+          <div ref={confirmPanelRef} style={{
             display: 'flex', flexDirection: 'column', gap: '12px', padding: '16px',
             borderRadius: V2.radiusCard, background: 'rgba(255,80,80,0.08)',
             border: `1px solid rgba(255,80,80,0.40)`,
@@ -7682,12 +7694,31 @@ function SetupWizard() {
   };
 
   // Footer: Back pinned left, Next/primary pinned right (space-between).
-  const footer = (primary: any) => (
-    <Focusable noFocusRing flow-children="horizontal" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', marginTop: '8px' }}>
-      <GameActionButton variant="surface" label="Back" icon={<FaChevronLeft size={13} />} onClick={back} />
-      {primary}
-    </Focusable>
-  );
+  // Dpad-down from the step content enters the footer at its FIRST child (Back),
+  // but the primary action is what the user is walking toward — so when focus
+  // arrives on Back from OUTSIDE the footer, bounce it to the primary. Moving
+  // left from the primary (a deliberate trip to Back) is within-footer and
+  // stays put: both buttons stamp footerTouch on focus/blur, and the redirect
+  // only fires when the footer hasn't been touched in the last 250ms.
+  const footerTouch = useRef(0);
+  const footerPrimaryRef = useRef<any>(null);
+  const footer = (primary: any) => {
+    const pRef = primary?.props?.focusRef ?? footerPrimaryRef;
+    const touch = () => { footerTouch.current = Date.now(); };
+    const p = cloneElement(primary, { focusRef: pRef, onFocused: touch, onBlurred: touch });
+    return (
+      <Focusable noFocusRing flow-children="horizontal" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', marginTop: '8px' }}>
+        <GameActionButton variant="surface" label="Back" icon={<FaChevronLeft size={13} />} onClick={back}
+          onBlurred={touch}
+          onFocused={() => {
+            const fromOutside = Date.now() - footerTouch.current > 250;
+            touch();
+            if (fromOutside) { try { if (pRef.current) _forceGamepadFocus(pRef.current); } catch { /* ignore */ } }
+          }} />
+        {p}
+      </Focusable>
+    );
+  };
 
   return (
     <div className="romm-ui" ref={scrollHostRef} style={{
