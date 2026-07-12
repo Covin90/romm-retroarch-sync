@@ -3186,9 +3186,14 @@ const V2Focus = {
     background: V2.surfaceHover, borderColor: V2.brand, transform: 'translateY(-1px)',
     boxShadow: `0 8px 22px rgba(0,0,0,0.4), ${_RING}, 0 0 16px ${_GLOW}`,
   } : {},
+  // field returns borderColor on BOTH branches: callers pair it with a
+  // `border: 1px solid …` shorthand, and if the longhand is only present while
+  // focused, React drops border-color entirely on blur (without re-applying the
+  // shorthand) — border-color then falls back to currentColor and the field
+  // keeps a solid white 1px ring. Verified live on-device via CDP.
   field: (f: boolean) => f ? {
     borderColor: V2.brand, boxShadow: `0 0 0 3px rgba(139,116,232,0.22)`,
-  } : {},
+  } : { borderColor: V2.border },
   flat: (f: boolean, opts?: { glow?: boolean }) => f ? {
     boxShadow: opts?.glow ? `${_RING}, 0 0 14px rgba(139,116,232,0.35)` : _RING,
   } : {},
@@ -3348,12 +3353,15 @@ function V2TextField({ label, value, onChange, password, placeholder, icon, mono
     if (input) (input as HTMLElement).focus();
     _summonVirtualKeyboard();
     onKb?.(true);
-    setTimeout(() => { try { wrapperRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch { } }, 90);
+    // Two passes: one right after the kbRoom padding lands, one after the
+    // keyboard's own open animation settles (it can scroll-fight the first).
+    [120, 600].forEach((d) => setTimeout(() => {
+      try { wrapperRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch { }
+    }, d));
   };
-  // Blur the inner input when gamepad focus leaves the field. Focusing the input
-  // (above) registers it as the virtual-keyboard's target; without an explicit
-  // blur it stays activeElement after you move away and Steam keeps a stray
-  // white highlight ring on it. Blurring drops the target and the ring.
+  // Blur the inner input when gamepad focus leaves the field: it registered
+  // itself as the virtual-keyboard target on focus and would otherwise stay
+  // activeElement after you move away.
   const leaveInput = () => {
     setFocused(false);
     onKb?.(false);
@@ -3371,7 +3379,7 @@ function V2TextField({ label, value, onChange, password, placeholder, icon, mono
       onActivate={enterInput}
       onFocus={() => setFocused(true)} onBlur={leaveInput}
       onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
-      style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%', scrollMarginTop: '28px' }}
+      style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%', scrollMarginTop: '12vh' }}
     >
       {label && <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: V2.fgMuted, textAlign: 'center' }}>{label}</div>}
       <style>{`.${uid} label{display:none!important}.${uid}>div{background:transparent!important;border:none!important;box-shadow:none!important;padding:0!important;margin:0!important}.${uid}>div>div{background:transparent!important;border:none!important;box-shadow:none!important;padding:0!important}.${uid} input,.${uid} input:focus,.${uid} input:focus-visible{background:transparent!important;border:none!important;outline:none!important;box-shadow:none!important;color:${V2.fg}!important;font-size:${mono ? '20px' : '14px'}!important;font-weight:${mono ? '700' : '400'}!important;font-family:${mono ? 'monospace' : 'inherit'}!important;padding:0!important;margin:0!important;height:auto!important;min-height:0!important;caret-color:${V2.brand}!important;text-align:center!important;letter-spacing:${mono ? '.3em' : 'normal'}!important;text-indent:${mono ? '.3em' : 0}!important;text-transform:${mono ? 'uppercase' : 'none'}!important}.${uid} input::placeholder{color:rgba(255,255,255,0.40)!important}`}</style>
@@ -3421,7 +3429,9 @@ function PairCodeField({ label, value, onChange, onKb }:
     if (input) (input as HTMLElement).focus();
     _summonVirtualKeyboard();
     onKb?.(true);
-    setTimeout(() => { try { wrapperRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch { } }, 90);
+    [120, 600].forEach((d) => setTimeout(() => {
+      try { wrapperRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch { }
+    }, d));
   };
   // See V2TextField.leaveInput — drop the VK target on blur so no white ring lingers.
   const leaveInput = () => {
@@ -3439,7 +3449,7 @@ function PairCodeField({ label, value, onChange, onKb }:
       onActivate={enterInput}
       onFocus={() => setFocused(true)} onBlur={leaveInput}
       onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
-      style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%', scrollMarginTop: '28px' }}
+      style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%', scrollMarginTop: '12vh' }}
     >
       {label && <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: V2.fgMuted, textAlign: 'center' }}>{label}</div>}
       <style>{`.${uid} label{display:none!important}.${uid}>div{background:transparent!important;border:none!important;box-shadow:none!important;padding:0!important;margin:0!important}.${uid}>div>div{background:transparent!important;border:none!important;box-shadow:none!important;padding:0!important}.${uid} input,.${uid} input:focus,.${uid} input:focus-visible{position:absolute!important;inset:0!important;width:100%!important;background:transparent!important;border:none!important;outline:none!important;box-shadow:none!important;color:transparent!important;caret-color:${V2.brand}!important;padding:0!important;margin:0!important;height:100%!important;min-height:0!important;font-family:monospace!important;font-size:20px!important;font-weight:700!important;letter-spacing:.3em!important;text-indent:.3em!important;text-transform:uppercase!important}`}</style>
@@ -7523,8 +7533,17 @@ function SetupWizard() {
   const [busy, setBusy] = useState(false);
   // Extra bottom scroll room, added ONLY while a field is focused (keyboard up),
   // so the resting layout stays vertically centered with normal top spacing and
-  // a focused field can still scroll clear of the keyboard overlay.
-  const [kbRoom, setKbRoom] = useState(false);
+  // a focused field can still scroll clear of the keyboard overlay. Turning it
+  // OFF is debounced: hopping from one field straight to another fires
+  // blur(false) then activate(true), and collapsing the padding in between
+  // would yank the scroll position around.
+  const [kbRoom, _setKbRoomRaw] = useState(false);
+  const kbOffTimer = useRef<any>(null);
+  const setKbRoom = (open: boolean) => {
+    if (kbOffTimer.current) { clearTimeout(kbOffTimer.current); kbOffTimer.current = null; }
+    if (open) _setKbRoomRaw(true);
+    else kbOffTimer.current = setTimeout(() => _setKbRoomRaw(false), 450);
+  };
 
   useEffect(() => {
     (async () => {
