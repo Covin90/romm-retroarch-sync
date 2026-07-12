@@ -3375,6 +3375,7 @@ function V2TextField({ label, value, onChange, password, placeholder, icon, mono
     // halo (V2Focus.field) is the only focus affordance.
     <Focusable
       noFocusRing
+      className="wiz-field"
       ref={(el: any) => { wrapperRef.current = el; }}
       onActivate={enterInput}
       onFocus={() => setFocused(true)} onBlur={leaveInput}
@@ -3445,6 +3446,7 @@ function PairCodeField({ label, value, onChange, onKb }:
     // focus box; scrollIntoView lifts the field clear of the on-screen keyboard.
     <Focusable
       noFocusRing
+      className="wiz-field"
       ref={(el: any) => { wrapperRef.current = el; }}
       onActivate={enterInput}
       onFocus={() => setFocused(true)} onBlur={leaveInput}
@@ -7563,27 +7565,46 @@ function SetupWizard() {
       kbOffTimer.current = setTimeout(collapseKbRoom, 450);
     }
   };
-  // Field blur alone can't detect "keyboard dismissed with B": gamepad focus
-  // stays on the same field so onBlur never fires and the page stayed scrolled
-  // down. While the room is open, watch the keyboard manager's own open flag
-  // and collapse the moment it reports closed (after having been seen open, so
-  // the poll can't race the keyboard's open animation).
+  // The keyboard manager's open flag — not field events — is the source of
+  // truth for the room, in BOTH directions:
+  //  - close: dismissing with B keeps gamepad focus on the same field, so
+  //    onBlur never fires and the page stayed scrolled down.
+  //  - open: after a keyboard session, gamepad focus sits on the INNER input,
+  //    so the next A press reopens the keyboard via Steam itself and the
+  //    wrapper's onActivate (our onKb(true)) never runs — the room stayed
+  //    closed until the user moved to a different field.
+  // So poll the flag while the wizard is mounted and reconcile the room to it.
+  const kbRoomRef = useRef(false);
+  useEffect(() => { kbRoomRef.current = kbRoom; }, [kbRoom]);
   useEffect(() => {
-    if (!kbRoom) return;
-    let seenOpen = false;
+    const openRoom = (doc: any) => {
+      if (!kbRoomRef.current) kbRestScroll.current = scrollHostRef.current?.scrollTop ?? 0;
+      _setKbRoomRaw(true);
+      // Lift whichever field owns the keyboard clear of it.
+      [120, 600].forEach((d) => setTimeout(() => {
+        try {
+          const wrap = doc?.activeElement?.closest?.('.wiz-field');
+          if (wrap) wrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        } catch { /* ignore */ }
+      }, d));
+    };
+    let last: boolean | null = null;
     const iv = setInterval(() => {
       try {
         const win: any = (Router as any)?.WindowStore?.GamepadUIMainWindowInstance;
         const open = !!win?.VirtualKeyboardManager?.m_bIsInlineVirtualKeyboardOpen?.m_currentValue;
-        if (open) { seenOpen = true; return; }
-        if (seenOpen) {
+        if (last === null) { last = open; return; }
+        if (open && !kbRoomRef.current) openRoom(win?.BrowserWindow?.document);
+        if (open === last) return;
+        last = open;
+        if (!open && kbRoomRef.current) {
           if (kbOffTimer.current) { clearTimeout(kbOffTimer.current); kbOffTimer.current = null; }
           collapseKbRoom();
         }
       } catch { /* ignore */ }
     }, 250);
     return () => clearInterval(iv);
-  }, [kbRoom]);
+  }, []);
 
   useEffect(() => {
     (async () => {
