@@ -734,6 +734,20 @@ function _summonVirtualKeyboard(): void {
   }, 150);
 }
 
+// Close the on-screen keyboard programmatically (used when Enter/R2 submits a
+// wizard field: the step advances, so the keyboard shouldn't linger). Method
+// names verified on-device: SetVirtualKeyboardDone is the "user finished" path,
+// SetVirtualKeyboardHidden the plain hide.
+function _dismissVirtualKeyboard(): void {
+  try {
+    const win: any = (Router as any)?.WindowStore?.GamepadUIMainWindowInstance;
+    const vkm: any = win?.VirtualKeyboardManager;
+    if (!vkm) return;
+    if (typeof vkm.SetVirtualKeyboardDone === 'function') vkm.SetVirtualKeyboardDone();
+    else vkm.SetVirtualKeyboardHidden?.();
+  } catch { /* ignore */ }
+}
+
 // The document that gamepad focus actually lives in. Plugin code runs in
 // Decky's SharedJSContext — its global `document` is NOT the Big Picture
 // window's document, so .gpfocus queries there always come back empty.
@@ -3382,8 +3396,9 @@ function V2TextField({ label, value, onChange, password, placeholder, icon, mono
       onFocus={() => setFocused(true)} onBlur={leaveInput}
       onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
       // Enter on the on-screen keyboard (also R2, which Steam maps to Enter)
-      // reaches the input as a keydown — treat it as "submit this field".
-      onKeyDownCapture={onEnter ? (e: any) => { if (e.key === 'Enter') { e.preventDefault(); onEnter(); } } : undefined}
+      // reaches the input as a keydown — treat it as "submit this field":
+      // collapse the keyboard and hand off.
+      onKeyDownCapture={onEnter ? (e: any) => { if (e.key === 'Enter') { e.preventDefault(); _dismissVirtualKeyboard(); onEnter(); } } : undefined}
       style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%', scrollMarginTop: '12vh' }}
     >
       {label && <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: V2.fgMuted, textAlign: 'center' }}>{label}</div>}
@@ -3455,7 +3470,7 @@ function PairCodeField({ label, value, onChange, onKb, onEnter }:
       onActivate={enterInput}
       onFocus={() => setFocused(true)} onBlur={leaveInput}
       onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
-      onKeyDownCapture={onEnter ? (e: any) => { if (e.key === 'Enter') { e.preventDefault(); onEnter(); } } : undefined}
+      onKeyDownCapture={onEnter ? (e: any) => { if (e.key === 'Enter') { e.preventDefault(); _dismissVirtualKeyboard(); onEnter(); } } : undefined}
       style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%', scrollMarginTop: '12vh' }}
     >
       {label && <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: V2.fgMuted, textAlign: 'center' }}>{label}</div>}
