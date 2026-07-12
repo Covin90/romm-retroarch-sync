@@ -2015,42 +2015,31 @@ function Bumper({ label }: { label: string }) {
 
 // RomM RTabNav "underlined" variant — tabs over a bottom border with a 2px
 // brand underline that slides between the active tab (GameDetails tab strip).
-function V2TabNav({ tabs, active, onTab, activeRef }:
-  {
-    tabs: { id: string; label: string }[]; active: string; onTab: (id: string) => void;
-    // Exposes the ACTIVE pill's Focusable, so the host page can re-anchor
-    // gamepad focus here after an L1/R1 tab switch unmounts the focused content.
-    activeRef?: React.MutableRefObject<any>;
-  }) {
+function V2TabNav({ tabs, active, onTab }:
+  { tabs: { id: string; label: string }[]; active: string; onTab: (id: string) => void }) {
   const refs = useRef<(HTMLDivElement | null)[]>([]);
   const [ind, setInd] = useState<{ left: number; width: number } | null>(null);
-  // Gamepad focus under gamescope doesn't reliably fire CSS :focus-within, so
-  // track the focused pill in JS and paint it explicitly (same as the nav bar).
-  const [focusId, setFocusId] = useState<string | null>(null);
   const idx = tabs.findIndex((t) => t.id === active);
   useEffect(() => {
     const el = refs.current[idx];
     if (el) setInd({ left: el.offsetLeft, width: el.offsetWidth });
   }, [idx, tabs.length]);
   return (
+    // Deliberately NOT gamepad-focusable: tabs switch with L1/R1 only (the
+    // Bumper hints render beside the strip), so the dpad walks straight from
+    // the action buttons into the tab CONTENT without stepping through pills.
+    // The labels stay clickable for touch/mouse.
     <div style={{ position: 'relative', display: 'flex', gap: '2px', borderBottom: `1px solid ${V2.borderStrong}` }}>
       {tabs.map((t, i) => {
         const on = active === t.id;
-        const focused = focusId === t.id;
         return (
-          <Focusable noFocusRing key={t.id} ref={on ? activeRef : undefined}
-            onActivate={() => onTab(t.id)} onClick={() => onTab(t.id)}
-            onFocus={() => setFocusId(t.id)} onBlur={() => setFocusId((c) => c === t.id ? null : c)}
-            onMouseEnter={() => setFocusId(t.id)} onMouseLeave={() => setFocusId((c) => c === t.id ? null : c)}
-            style={{ borderRadius: `${V2.radiusMd} ${V2.radiusMd} 0 0`, ...V2Focus.segment(focused) }}>
-            <div ref={(el) => { refs.current[i] = el; }}
-              style={{
-                padding: '8px 18px', fontSize: '13px', cursor: 'pointer',
-                fontWeight: 500, color: on || focused ? V2.fg : V2.fgMuted, transition: 'color 0.15s ease',
-              }}>
-              {t.label}
-            </div>
-          </Focusable>
+          <div key={t.id} onClick={() => onTab(t.id)} ref={(el) => { refs.current[i] = el; }}
+            style={{
+              padding: '8px 18px', fontSize: '13px', cursor: 'pointer',
+              fontWeight: 500, color: on ? V2.fg : V2.fgMuted, transition: 'color 0.15s ease',
+            }}>
+            {t.label}
+          </div>
         );
       })}
       {ind && (
@@ -5882,9 +5871,8 @@ function GameDetailPage() {
   // Switching tabs unmounts the old tab's content — if gamepad focus was inside
   // it (a save row, a screenshot, an achievement) it dies with the tree and the
   // user is left steering an invisible cursor. After the swap, if the focused
-  // element is gone, re-anchor on the ACTIVE tab pill (persistent, spatially
-  // where the user just acted). Focus that survived (CTA, tab pill) is left alone.
-  const tabPillRef = useRef<any>(null);
+  // element is gone, re-anchor on the primary CTA (the tab pills themselves are
+  // not focusable — bumpers only). Focus that survived is left alone.
   const cycleTab = (dir: -1 | 1) => {
     const i = tabList.findIndex((t) => t.id === tab);
     const ni = (i < 0 ? 0 : i + dir + tabList.length) % tabList.length;
@@ -5892,7 +5880,7 @@ function GameDetailPage() {
     setTimeout(() => {
       try {
         const cur: any = _gpFocusEl();
-        if ((!cur || !cur.isConnected) && tabPillRef.current) _forceGamepadFocus(tabPillRef.current);
+        if ((!cur || !cur.isConnected) && ctaRef.current) _forceGamepadFocus(ctaRef.current);
       } catch { /* ignore */ }
     }, 60);
   };
@@ -6021,7 +6009,7 @@ function GameDetailPage() {
 
           {/* Tabbed panel (RomM GameDetails: RTabNav + tab content). L1/R1 page tabs. */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <div style={{ flex: '1 1 auto', minWidth: 0 }}><V2TabNav tabs={tabList} active={tab} onTab={setTab} activeRef={tabPillRef} /></div>
+            <div style={{ flex: '1 1 auto', minWidth: 0 }}><V2TabNav tabs={tabList} active={tab} onTab={setTab} /></div>
             <Bumper label="L1" />
             <Bumper label="R1" />
           </div>
