@@ -7539,10 +7539,28 @@ function SetupWizard() {
   // would yank the scroll position around.
   const [kbRoom, _setKbRoomRaw] = useState(false);
   const kbOffTimer = useRef<any>(null);
+  const scrollHostRef = useRef<HTMLDivElement | null>(null);
+  // Scroll position at rest, captured when the keyboard room first opens, so
+  // collapsing the keyboard restores the page to where the user left it instead
+  // of staying scrolled down at wherever the focused field was lifted to.
+  const kbRestScroll = useRef(0);
   const setKbRoom = (open: boolean) => {
     if (kbOffTimer.current) { clearTimeout(kbOffTimer.current); kbOffTimer.current = null; }
-    if (open) _setKbRoomRaw(true);
-    else kbOffTimer.current = setTimeout(() => _setKbRoomRaw(false), 450);
+    if (open) {
+      _setKbRoomRaw((was) => {
+        if (!was) kbRestScroll.current = scrollHostRef.current?.scrollTop ?? 0;
+        return true;
+      });
+    } else {
+      kbOffTimer.current = setTimeout(() => {
+        _setKbRoomRaw(false);
+        // After the padding collapses (next frame), glide back to the resting
+        // position — clamped implicitly by the now-shorter scroll range.
+        requestAnimationFrame(() => {
+          try { scrollHostRef.current?.scrollTo({ top: kbRestScroll.current, behavior: 'smooth' }); } catch { }
+        });
+      }, 450);
+    }
   };
 
   useEffect(() => {
@@ -7624,7 +7642,7 @@ function SetupWizard() {
   );
 
   return (
-    <div className="romm-ui" style={{
+    <div className="romm-ui" ref={scrollHostRef} style={{
       position: 'fixed', inset: 0, color: V2.fg, fontFamily: V2.font,
       // Not justify:center — that clips the top of tall content in a scroll
       // container. The card centers itself with margin:auto instead (below).
