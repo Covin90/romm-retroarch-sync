@@ -3338,11 +3338,32 @@ function V2TextField({ label, value, onChange, password, placeholder, icon, mono
       if (input) input.setAttribute('placeholder', placeholder);
     }
   }, [placeholder]);
+  // Bring up the Steam keyboard AND lift the field clear of it: the keyboard is
+  // an overlay that covers the bottom ~half of the screen without reflowing the
+  // page, so a centered field would sit behind it. Scroll the field to the top
+  // of the scroll area (scrollMarginTop keeps it off the very edge).
+  const enterInput = () => {
+    const input = wrapperRef.current?.querySelector('input');
+    if (input) (input as HTMLElement).focus();
+    _summonVirtualKeyboard();
+    setTimeout(() => { try { wrapperRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch { } }, 60);
+  };
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%' }}>
+    // Focusable noFocusRing wrapper: without it the bare TextField carries
+    // Steam's own gamepad focus box, which leaves a stray white ring behind
+    // after the highlight moves away. noFocusRing suppresses it; our own field
+    // halo (V2Focus.field) is the only focus affordance.
+    <Focusable
+      noFocusRing
+      ref={(el: any) => { wrapperRef.current = el; }}
+      onActivate={enterInput}
+      onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+      onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
+      style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%', scrollMarginTop: '28px' }}
+    >
       {label && <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: V2.fgMuted, textAlign: 'center' }}>{label}</div>}
-      <style>{`.${uid} label{display:none!important}.${uid}>div{background:transparent!important;border:none!important;box-shadow:none!important;padding:0!important;margin:0!important}.${uid}>div>div{background:transparent!important;border:none!important;box-shadow:none!important;padding:0!important}.${uid} input{background:transparent!important;border:none!important;outline:none!important;box-shadow:none!important;color:${V2.fg}!important;font-size:${mono ? '20px' : '14px'}!important;font-weight:${mono ? '700' : '400'}!important;font-family:${mono ? 'monospace' : 'inherit'}!important;padding:0!important;margin:0!important;height:auto!important;min-height:0!important;caret-color:${V2.brand}!important;text-align:center!important;letter-spacing:${mono ? '.3em' : 'normal'}!important;text-indent:${mono ? '.3em' : 0}!important;text-transform:${mono ? 'uppercase' : 'none'}!important}.${uid} input::placeholder{color:rgba(255,255,255,0.40)!important}`}</style>
-      <div ref={wrapperRef} className={uid} style={{
+      <style>{`.${uid} label{display:none!important}.${uid}>div{background:transparent!important;border:none!important;box-shadow:none!important;padding:0!important;margin:0!important}.${uid}>div>div{background:transparent!important;border:none!important;box-shadow:none!important;padding:0!important}.${uid} input,.${uid} input:focus,.${uid} input:focus-visible{background:transparent!important;border:none!important;outline:none!important;box-shadow:none!important;color:${V2.fg}!important;font-size:${mono ? '20px' : '14px'}!important;font-weight:${mono ? '700' : '400'}!important;font-family:${mono ? 'monospace' : 'inherit'}!important;padding:0!important;margin:0!important;height:auto!important;min-height:0!important;caret-color:${V2.brand}!important;text-align:center!important;letter-spacing:${mono ? '.3em' : 'normal'}!important;text-indent:${mono ? '.3em' : 0}!important;text-transform:${mono ? 'uppercase' : 'none'}!important}.${uid} input::placeholder{color:rgba(255,255,255,0.40)!important}`}</style>
+      <div className={uid} style={{
         display: 'flex', alignItems: 'center', gap: '10px', height: '40px', padding: '0 12px',
         borderRadius: V2.radiusMd,
         background: focused ? V2.surfaceHover : 'rgba(255,255,255,0.045)',
@@ -3362,7 +3383,7 @@ function V2TextField({ label, value, onChange, password, placeholder, icon, mono
           />
         </div>
       </div>
-    </div>
+    </Focusable>
   );
 }
 
@@ -3383,11 +3404,26 @@ function PairCodeField({ label, value, onChange }:
     if (i === 3) cells.push(<span key="dash" style={{ color: digits.length > 4 ? V2.fg : V2.fgMuted }}>-</span>);
   }
   const uid = useRef(`v2pf-${Math.random().toString(36).slice(2, 8)}`).current;
+  const enterInput = () => {
+    const input = wrapperRef.current?.querySelector('input');
+    if (input) (input as HTMLElement).focus();
+    _summonVirtualKeyboard();
+    setTimeout(() => { try { wrapperRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch { } }, 60);
+  };
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%' }}>
+    // See V2TextField: Focusable noFocusRing suppresses Steam's stray white
+    // focus box; scrollIntoView lifts the field clear of the on-screen keyboard.
+    <Focusable
+      noFocusRing
+      ref={(el: any) => { wrapperRef.current = el; }}
+      onActivate={enterInput}
+      onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+      onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
+      style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%', scrollMarginTop: '28px' }}
+    >
       {label && <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: V2.fgMuted, textAlign: 'center' }}>{label}</div>}
-      <style>{`.${uid} label{display:none!important}.${uid}>div{background:transparent!important;border:none!important;box-shadow:none!important;padding:0!important;margin:0!important}.${uid}>div>div{background:transparent!important;border:none!important;box-shadow:none!important;padding:0!important}.${uid} input{position:absolute!important;inset:0!important;width:100%!important;background:transparent!important;border:none!important;outline:none!important;box-shadow:none!important;color:transparent!important;caret-color:${V2.brand}!important;padding:0!important;margin:0!important;height:100%!important;min-height:0!important;font-family:monospace!important;font-size:20px!important;font-weight:700!important;letter-spacing:.3em!important;text-indent:.3em!important;text-transform:uppercase!important}`}</style>
-      <div ref={wrapperRef} className={uid} style={{
+      <style>{`.${uid} label{display:none!important}.${uid}>div{background:transparent!important;border:none!important;box-shadow:none!important;padding:0!important;margin:0!important}.${uid}>div>div{background:transparent!important;border:none!important;box-shadow:none!important;padding:0!important}.${uid} input,.${uid} input:focus,.${uid} input:focus-visible{position:absolute!important;inset:0!important;width:100%!important;background:transparent!important;border:none!important;outline:none!important;box-shadow:none!important;color:transparent!important;caret-color:${V2.brand}!important;padding:0!important;margin:0!important;height:100%!important;min-height:0!important;font-family:monospace!important;font-size:20px!important;font-weight:700!important;letter-spacing:.3em!important;text-indent:.3em!important;text-transform:uppercase!important}`}</style>
+      <div className={uid} style={{
         display: 'flex', alignItems: 'center', justifyContent: 'center', height: '40px', padding: '0 12px',
         borderRadius: V2.radiusMd,
         background: focused ? V2.surfaceHover : 'rgba(255,255,255,0.045)',
@@ -3406,7 +3442,7 @@ function PairCodeField({ label, value, onChange }:
           />
         </div>
       </div>
-    </div>
+    </Focusable>
   );
 }
 
@@ -7525,8 +7561,12 @@ function SetupWizard() {
   return (
     <div style={{
       position: 'fixed', inset: 0, color: V2.fg, fontFamily: V2.font,
-      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-      padding: '40px 24px', overflowY: 'auto',
+      // Not justify:center — that clips the top of tall content in a scroll
+      // container. The card centers itself with margin:auto instead (below), and
+      // the tall bottom padding gives scrollIntoView room to lift a focused
+      // field clear of the on-screen keyboard's bottom-half overlay.
+      display: 'flex', flexDirection: 'column', alignItems: 'center',
+      padding: '40px 24px 46vh', overflowY: 'auto',
     }}>
       <V2Bg uri={null} />
       <style>{`
@@ -7547,7 +7587,7 @@ function SetupWizard() {
         .wiz-dot--active { animation: wizDot 0.32s ease; }
       `}</style>
       <Focusable noFocusRing style={{
-        position: 'relative', zIndex: 2, width: '100%', maxWidth: '440px',
+        position: 'relative', zIndex: 2, width: '100%', maxWidth: '440px', margin: 'auto 0',
         display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '22px', textAlign: 'center',
       }}>
         {/* Progress dots */}
