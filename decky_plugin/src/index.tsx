@@ -7574,6 +7574,7 @@ function SetupWizard() {
   // defaults to pair-code); the final step highlights Finish & open library.
   const startFocusRef = useAutoFocus(step === 0, step);
   const urlFocusRef = useAutoFocus(step === 1, step);
+  const foldersNextRef = useAutoFocus(step === 2, step);
   const finishFocusRef = useAutoFocus(step === 3, step);
   const [kbRoom, _setKbRoomRaw] = useState(false);
   const kbOffTimer = useRef<any>(null);
@@ -7887,7 +7888,7 @@ function SetupWizard() {
               ))}
               <V2TextField label="Device name" value={deviceName} onChange={setDeviceName} placeholder={deviceNameDefault} onKb={setKbRoom} />
               {footer(
-                <GameActionButton variant="emphasized" label="Next" icon={<FaChevronRight size={13} />} onClick={next} />
+                <GameActionButton variant="emphasized" label="Next" focusRef={foldersNextRef} icon={<FaChevronRight size={13} />} onClick={next} />
               )}
             </div>
           )}
