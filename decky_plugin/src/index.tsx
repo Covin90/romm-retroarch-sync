@@ -3994,6 +3994,22 @@ function LibraryRootPage() {
     _libPopView = () => setStack((s) => s.slice(0, -1));
     return () => { _libPushView = null; _libPopView = null; };
   }, []);
+
+  // Logged-out guard: after a logout the credentials are cleared, but the tile
+  // still launches straight into this route (and Back can land here too). If
+  // RomM is no longer configured, don't show a stale signed-out home — bounce to
+  // the setup wizard so the only way forward is signing back in.
+  useEffect(() => {
+    (async () => {
+      try {
+        const c = await getConfig();
+        if (!c?.configured) {
+          try { Navigation.NavigateBack(); } catch { /* ignore */ }
+          setTimeout(() => { try { Navigation.Navigate("/romm-sync-setup"); } catch { /* ignore */ } }, 60);
+        }
+      } catch { /* ignore */ }
+    })();
+  }, []);
   const top = stack.length ? stack[stack.length - 1] : null;
 
   // An internally pushed view gets no route-change focus pass from Steam (that
@@ -6745,6 +6761,9 @@ function SettingsPage() {
   const [loading, setLoading] = useState<boolean>(true);
   const [confirmLogout, setConfirmLogout] = useState<boolean>(false);
   const [loggingOut, setLoggingOut] = useState<boolean>(false);
+  // When the log-out confirmation opens, land gamepad focus on its first option
+  // instead of leaving the highlight parked on the (now-hidden) Log out row.
+  const logoutFirstRef = useAutoFocus(confirmLogout, confirmLogout);
   const [serverInfo, setServerInfo] = useState<string>('');
   const [rdDetected, setRdDetected] = useState<boolean>(false);
   const [rdButton, setRdButton] = useState<boolean>(false);
@@ -7018,9 +7037,12 @@ function SettingsPage() {
             ? `${result.deleted_roms ?? 0} ROM file(s) deleted. Signed out of RomM.`
             : 'Signed out of RomM. Downloaded files were kept.',
         });
-        // Hand back to the setup wizard so the user can sign in again.
-        Navigation.Navigate("/romm-sync-setup");
-        Navigation.CloseSideMenus();
+        // Hand back to the setup wizard so the user can sign in again. Pop the
+        // library route off the history stack FIRST (like the wizard's own
+        // finish()), otherwise pressing Back from the wizard lands the user
+        // right back on the now signed-out library home.
+        try { Navigation.NavigateBack(); } catch { /* ignore */ }
+        setTimeout(() => { Navigation.Navigate("/romm-sync-setup"); Navigation.CloseSideMenus(); }, 60);
       } else {
         toaster.toast({ title: 'Logout failed', body: result?.error ?? 'Unknown error' });
       }
@@ -7157,7 +7179,7 @@ function SettingsPage() {
               How do you want to log out? You'll return to the setup wizard either way.
             </div>
             <GameActionButton icon={<FaUndo size={14} />} label={loggingOut ? 'Logging out…' : 'Log out (keep downloads)'}
-              onClick={() => handleLogout(false)} disabled={loggingOut} />
+              focusRef={logoutFirstRef} onClick={() => handleLogout(false)} disabled={loggingOut} />
             <GameActionButton icon={<FaTrash size={14} />} label={loggingOut ? 'Logging out…' : 'Log out & delete all downloads'}
               variant="danger" onClick={() => handleLogout(true)} disabled={loggingOut} />
             <GameActionButton icon={<FaTimes size={14} />} label="Cancel"
@@ -7559,7 +7581,7 @@ function SetupWizard() {
   );
 
   return (
-    <div style={{
+    <div className="romm-ui" style={{
       position: 'fixed', inset: 0, color: V2.fg, fontFamily: V2.font,
       // Not justify:center — that clips the top of tall content in a scroll
       // container. The card centers itself with margin:auto instead (below), and
@@ -7569,6 +7591,10 @@ function SetupWizard() {
       padding: '40px 24px 46vh', overflowY: 'auto',
     }}>
       <V2Bg uri={null} />
+      {/* romm-ui + this rule strip the CEF :focus outline that otherwise leaves a
+          stray white ring on a wizard field after the highlight moves on — the
+          same treatment every in-library page gets via v2Page. */}
+      <style>{V2_FOCUS_STYLE}</style>
       <style>{`
         @keyframes wizIn { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: none; } }
         @keyframes wizPop { 0% { opacity: 0; transform: scale(0.6); } 60% { transform: scale(1.08); } 100% { opacity: 1; transform: scale(1); } }
