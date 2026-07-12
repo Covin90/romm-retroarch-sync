@@ -3327,8 +3327,8 @@ const V2SearchField = forwardRef(function V2SearchField(
 // V2TextField — labeled text input sharing the V2SearchField look (RomM
 // RTextField filled variant): rounded surface box, brand focus border + halo.
 // Used by the setup wizard so its fields match the library search bar.
-function V2TextField({ label, value, onChange, password, placeholder, icon, mono, maxLength }:
-  { label?: string; value: string; onChange: (v: string) => void; password?: boolean; placeholder?: string; icon?: any; mono?: boolean; maxLength?: number }) {
+function V2TextField({ label, value, onChange, password, placeholder, icon, mono, maxLength, onKb }:
+  { label?: string; value: string; onChange: (v: string) => void; password?: boolean; placeholder?: string; icon?: any; mono?: boolean; maxLength?: number; onKb?: (open: boolean) => void }) {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const [focused, setFocused] = useState(false);
   const uid = useRef(`v2tf-${Math.random().toString(36).slice(2, 8)}`).current;
@@ -3340,13 +3340,25 @@ function V2TextField({ label, value, onChange, password, placeholder, icon, mono
   }, [placeholder]);
   // Bring up the Steam keyboard AND lift the field clear of it: the keyboard is
   // an overlay that covers the bottom ~half of the screen without reflowing the
-  // page, so a centered field would sit behind it. Scroll the field to the top
-  // of the scroll area (scrollMarginTop keeps it off the very edge).
+  // page, so a centered field would sit behind it. onKb(true) asks the wizard to
+  // add bottom scroll room, then we scroll the field to the top of the scroll
+  // area (scrollMarginTop keeps it off the very edge).
   const enterInput = () => {
     const input = wrapperRef.current?.querySelector('input');
     if (input) (input as HTMLElement).focus();
     _summonVirtualKeyboard();
-    setTimeout(() => { try { wrapperRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch { } }, 60);
+    onKb?.(true);
+    setTimeout(() => { try { wrapperRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch { } }, 90);
+  };
+  // Blur the inner input when gamepad focus leaves the field. Focusing the input
+  // (above) registers it as the virtual-keyboard's target; without an explicit
+  // blur it stays activeElement after you move away and Steam keeps a stray
+  // white highlight ring on it. Blurring drops the target and the ring.
+  const leaveInput = () => {
+    setFocused(false);
+    onKb?.(false);
+    const input = wrapperRef.current?.querySelector('input');
+    if (input) (input as HTMLElement).blur();
   };
   return (
     // Focusable noFocusRing wrapper: without it the bare TextField carries
@@ -3357,7 +3369,7 @@ function V2TextField({ label, value, onChange, password, placeholder, icon, mono
       noFocusRing
       ref={(el: any) => { wrapperRef.current = el; }}
       onActivate={enterInput}
-      onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+      onFocus={() => setFocused(true)} onBlur={leaveInput}
       onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
       style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%', scrollMarginTop: '28px' }}
     >
@@ -3391,8 +3403,8 @@ function V2TextField({ label, value, onChange, password, placeholder, icon, mono
 // typed character replaces one `*` (rather than a placeholder that vanishes on
 // the first keystroke). A transparent, char-aligned input sits over the mask so
 // the caret lands on the next empty slot.
-function PairCodeField({ label, value, onChange }:
-  { label?: string; value: string; onChange: (v: string) => void }) {
+function PairCodeField({ label, value, onChange, onKb }:
+  { label?: string; value: string; onChange: (v: string) => void; onKb?: (open: boolean) => void }) {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const [focused, setFocused] = useState(false);
   const digits = value.replace(/-/g, '');
@@ -3408,7 +3420,15 @@ function PairCodeField({ label, value, onChange }:
     const input = wrapperRef.current?.querySelector('input');
     if (input) (input as HTMLElement).focus();
     _summonVirtualKeyboard();
-    setTimeout(() => { try { wrapperRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch { } }, 60);
+    onKb?.(true);
+    setTimeout(() => { try { wrapperRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch { } }, 90);
+  };
+  // See V2TextField.leaveInput — drop the VK target on blur so no white ring lingers.
+  const leaveInput = () => {
+    setFocused(false);
+    onKb?.(false);
+    const input = wrapperRef.current?.querySelector('input');
+    if (input) (input as HTMLElement).blur();
   };
   return (
     // See V2TextField: Focusable noFocusRing suppresses Steam's stray white
@@ -3417,7 +3437,7 @@ function PairCodeField({ label, value, onChange }:
       noFocusRing
       ref={(el: any) => { wrapperRef.current = el; }}
       onActivate={enterInput}
-      onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+      onFocus={() => setFocused(true)} onBlur={leaveInput}
       onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
       style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%', scrollMarginTop: '28px' }}
     >
@@ -7501,6 +7521,10 @@ function SetupWizard() {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  // Extra bottom scroll room, added ONLY while a field is focused (keyboard up),
+  // so the resting layout stays vertically centered with normal top spacing and
+  // a focused field can still scroll clear of the keyboard overlay.
+  const [kbRoom, setKbRoom] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -7584,11 +7608,12 @@ function SetupWizard() {
     <div className="romm-ui" style={{
       position: 'fixed', inset: 0, color: V2.fg, fontFamily: V2.font,
       // Not justify:center — that clips the top of tall content in a scroll
-      // container. The card centers itself with margin:auto instead (below), and
-      // the tall bottom padding gives scrollIntoView room to lift a focused
-      // field clear of the on-screen keyboard's bottom-half overlay.
+      // container. The card centers itself with margin:auto instead (below).
+      // Bottom padding is only inflated while a field is focused (kbRoom), giving
+      // scrollIntoView room to lift the field clear of the keyboard overlay
+      // without shifting the resting (unfocused) layout upward.
       display: 'flex', flexDirection: 'column', alignItems: 'center',
-      padding: '40px 24px 46vh', overflowY: 'auto',
+      padding: kbRoom ? '40px 24px 52vh' : '40px 24px', overflowY: 'auto',
     }}>
       <V2Bg uri={null} />
       {/* romm-ui + this rule strip the CEF :focus outline that otherwise leaves a
@@ -7649,12 +7674,12 @@ function SetupWizard() {
                 value={mode}
                 onChange={(m) => { setMode(m as 'login' | 'pair'); setTestResult(null); }}
               />
-              <V2TextField label="RomM URL" value={url} onChange={onField(setUrl)} placeholder="https://romm.example.com" />
+              <V2TextField label="RomM URL" value={url} onChange={onField(setUrl)} placeholder="https://romm.example.com" onKb={setKbRoom} />
               {mode === 'login' ? (
                 <>
-                  <V2TextField label="Username" value={username} onChange={onField(setUsername)} />
+                  <V2TextField label="Username" value={username} onChange={onField(setUsername)} onKb={setKbRoom} />
                   <V2TextField label="Password" value={password} onChange={onField(setPassword)} password
-                    placeholder={hasPassword && !password ? 'Leave blank to keep saved' : undefined} />
+                    placeholder={hasPassword && !password ? 'Leave blank to keep saved' : undefined} onKb={setKbRoom} />
                   {testResult && (
                     <div style={{ fontSize: '13px', color: testResult.success ? V2.success : V2.danger }}>
                       {testResult.success ? '✅' : '❌'} {testResult.message}
@@ -7666,7 +7691,7 @@ function SetupWizard() {
               ) : (
                 <>
                   <PairCodeField label="Pairing code" value={pairCode}
-                    onChange={(v) => setPairCode(formatPairCode(v))} />
+                    onChange={(v) => setPairCode(formatPairCode(v))} onKb={setKbRoom} />
                 </>
               )}
               {footer(
@@ -7681,13 +7706,13 @@ function SetupWizard() {
               <div style={{ fontSize: '13px', color: V2.fg2, lineHeight: 1.6, maxWidth: '420px' }}>
                 <div>Where ROMs, saves and BIOS files live on this device.</div>
               </div>
-              <V2TextField label="ROM directory" value={romDir} onChange={setRomDir} />
+              <V2TextField label="ROM directory" value={romDir} onChange={setRomDir} onKb={setKbRoom} />
               <GameActionButton variant="surface" label="Browse…" icon={null} onClick={browse(romDir, setRomDir)} />
-              <V2TextField label="Save directory" value={saveDir} onChange={setSaveDir} />
+              <V2TextField label="Save directory" value={saveDir} onChange={setSaveDir} onKb={setKbRoom} />
               <GameActionButton variant="surface" label="Browse…" icon={null} onClick={browse(saveDir, setSaveDir)} />
-              <V2TextField label="BIOS directory" value={biosDir} onChange={setBiosDir} />
+              <V2TextField label="BIOS directory" value={biosDir} onChange={setBiosDir} onKb={setKbRoom} />
               <GameActionButton variant="surface" label="Browse…" icon={null} onClick={browse(biosDir, setBiosDir)} />
-              <V2TextField label="Device name" value={deviceName} onChange={setDeviceName} placeholder={deviceNameDefault} />
+              <V2TextField label="Device name" value={deviceName} onChange={setDeviceName} placeholder={deviceNameDefault} onKb={setKbRoom} />
               {footer(
                 <GameActionButton variant="emphasized" label="Next" icon={<FaChevronRight size={13} />} onClick={next} />
               )}
