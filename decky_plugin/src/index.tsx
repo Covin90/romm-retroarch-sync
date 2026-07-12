@@ -5868,21 +5868,36 @@ function GameDetailPage() {
   tabList.push({ id: 'metadata', label: 'Metadata' });
 
   // L1 / R1 page through the detail tabs (RomM pages detail tabs with bumpers).
-  // Switching tabs unmounts the old tab's content — if gamepad focus was inside
-  // it (a save row, a screenshot, an achievement) it dies with the tree and the
-  // user is left steering an invisible cursor. After the swap, if the focused
-  // element is gone, re-anchor on the primary CTA (the tab pills themselves are
-  // not focusable — bumpers only). Focus that survived is left alone.
+  // After a switch, land gamepad focus on the new tab's FIRST interactive
+  // element (subtab pill, screenshot, filter, save row …) so the content is
+  // immediately steerable — not back on the Play/Download CTA. The retry
+  // ladder covers tabs whose content mounts async (Save Data fetches first);
+  // a tab with nothing focusable (Overview's plain text) parks focus on the
+  // CTA only if it died with the old tab's unmount, and each attempt bails
+  // once focus is inside the content so the user is never fought.
+  const tabContentRef = useRef<HTMLDivElement | null>(null);
+  const tabFocusSeq = useRef(0);
   const cycleTab = (dir: -1 | 1) => {
     const i = tabList.findIndex((t) => t.id === tab);
     const ni = (i < 0 ? 0 : i + dir + tabList.length) % tabList.length;
     setTab(tabList[ni].id);
-    setTimeout(() => {
+    const seq = ++tabFocusSeq.current;
+    [60, 180, 400, 750].forEach((d) => setTimeout(() => {
       try {
+        if (seq !== tabFocusSeq.current) return;      // superseded by a newer switch
+        const host = tabContentRef.current;
+        if (!host) return;
         const cur: any = _gpFocusEl();
+        if (cur && cur.isConnected && host.contains(cur)) return;  // already landed
+        // First LEAF focusable: containers (noFocusRing grids/lists) also carry
+        // tabindex, but focusing them paints no highlight — skip to their first
+        // real item.
+        const nodes = Array.from(host.querySelectorAll('[tabindex]')) as HTMLElement[];
+        const leaf = nodes.find((n) => !n.querySelector('[tabindex]'));
+        if (leaf) { _forceGamepadFocus(leaf); return; }
         if ((!cur || !cur.isConnected) && ctaRef.current) _forceGamepadFocus(ctaRef.current);
       } catch { /* ignore */ }
-    }, 60);
+    }, d));
   };
   const onButtonDown = (evt: any) => {
     const b = evt?.detail?.button;
@@ -6013,7 +6028,7 @@ function GameDetailPage() {
             <Bumper label="L1" />
             <Bumper label="R1" />
           </div>
-          <div style={{ paddingTop: '14px' }}>
+          <div ref={tabContentRef} style={{ paddingTop: '14px' }}>
             {loading ? (
               <div style={{ color: V2.fgMuted, fontSize: '12px' }}>Loading details…</div>
             ) : tab === 'overview' ? (
