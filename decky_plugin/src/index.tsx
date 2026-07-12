@@ -3385,7 +3385,7 @@ function V2TextField({ label, value, onChange, password, placeholder, icon, mono
       {label && <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: V2.fgMuted, textAlign: 'center' }}>{label}</div>}
       <style>{`.${uid} label{display:none!important}.${uid}>div{background:transparent!important;border:none!important;box-shadow:none!important;padding:0!important;margin:0!important}.${uid}>div>div{background:transparent!important;border:none!important;box-shadow:none!important;padding:0!important}.${uid} input,.${uid} input:focus,.${uid} input:focus-visible{background:transparent!important;border:none!important;outline:none!important;box-shadow:none!important;color:${V2.fg}!important;font-size:${mono ? '20px' : '14px'}!important;font-weight:${mono ? '700' : '400'}!important;font-family:${mono ? 'monospace' : 'inherit'}!important;padding:0!important;margin:0!important;height:auto!important;min-height:0!important;caret-color:${V2.brand}!important;text-align:center!important;letter-spacing:${mono ? '.3em' : 'normal'}!important;text-indent:${mono ? '.3em' : 0}!important;text-transform:${mono ? 'uppercase' : 'none'}!important}.${uid} input::placeholder{color:rgba(255,255,255,0.40)!important}`}</style>
       <div className={uid} style={{
-        display: 'flex', alignItems: 'center', gap: '10px', height: '40px', padding: '0 12px',
+        display: 'flex', alignItems: 'center', gap: '10px', height: '38px', padding: '0 12px',
         borderRadius: V2.radiusMd,
         background: focused ? V2.surfaceHover : 'rgba(255,255,255,0.045)',
         border: `1px solid ${V2.border}`,
@@ -7541,6 +7541,7 @@ function SetupWizard() {
   // would yank the scroll position around.
   // Landing focus per step: Connect highlights the RomM URL field (mode already
   // defaults to pair-code); the final step highlights Finish & open library.
+  const startFocusRef = useAutoFocus(step === 0, step);
   const urlFocusRef = useAutoFocus(step === 1, step);
   const finishFocusRef = useAutoFocus(step === 3, step);
   const [kbRoom, _setKbRoomRaw] = useState(false);
@@ -7738,7 +7739,7 @@ function SetupWizard() {
         }}
         style={{
           position: 'relative', zIndex: 2, width: '100%', maxWidth: '440px', margin: 'auto 0',
-          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '22px', textAlign: 'center',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px', textAlign: 'center',
         }}>
         {/* Progress dots */}
         <div style={{ display: 'flex', justifyContent: 'center', gap: '8px' }}>
@@ -7759,7 +7760,7 @@ function SetupWizard() {
                 Connect this device to your RomM server to browse your library, download games, and sync saves across devices.
               </div>
               <div style={{ marginTop: '8px' }}>
-                <GameActionButton variant="emphasized" label="Get started" icon={<FaPlay size={13} style={{ marginLeft: '2px' }} />} onClick={next} />
+                <GameActionButton variant="emphasized" label="Get started" focusRef={startFocusRef} icon={<FaPlay size={13} style={{ marginLeft: '2px' }} />} onClick={next} />
               </div>
             </div>
           )}
@@ -7805,7 +7806,7 @@ function SetupWizard() {
           )}
 
           {step === 2 && (
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px', width: '100%' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', width: '100%' }}>
               <div style={{ fontSize: '20px', fontWeight: 700 }}>Folders</div>
               <div style={{ fontSize: '13px', color: V2.fg2, lineHeight: 1.5, maxWidth: '420px' }}>
                 Where ROMs, saves and BIOS files live on this device.
