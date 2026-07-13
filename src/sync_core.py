@@ -7413,7 +7413,15 @@ class AutoSyncManager:
                 else:
                     self.log(f"✅ Server accepted {file_path.name} (200 OK)")
                 self.retroarch.send_notification(f"{save_type.rstrip('s').capitalize()} uploaded")
-                _record_activity('save', f"{save_type.rstrip('s').capitalize()} uploaded", file_path.name)
+                try:
+                    _gname = next((g.get('name') for g in (self.get_games() or [])
+                                   if g.get('rom_id') == rom_id), None)
+                except Exception:
+                    _gname = None
+                _kind_label = save_type.rstrip('s').capitalize()
+                _record_activity('save',
+                                 f"{_kind_label} uploaded — {_gname}" if _gname else f"{_kind_label} uploaded",
+                                 file_path.name)
             else:
                 self.log(f"❌ Server rejected {file_path.name} — upload failed")
                 self.retroarch.send_notification(f"Upload failed: {file_path.name}")
@@ -7441,6 +7449,7 @@ class AutoSyncManager:
                 session_id=session_id,
             ) is True:
                 summary['uploaded'] += 1
+                summary['_per_game'][rom_id]['up'] += 1
                 return self._record_synced(entry['_path'])
             summary['errors'] += 1
             return False
@@ -7456,6 +7465,7 @@ class AutoSyncManager:
                 op.get('save_id'), 'saves', target,
                 device_id=device_id, session_id=session_id):
                 summary['downloaded'] += 1
+                summary['_per_game'][rom_id]['down'] += 1
                 return self._record_synced(target)
             summary['errors'] += 1
             return False
@@ -7691,7 +7701,13 @@ class AutoSyncManager:
         Returns a summary dict: {uploaded, downloaded, conflicts, no_op, errors, session_id}.
         """
         summary = {'uploaded': 0, 'downloaded': 0, 'conflicts': [], 'no_op': 0,
-                   'errors': 0, 'session_id': None}
+                   'errors': 0, 'session_id': None,
+                   # rom_id -> {'up': n, 'down': n} — feeds per-game Recent
+                   # Activity entries (also bumped by _handle_upload_conflict).
+                   '_per_game': defaultdict(lambda: {'up': 0, 'down': 0})}
+
+        def _bump(rid, key):
+            summary['_per_game'][rid][key] += 1
 
         if not self.romm_client or not self.romm_client.authenticated:
             self.log("⚠️ Save-sync: not connected")
@@ -7746,6 +7762,7 @@ class AutoSyncManager:
                     )
                     if ok is True:
                         summary['uploaded'] += 1
+                        _bump(rom_id, 'up')
                         if self._record_synced(entry['_path']):
                             _fp_dirty = True
                     elif ok == 'conflict':
@@ -7772,6 +7789,7 @@ class AutoSyncManager:
                     )
                     if ok:
                         summary['downloaded'] += 1
+                        _bump(rom_id, 'down')
                         if self._record_synced(target):
                             _fp_dirty = True
                     else:
@@ -7796,6 +7814,7 @@ class AutoSyncManager:
                             session_id=session_id,
                         ) is True:
                             summary['uploaded'] += 1
+                            _bump(rom_id, 'up')
                             if self._record_synced(entry['_path']):
                                 _fp_dirty = True
                         else:
@@ -7817,6 +7836,7 @@ class AutoSyncManager:
                             op.get('save_id'), 'saves', target,
                             device_id=device_id, session_id=session_id):
                             summary['downloaded'] += 1
+                            _bump(rom_id, 'down')
                             if self._record_synced(target):
                                 _fp_dirty = True
                         else:
@@ -7857,20 +7877,31 @@ class AutoSyncManager:
         self.log(f"🔄 Save-sync: {summary['uploaded']} up, {summary['downloaded']} down, "
                  f"{len(summary['conflicts'])} conflict(s), {summary['no_op']} in-sync, "
                  f"{summary['errors']} error(s)")
-        # Feed entry only when the cycle actually moved data or hit trouble —
-        # a pure "everything already in sync" pass would just be noise.
-        if summary['uploaded'] or summary['downloaded'] or summary['errors'] or summary['conflicts']:
-            parts = []
-            if summary['uploaded']:
-                parts.append(f"{summary['uploaded']} uploaded")
-            if summary['downloaded']:
-                parts.append(f"{summary['downloaded']} downloaded")
-            if summary['conflicts']:
-                parts.append(f"{len(summary['conflicts'])} conflict(s)")
-            if summary['errors']:
-                parts.append(f"{summary['errors']} error(s)")
-            _record_activity('error' if summary['errors'] else 'save',
-                             'Save sync', ', '.join(parts))
+        # Feed entries only when the cycle actually moved data or hit trouble —
+        # a pure "everything already in sync" pass would just be noise. One
+        # entry per game so the feed reads "Save sync — Pokémon Emerald".
+        if summary['_per_game'] or summary['errors'] or summary['conflicts']:
+            try:
+                names = {g.get('rom_id'): g.get('name') for g in (self.get_games() or [])}
+            except Exception:
+                names = {}
+            for rid, c in summary['_per_game'].items():
+                parts = []
+                if c['up']:
+                    parts.append(f"{c['up']} save{'s' if c['up'] != 1 else ''} uploaded")
+                if c['down']:
+                    parts.append(f"{c['down']} save{'s' if c['down'] != 1 else ''} downloaded")
+                if parts:
+                    _record_activity('save',
+                                     f"Save sync — {names.get(rid) or f'ROM {rid}'}",
+                                     ', '.join(parts))
+            if summary['errors'] or summary['conflicts']:
+                parts = []
+                if summary['conflicts']:
+                    parts.append(f"{len(summary['conflicts'])} conflict(s)")
+                if summary['errors']:
+                    parts.append(f"{summary['errors']} error(s)")
+                _record_activity('error', 'Save sync issues', ', '.join(parts))
         return summary
 
     def _resolve_download_target(self, op, saves_dir):
