@@ -7609,7 +7609,24 @@ class AutoSyncManager:
                 '_autocleanup_limit': _limit,
             })
 
-        return inventory
+        # Dedupe by (rom_id, slot), keeping the newest file. Stale duplicate
+        # copies of the same save (e.g. a leftover flat saves/Game.srm next to
+        # the live saves/<core>/Game.srm) otherwise ping-pong forever: the
+        # server's latest always mismatches one of the two, so every session
+        # re-uploads — and the executor's inv_by_key lookup is keyed on
+        # (rom_id, slot) anyway, so duplicates could never both sync.
+        best = {}
+        for e in inventory:
+            k = (e['rom_id'], e['slot'])
+            if k in best:
+                keep, drop = (e, best[k]) if e['updated_at'] > best[k]['updated_at'] else (best[k], e)
+                self.log(f"⚠️ Duplicate local save for rom={k[0]} slot={k[1]!r}: "
+                         f"using {Path(keep['_path']).name} ({keep['updated_at']}), "
+                         f"ignoring stale {drop['_path']}")
+                best[k] = keep
+            else:
+                best[k] = e
+        return list(best.values())
 
     def flush_after_reconnect(self):
         """Flush local save changes accumulated while offline. Called when the
