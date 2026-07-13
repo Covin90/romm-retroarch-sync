@@ -3495,22 +3495,21 @@ class RomMClient:
                 original_basename = file_path.stem
                 file_extension = file_path.suffix
 
+            # Fresh timestamped filename for every upload. Saves used to REUSE the
+            # existing server filename — but RomM derives the version's updated_at
+            # from the timestamp embedded in the name, so re-uploading under an old
+            # name pinned server_updated_at in the past. Negotiate then reported
+            # "Client save is newer than last sync" on every session and re-uploaded
+            # the same save forever. Saves stamp the file's mtime (the actual save
+            # moment, and what our inventory reports as updated_at); states keep
+            # stamping the upload time as before.
+            import datetime
             if save_type == 'saves':
-                # Reuse existing server filename for saves
-                existing_filename = self.get_existing_save_filename(rom_id, save_type)
-                if existing_filename:
-                    romm_filename = existing_filename
-                    logging.debug(f"Reusing server filename: {romm_filename}")
-                else:
-                    import datetime
-                    now = datetime.datetime.now()
-                    timestamp = now.strftime("%Y-%m-%d %H-%M-%S-%f")[:-3]
-                    romm_filename = f"{original_basename} [{timestamp}]{file_extension}"
+                ts = datetime.datetime.fromtimestamp(file_path.stat().st_mtime)
             else:
-                import datetime
-                now = datetime.datetime.now()
-                timestamp = now.strftime("%Y-%m-%d %H-%M-%S-%f")[:-3]
-                romm_filename = f"{original_basename} [{timestamp}]{file_extension}"
+                ts = datetime.datetime.now()
+            timestamp = ts.strftime("%Y-%m-%d %H-%M-%S-%f")[:-3]
+            romm_filename = f"{original_basename} [{timestamp}]{file_extension}"
 
             with open(file_path, 'rb') as f:
                 files = {file_field_name: (romm_filename, f.read(), 'application/octet-stream')}
