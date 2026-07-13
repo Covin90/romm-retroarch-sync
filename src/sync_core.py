@@ -7755,6 +7755,12 @@ class AutoSyncManager:
             action = op.get('action')
             rom_id = op.get('rom_id')
             slot = op.get('slot')
+            # Full op payload for non-trivial actions: shows the server's view
+            # (its hash/updated_at) so a repeated upload/conflict can be
+            # diagnosed from the log without server access.
+            if action != 'no_op':
+                logging.info(f"[SYNC-OP] {op} | local="
+                             f"{ {k: v for k, v in (inv_by_key.get((rom_id, slot)) or {}).items() if not k.startswith('_')} }")
             try:
                 if action == 'no_op':
                     summary['no_op'] += 1
