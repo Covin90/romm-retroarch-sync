@@ -7329,6 +7329,8 @@ function SettingsPage() {
         </div>
       </V2SettingsSection>
 
+      <RecentActivitySection />
+
       <V2SettingsSection title="Account">
         {!confirmLogout ? (
           <V2SettingsRow
@@ -7356,8 +7358,6 @@ function SettingsPage() {
           </div>
         )}
       </V2SettingsSection>
-
-      <RecentActivitySection />
 
       <V2SettingsSection title="Debug">
         <V2SettingsRow
