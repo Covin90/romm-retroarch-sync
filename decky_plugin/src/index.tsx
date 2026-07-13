@@ -6380,33 +6380,53 @@ function RecentActivitySection() {
     return () => { alive = false; clearInterval(iv); };
   }, []);
 
-  const shown = expanded ? events : events.slice(0, 5);
+  const shown = expanded ? events : events.slice(0, 6);
 
+  // One "control panel" card: all entries as compact divided rows inside a
+  // single surface, with the controls in a footer bar — not a card per event.
   return (
     <V2SettingsSection title="Recent Activity">
-      {events.length === 0 ? (
-        <div style={{
-          padding: '16px', borderRadius: V2.radiusCard, background: V2.surface,
-          border: `1px solid ${V2.border}`, fontSize: '12px', color: V2.fgMuted,
-        }}>
-          Nothing yet — downloads, collection syncs and save syncs will show up here.
-        </div>
-      ) : (
-        <>
-          {shown.map((e, i) => {
-            const Icon = ACTIVITY_ICONS[e.kind] || FaHistory;
-            return (
-              <V2SettingsRow key={`${e.timestamp}-${i}`}
-                icon={<Icon size={15} />}
-                title={e.title}
-                subtitle={e.detail || undefined}
-                right={<span style={{ fontSize: '11px', color: V2.fgMuted, whiteSpace: 'nowrap' }}>{fmtAgo(e.timestamp)}</span>}
-                danger={e.kind === 'error'}
-              />
-            );
-          })}
-          <Focusable style={{ display: 'flex', gap: '8px' }} flow-children="horizontal">
-            {events.length > 5 && (
+      <div style={{
+        borderRadius: V2.radiusCard, background: V2.surface,
+        border: `1px solid ${V2.border}`, overflow: 'hidden',
+      }}>
+        {events.length === 0 ? (
+          <div style={{ padding: '14px 16px', fontSize: '12px', color: V2.fgMuted }}>
+            Nothing yet — downloads, collection syncs and save syncs will show up here.
+          </div>
+        ) : shown.map((e, i) => {
+          const Icon = ACTIVITY_ICONS[e.kind] || FaHistory;
+          const err = e.kind === 'error';
+          return (
+            <div key={`${e.timestamp}-${i}`} style={{
+              display: 'flex', alignItems: 'center', gap: '10px', padding: '8px 14px',
+              borderTop: i > 0 ? `1px solid ${V2.border}` : 'none',
+            }}>
+              <div style={{ flexShrink: 0, color: err ? V2.danger : V2.brandHover, display: 'flex' }}>
+                <Icon size={13} />
+              </div>
+              <div style={{ flex: '1 1 auto', minWidth: 0 }}>
+                <div style={{
+                  fontSize: '12px', fontWeight: 600, color: err ? V2.danger : V2.fg,
+                  whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                }}>{e.title}</div>
+                {e.detail && <div style={{
+                  fontSize: '11px', color: V2.fgMuted,
+                  whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                }}>{e.detail}</div>}
+              </div>
+              <div style={{ flexShrink: 0, fontSize: '10px', color: V2.fgMuted, whiteSpace: 'nowrap' }}>
+                {fmtAgo(e.timestamp)}
+              </div>
+            </div>
+          );
+        })}
+        {events.length > 0 && (
+          <Focusable flow-children="horizontal" style={{
+            display: 'flex', gap: '8px', padding: '8px 10px',
+            borderTop: `1px solid ${V2.border}`, background: V2.bgElevated,
+          }}>
+            {events.length > 6 && (
               <V2Button variant="tonal" onClick={() => setExpanded(x => !x)}>
                 <FaChevronDown size={11} style={{ transform: expanded ? 'rotate(180deg)' : 'none' }} />
                 <span>{expanded ? 'Show less' : `Show all (${events.length})`}</span>
@@ -6419,8 +6439,8 @@ function RecentActivitySection() {
               <FaTimes size={11} /><span>Clear</span>
             </V2Button>
           </Focusable>
-        </>
-      )}
+        )}
+      </div>
     </V2SettingsSection>
   );
 }
