@@ -6369,7 +6369,7 @@ function RecentActivitySection() {
     let alive = true;
     const load = async () => {
       try {
-        const res = await getRecentActivity(50);
+        const res = await getRecentActivity(10);
         if (alive && res?.events) setEvents(res.events);
       } catch { }
     };

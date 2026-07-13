@@ -1034,7 +1034,7 @@ class Plugin:
             logging.debug(f"drain_notifications error: {e}")
         return {'events': []}
 
-    async def get_recent_activity(self, limit: int = 50):
+    async def get_recent_activity(self, limit: int = 10):
         """Recent plugin activity (downloads, syncs, save events) newest-first
         for the Settings ▸ Recent Activity feed. Persisted across restarts."""
         try:

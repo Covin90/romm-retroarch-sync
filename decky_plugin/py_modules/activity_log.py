@@ -16,7 +16,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-MAX_ENTRIES = 50
+MAX_ENTRIES = 10
 
 _FILE = Path.home() / '.config' / 'romm-retroarch-sync' / 'activity.json'
 _lock = threading.Lock()
