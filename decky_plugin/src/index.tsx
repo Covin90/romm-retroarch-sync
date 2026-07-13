@@ -17,7 +17,7 @@ import {
 } from "@decky/ui";
 import { callable, definePlugin, toaster, routerHook, openFilePicker, FileSelectionType } from "@decky/api";
 import { useState, useEffect, useLayoutEffect, useRef, useMemo, forwardRef, memo, cloneElement, type Ref, type ChangeEvent } from "react";
-import { FaSync, FaTrash, FaCog, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaTimesCircle, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight, FaCheckCircle, FaUsers, FaExternalLinkAlt, FaPuzzlePiece, FaBoxOpen, FaClone, FaRedo, FaClock, FaCheck, FaEllipsisH, FaGlobe, FaChevronDown, FaChartBar, FaSignOutAlt } from "react-icons/fa";
+import { FaSync, FaTrash, FaCog, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaTimesCircle, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight, FaCheckCircle, FaUsers, FaExternalLinkAlt, FaPuzzlePiece, FaBoxOpen, FaClone, FaRedo, FaClock, FaCheck, FaEllipsisH, FaGlobe, FaChevronDown, FaChartBar, FaSignOutAlt, FaSave, FaUser, FaExclamationTriangle, FaHistory } from "react-icons/fa";
 import { BsGearFill } from "react-icons/bs";
 import { MdVerified } from "react-icons/md";
 
@@ -26,6 +26,8 @@ const getServiceStatus = callable<[], any>("get_service_status");
 const notifyNetworkState = callable<[boolean], any>("notify_network_state");
 const drainNotifications = callable<[], { events: Array<{ kind: string, title: string, body: string, timestamp: number }> }>("drain_notifications");
 const refreshFromRomm = callable<[boolean], any>("refresh_from_romm");
+const getRecentActivity = callable<[number], { events: Array<{ kind: string, title: string, detail: string, timestamp: number }> }>("get_recent_activity");
+const clearRecentActivity = callable<[], any>("clear_recent_activity");
 const getLoggingEnabled = callable<[], boolean>("get_logging_enabled");
 const updateLoggingEnabled = callable<[boolean], boolean>("set_logging_enabled");
 const getRetrodeckButtonEnabled = callable<[], boolean>("get_retrodeck_button_enabled");
@@ -6339,6 +6341,90 @@ function V2Switch({ checked }: { checked: boolean }) {
   );
 }
 
+// Settings ▸ Recent Activity — a curated feed of what the plugin actually did
+// (downloads, collection syncs, save/state sync, account events). Backed by the
+// persisted backend activity log (get_recent_activity), so it covers background
+// work that happened while no UI was open.
+const ACTIVITY_ICONS: Record<string, any> = {
+  download: FaDownload, sync: FaSync, save: FaSave, delete: FaTrash,
+  update: FaBoxOpen, account: FaUser, error: FaExclamationTriangle,
+};
+
+function fmtAgo(ts: number): string {
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+  if (s < 60) return 'just now';
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return d === 1 ? 'yesterday' : `${d} days ago`;
+}
+
+function RecentActivitySection() {
+  const [events, setEvents] = useState<Array<{ kind: string, title: string, detail: string, timestamp: number }>>([]);
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const res = await getRecentActivity(50);
+        if (alive && res?.events) setEvents(res.events);
+      } catch { }
+    };
+    load();
+    // Light poll so background events (collection sync, save sync) appear
+    // while the user is sitting on the Settings tab.
+    const iv = setInterval(load, 10000);
+    return () => { alive = false; clearInterval(iv); };
+  }, []);
+
+  const shown = expanded ? events : events.slice(0, 5);
+
+  return (
+    <V2SettingsSection title="Recent Activity">
+      {events.length === 0 ? (
+        <div style={{
+          padding: '16px', borderRadius: V2.radiusCard, background: V2.surface,
+          border: `1px solid ${V2.border}`, fontSize: '12px', color: V2.fgMuted,
+        }}>
+          Nothing yet — downloads, collection syncs and save syncs will show up here.
+        </div>
+      ) : (
+        <>
+          {shown.map((e, i) => {
+            const Icon = ACTIVITY_ICONS[e.kind] || FaHistory;
+            return (
+              <V2SettingsRow key={`${e.timestamp}-${i}`}
+                icon={<Icon size={15} />}
+                title={e.title}
+                subtitle={e.detail || undefined}
+                right={<span style={{ fontSize: '11px', color: V2.fgMuted, whiteSpace: 'nowrap' }}>{fmtAgo(e.timestamp)}</span>}
+                danger={e.kind === 'error'}
+              />
+            );
+          })}
+          <Focusable style={{ display: 'flex', gap: '8px' }} flow-children="horizontal">
+            {events.length > 5 && (
+              <V2Button variant="tonal" onClick={() => setExpanded(x => !x)}>
+                <FaChevronDown size={11} style={{ transform: expanded ? 'rotate(180deg)' : 'none' }} />
+                <span>{expanded ? 'Show less' : `Show all (${events.length})`}</span>
+              </V2Button>
+            )}
+            <V2Button variant="tonal" onClick={async () => {
+              try { await clearRecentActivity(); } catch { }
+              setEvents([]); setExpanded(false);
+            }}>
+              <FaTimes size={11} /><span>Clear</span>
+            </V2Button>
+          </Focusable>
+        </>
+      )}
+    </V2SettingsSection>
+  );
+}
+
 // Stats page — 1:1 port of RomM's ServerStats.vue: a section stack of
 // SummaryStatsSection (card grid in SettingsSection chrome) + PlatformsStatsSection
 // (toolbar + per-platform rows with size/percentage and a progress bar that
@@ -7250,6 +7336,8 @@ function SettingsPage() {
           </div>
         )}
       </V2SettingsSection>
+
+      <RecentActivitySection />
 
       <V2SettingsSection title="Debug">
         <V2SettingsRow

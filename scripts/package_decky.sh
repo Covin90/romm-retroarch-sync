@@ -56,7 +56,7 @@ REQUIRED=(
   plugin.json package.json LICENSE main.py
   dist/index.js dist/index.js.map
   bin/7zz bin/romm-session-host
-  py_modules/sync_core.py py_modules/bios_manager.py
+  py_modules/sync_core.py py_modules/bios_manager.py py_modules/activity_log.py
   py_modules/requests/ py_modules/watchdog/ py_modules/PIL/ py_modules/pillow.libs/
   py_modules/urllib3/ py_modules/certifi/ py_modules/charset_normalizer/ py_modules/idna/
 )

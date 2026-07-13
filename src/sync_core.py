@@ -27,6 +27,21 @@ from watchdog.events import FileSystemEventHandler
 import queue
 from collections import defaultdict, deque
 
+# Recent-activity feed (Decky Settings UI). Optional so the desktop app —
+# which shares this module without py_modules/activity_log — degrades to no-op.
+try:
+    import activity_log
+except Exception:
+    activity_log = None
+
+
+def _record_activity(kind, title, detail=''):
+    if activity_log:
+        try:
+            activity_log.record(kind, title, detail)
+        except Exception:
+            pass
+
 # PIL is optional - used for Steam grid image generation
 try:
     from PIL import Image
@@ -7398,9 +7413,11 @@ class AutoSyncManager:
                 else:
                     self.log(f"✅ Server accepted {file_path.name} (200 OK)")
                 self.retroarch.send_notification(f"{save_type.rstrip('s').capitalize()} uploaded")
+                _record_activity('save', f"{save_type.rstrip('s').capitalize()} uploaded", file_path.name)
             else:
                 self.log(f"❌ Server rejected {file_path.name} — upload failed")
                 self.retroarch.send_notification(f"Upload failed: {file_path.name}")
+                _record_activity('error', 'Upload failed', file_path.name)
                 
         except Exception as e:
             self.log(f"❌ Upload error for {file_path}: {e}")
@@ -7840,6 +7857,20 @@ class AutoSyncManager:
         self.log(f"🔄 Save-sync: {summary['uploaded']} up, {summary['downloaded']} down, "
                  f"{len(summary['conflicts'])} conflict(s), {summary['no_op']} in-sync, "
                  f"{summary['errors']} error(s)")
+        # Feed entry only when the cycle actually moved data or hit trouble —
+        # a pure "everything already in sync" pass would just be noise.
+        if summary['uploaded'] or summary['downloaded'] or summary['errors'] or summary['conflicts']:
+            parts = []
+            if summary['uploaded']:
+                parts.append(f"{summary['uploaded']} uploaded")
+            if summary['downloaded']:
+                parts.append(f"{summary['downloaded']} downloaded")
+            if summary['conflicts']:
+                parts.append(f"{len(summary['conflicts'])} conflict(s)")
+            if summary['errors']:
+                parts.append(f"{summary['errors']} error(s)")
+            _record_activity('error' if summary['errors'] else 'save',
+                             'Save sync', ', '.join(parts))
         return summary
 
     def _resolve_download_target(self, op, saves_dir):
@@ -9122,6 +9153,8 @@ class CollectionSyncManager:
             'body':      body,
             'timestamp': time.time(),
         })
+        # Every toast-worthy event is also a feed-worthy event.
+        _record_activity('sync' if kind == 'sync' else 'delete', title, body)
 
     def drain_notifications(self):
         """Return all queued notification events and clear the queue."""

@@ -55,6 +55,20 @@ except ImportError as e:
     logging.warning(f"sync_core not available: {e}")
     SYNC_CORE_AVAILABLE = False
 
+try:
+    import activity_log
+except Exception:
+    activity_log = None
+
+
+def _record_activity(kind, title, detail=''):
+    """Append to the Settings ▸ Recent Activity feed (no-op if unavailable)."""
+    if activity_log:
+        try:
+            activity_log.record(kind, title, detail)
+        except Exception:
+            pass
+
 # ---------------------------------------------------------------------------
 # Logging setup
 # ---------------------------------------------------------------------------
@@ -1020,6 +1034,26 @@ class Plugin:
             logging.debug(f"drain_notifications error: {e}")
         return {'events': []}
 
+    async def get_recent_activity(self, limit: int = 50):
+        """Recent plugin activity (downloads, syncs, save events) newest-first
+        for the Settings ▸ Recent Activity feed. Persisted across restarts."""
+        try:
+            if activity_log:
+                return {'events': activity_log.get_recent(limit)}
+        except Exception as e:
+            logging.debug(f"get_recent_activity error: {e}")
+        return {'events': []}
+
+    async def clear_recent_activity(self):
+        """Clear the persisted Recent Activity feed."""
+        try:
+            if activity_log:
+                activity_log.clear()
+            return {'success': True}
+        except Exception as e:
+            logging.debug(f"clear_recent_activity error: {e}")
+            return {'success': False}
+
     async def refresh_from_romm(self, force_full_refresh: bool = False):
         """Refresh data from RomM server (collections and games).
 
@@ -1530,6 +1564,7 @@ class Plugin:
             self._stop_sync()
             time.sleep(0.5)
             self._start_sync()
+            _record_activity('account', 'Signed in', url.strip().rstrip('/'))
             return {'success': True}
         except Exception as e:
             logging.error(f"save_config error: {e}", exc_info=True)
@@ -1904,6 +1939,7 @@ class Plugin:
                         if chunk:
                             f.write(chunk)
             logging.info(f"[UPDATE] downloaded {dest.stat().st_size} bytes")
+            _record_activity('update', 'Plugin update downloaded', name)
             return {'success': True, 'path': str(dest), 'name': name}
         except Exception as e:
             logging.error(f"[UPDATE] download_update error: {e}", exc_info=True)
@@ -2056,6 +2092,8 @@ class Plugin:
             save_decky_settings(ds)
 
             logging.info(f"Logged out of RomM (wipe_data={wipe_data})")
+            _record_activity('account', 'Logged out',
+                             'Downloads deleted' if wipe_data else 'Downloads kept')
             result['success'] = True
             return result
         except Exception as e:
@@ -2124,6 +2162,8 @@ class Plugin:
             logging.info("Paired with RomM via Client API Token")
 
             connected = self._connect_to_romm()
+            if connected:
+                _record_activity('account', 'Signed in', url)
             return {'success': bool(connected),
                     'message': 'Paired and connected' if connected
                     else 'Paired, but connection failed'}
@@ -2324,6 +2364,10 @@ class Plugin:
             result = self._retroarch.restore_save_version(
                 self._romm_client, None, entry, save_type, as_copy,
                 log=lambda m: logging.info(m))
+            if result.get('success'):
+                _record_activity('save',
+                                 'State restored' if save_type == 'states' else 'Save restored',
+                                 result.get('tgt_name') or '')
             return {
                 'success':  result.get('success', False),
                 'message':  result.get('error') or 'Restored',
@@ -3405,6 +3449,9 @@ class Plugin:
                         'speed': 0, 'eta': 0, 'state': 'done' if ok else 'error',
                         'message': msg or ('Downloaded' if ok else 'Download failed'),
                     }
+                    _record_activity('download' if ok else 'error',
+                                     'Downloaded' if ok else 'Download failed',
+                                     name or file_name or f'ROM {rom_id}')
                 except Exception as e:
                     logging.error(f"download_game worker error: {e}", exc_info=True)
                     self._download_progress[rom_id] = {
@@ -3464,6 +3511,8 @@ class Plugin:
                 shutil.rmtree(target)
             if g:
                 g['is_downloaded'] = False; g['local_path'] = None
+            _record_activity('delete', 'Deleted from device',
+                             (g or {}).get('name') or target.name)
             return {'success': True, 'message': 'Deleted'}
         except Exception as e:
             logging.error(f"delete_game error: {e}", exc_info=True)
