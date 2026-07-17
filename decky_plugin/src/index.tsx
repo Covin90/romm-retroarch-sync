@@ -415,19 +415,23 @@ async function awaitDownload(romId: number): Promise<{ ok: boolean; message?: st
 // game (its cover tile + its details page) reflects the download — not just the
 // one whose button was clicked. doDownload toggles membership; surfaces subscribe.
 const _dlActive = new Set<number>();
+// Display names for the registry (keyed by rom_id) so the account menu's
+// Downloads section can label each in-flight download.
+const _dlNames = new Map<number, string>();
 const _dlListeners = new Set<() => void>();
-function _setDlActive(romId: number, on: boolean) {
-  if (on) _dlActive.add(romId); else _dlActive.delete(romId);
+function _setDlActive(romId: number, on: boolean, name?: string) {
+  if (on) { _dlActive.add(romId); if (name) _dlNames.set(romId, name); }
+  else { _dlActive.delete(romId); _dlNames.delete(romId); }
   _dlListeners.forEach((l) => { try { l(); } catch { } });
 }
 // Downloads one game through the same path as the tile button: registers it in
 // the global registry (so its cover tile shows the ring), kicks off the backend
 // download, then polls to completion. Returns whether it succeeded.
-async function downloadOne(romId: number): Promise<boolean> {
+async function downloadOne(romId: number, name?: string): Promise<boolean> {
   if (_dlActive.has(romId)) { // already downloading elsewhere — just wait it out
     return (await awaitDownload(romId)).ok;
   }
-  _setDlActive(romId, true);
+  _setDlActive(romId, true, name);
   try {
     const start = await downloadGame(romId);
     if (!start?.success) return false;
@@ -439,19 +443,32 @@ async function downloadOne(romId: number): Promise<boolean> {
 // Runs a batch of downloads with bounded concurrency, reporting progress after
 // each one finishes. Returns the count that succeeded.
 async function downloadBatch(
-  romIds: number[], concurrency: number, onProgress: (done: number, ok: number) => void,
+  items: { id: number; name: string }[], concurrency: number, onProgress: (done: number, ok: number) => void,
 ): Promise<number> {
   let done = 0, ok = 0, i = 0;
   const worker = async () => {
-    while (i < romIds.length) {
-      const id = romIds[i++];
-      if (await downloadOne(id)) ok++;
+    while (i < items.length) {
+      const it = items[i++];
+      if (await downloadOne(it.id, it.name)) ok++;
       done++;
       onProgress(done, ok);
     }
   };
-  await Promise.all(Array.from({ length: Math.min(concurrency, romIds.length) }, worker));
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
   return ok;
+}
+
+// Snapshot of every in-flight download (frontend-initiated), for the account
+// menu's Downloads section. Re-renders on registry changes.
+function useActiveDownloads(): { romId: number; name: string }[] {
+  const snap = () => Array.from(_dlActive).map((id) => ({ romId: id, name: _dlNames.get(id) || `ROM ${id}` }));
+  const [v, setV] = useState(snap);
+  useEffect(() => {
+    const l = () => setV(snap());
+    _dlListeners.add(l); l();
+    return () => { _dlListeners.delete(l); };
+  }, []);
+  return v;
 }
 
 function useIsDownloading(romId: number): boolean {
@@ -907,7 +924,7 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
     }
     setBusy('download');
     setActiveDlRomId(game.rom_id);
-    _setDlActive(game.rom_id, true);
+    _setDlActive(game.rom_id, true, game.name);
     try {
       const start = await downloadGame(game.rom_id);
       if (!start?.success) { toaster.toast({ title: 'Download failed', body: start?.message || 'Error' }); return; }
@@ -940,7 +957,7 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
       }
       setBusy('download');
       setActiveDlRomId(selectedRomId);
-      _setDlActive(selectedRomId, true);
+      _setDlActive(selectedRomId, true, game.name);
       try {
         const start = await downloadGame(selectedRomId);
         if (!start?.success) { toaster.toast({ title: 'Download failed', body: start?.message || 'Error' }); return; }
@@ -1343,7 +1360,7 @@ function CollectionTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: 
       <Menu label={group.label} onCancel={() => { removeArmed.current = false; }}>
         <MenuItem onSelected={async () => {
           const res = await getLibraryGames('collection', group.key).catch(() => null);
-          const missing = res?.success ? (res.games || []).filter((g: LibGame) => !g.is_downloaded).map((g: LibGame) => g.rom_id) : [];
+          const missing = res?.success ? (res.games || []).filter((g: LibGame) => !g.is_downloaded).map((g: LibGame) => ({ id: g.rom_id, name: g.name })) : [];
           if (!missing.length) { toaster.toast({ title: 'Nothing to sync', body: 'All games are already downloaded' }); return; }
           toaster.toast({ title: 'Syncing collection', body: `Downloading ${missing.length} game${missing.length === 1 ? '' : 's'}` });
           const ok = await downloadBatch(missing, 3, () => { });
@@ -1795,6 +1812,54 @@ function UserMenuRow({ icon, label, danger, disabled, onSelect }:
   );
 }
 
+// One entry in the account menu's Downloads section: game name over a thin
+// live progress track, with percent (and speed while transferring) on the right.
+function DownloadStatusRow({ romId, name }: { romId: number; name: string }) {
+  const prog = useDownloadProgress(romId, true);
+  const pct = Math.max(0, Math.min(100, prog?.percent ?? 0));
+  return (
+    <div style={{ padding: '5px 12px 7px' }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: '10px', minWidth: 0 }}>
+        <span style={{
+          fontSize: '12.5px', fontWeight: 500, color: V2.fg2, minWidth: 0,
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>{name}</span>
+        <span style={{ fontSize: '11px', fontWeight: 600, color: V2.fgMuted, flexShrink: 0, fontVariantNumeric: 'tabular-nums' }}>
+          {prog && prog.speed > 0 ? `${formatSpeed(prog.speed)} · ` : ''}{pct}%
+        </span>
+      </div>
+      <div style={{ height: '3px', borderRadius: '2px', background: V2.surface, marginTop: '5px', overflow: 'hidden' }}>
+        <div style={{ height: '100%', width: `${pct}%`, background: V2.brand, borderRadius: '2px', transition: 'width 0.3s ease' }} />
+      </div>
+    </div>
+  );
+}
+
+// Same row shape for a backend collection auto-sync pass (CollectionSyncManager),
+// which downloads outside the frontend registry — surfaced from the shared
+// service-status poll (sync_state 'syncing').
+function CollectionSyncStatusRow({ col }: { col: any }) {
+  const pct = typeof col.downloaded_pct === 'number'
+    ? Math.max(0, Math.min(100, col.downloaded_pct))
+    : (col.total ? Math.max(0, Math.min(100, (col.downloaded || 0) / col.total * 100)) : 0);
+  return (
+    <div style={{ padding: '5px 12px 7px' }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: '10px', minWidth: 0 }}>
+        <span style={{
+          fontSize: '12.5px', fontWeight: 500, color: V2.fg2, minWidth: 0,
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>{col.name}</span>
+        <span style={{ fontSize: '11px', fontWeight: 600, color: V2.fgMuted, flexShrink: 0, fontVariantNumeric: 'tabular-nums' }}>
+          {col.speed > 0 ? `${formatSpeed(col.speed)} · ` : ''}{col.downloaded || 0}/{col.total || 0}
+        </span>
+      </div>
+      <div style={{ height: '3px', borderRadius: '2px', background: V2.surface, marginTop: '5px', overflow: 'hidden' }}>
+        <div style={{ height: '100%', width: `${pct}%`, background: V2.brand, borderRadius: '2px', transition: 'width 0.3s ease' }} />
+      </div>
+    </div>
+  );
+}
+
 // RomM UserMenu, rebuilt in the v2 design language (matches RestoreModal's
 // chrome): a glass panel anchored top-right (RomM's location="bottom end"),
 // with the identity header card over Stats / Settings / Log out.
@@ -1803,6 +1868,11 @@ function UserMenuModal({ username, role, avatar, closeModal }:
   const panelRef = useRef<HTMLDivElement>(null);
   useEffect(() => { const t = setTimeout(() => { if (panelRef.current) _forceGamepadFocus(panelRef.current); }, 60); return () => clearTimeout(t); }, []);
   const [refreshing, setRefreshing] = useState(false);
+  // Downloads section data: frontend-initiated downloads (registry) + backend
+  // collection auto-sync passes (shared status poll).
+  const activeDls = useActiveDownloads();
+  const status = useServiceStatus();
+  const syncingCols = ((status?.collections || []) as any[]).filter((c) => c.sync_state === 'syncing');
 
   // In-library view when the library route hosts us (keeps the tabs tree
   // mounted underneath), real navigation otherwise.
@@ -1895,6 +1965,25 @@ function UserMenuModal({ username, role, avatar, closeModal }:
           <UserMenuRow
             icon={<FaSync size={15} style={refreshing ? { animation: 'spin 1s linear infinite' } : undefined} />}
             label={refreshing ? 'Refreshing…' : 'Refresh library'} disabled={refreshing} onSelect={doRefresh} />
+          <div style={{ height: '1px', background: V2.border, margin: '4px 4px' }} />
+          {/* Downloads — live status of every in-flight download (per-game
+              registry) and any backend collection auto-sync pass. */}
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: '7px',
+            fontSize: '10.5px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em',
+            color: V2.fgMuted, padding: '6px 12px 4px',
+          }}>
+            <FaDownload size={10} />
+            <span>Downloads{(activeDls.length + syncingCols.length) > 0 ? ` (${activeDls.length + syncingCols.length})` : ''}</span>
+          </div>
+          {activeDls.length === 0 && syncingCols.length === 0 ? (
+            <div style={{ fontSize: '12px', color: V2.fgFaint, padding: '2px 12px 8px' }}>No active downloads</div>
+          ) : (
+            <div style={{ paddingBottom: '4px' }}>
+              {syncingCols.map((c) => <CollectionSyncStatusRow key={`col-${c.name}`} col={c} />)}
+              {activeDls.map((d) => <DownloadStatusRow key={d.romId} romId={d.romId} name={d.name} />)}
+            </div>
+          )}
           <div style={{ height: '1px', background: V2.border, margin: '4px 4px' }} />
           <UserMenuRow icon={<FaSignOutAlt size={15} />} label="Log out" danger onSelect={doLogout} />
         </Focusable>
@@ -4494,9 +4583,9 @@ function LibraryGamesPage() {
   const syncIdsRef = useRef<number[]>([]); // rom_ids of the running one-shot batch
   const syncMissing = async () => {
     if (syncJob) return; // already running for this page
-    const missing = games.filter((g) => !g.is_downloaded).map((g) => g.rom_id);
+    const missing = games.filter((g) => !g.is_downloaded).map((g) => ({ id: g.rom_id, name: g.name }));
     if (missing.length === 0) { toaster.toast({ title: 'Nothing to sync', body: 'All games are already downloaded' }); return; }
-    syncIdsRef.current = missing;
+    syncIdsRef.current = missing.map((m) => m.id);
     setSyncJob({ done: 0, total: missing.length });
     toaster.toast({ title: 'Syncing collection', body: `Downloading ${missing.length} game${missing.length === 1 ? '' : 's'}` });
     const ok = await downloadBatch(missing, 3, (done) => setSyncJob({ done, total: missing.length }));
@@ -5880,7 +5969,7 @@ function GameDetailPage() {
   const doDownload = async () => {
     if (!game) return;
     setBusy('download');
-    _setDlActive(game.rom_id, true);
+    _setDlActive(game.rom_id, true, detail?.name || game.name);
     try {
       const start = await downloadGame(game.rom_id);
       if (!start?.success) {
