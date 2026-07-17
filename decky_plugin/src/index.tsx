@@ -1147,9 +1147,17 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
     else doDownload();
   };
 
+  // Keep our own handle on the DOM node (for the focus reveal/glimpse) while
+  // still honoring the parent's object-or-callback focusRef.
+  const selfRef = useRef<any>(null);
+  const setRefs = (el: any) => {
+    selfRef.current = el;
+    if (typeof focusRef === 'function') focusRef(el);
+    else if (focusRef) (focusRef as any).current = el;
+  };
   return (
     <Focusable noFocusRing className="romm-gt-wrap"
-      ref={focusRef}
+      ref={setRefs}
       onActivate={() => {
         // A press that started on an overlay sub-button (Details / Delete) must
         // not also activate the cover — Steam routes the tap to this parent
@@ -1168,7 +1176,7 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
       onOptionsButton={() => { if (dl) requestDelete(); }}
       onOptionsActionDescription={dl ? (confirmDelete ? 'Confirm delete' : 'Delete') : undefined}
       onOKActionDescription={dl ? (isMultiRegion ? 'Launch (hold: regions)' : isMultiDisc ? (discsAreRegion ? 'Launch (hold: regions)' : 'Launch (hold: discs)') : 'Launch') : 'Download'}
-      onFocus={() => { setFocused(true); activate(); ensureDiscs(); ensureSiblings(); if (index !== undefined) onFocusIdx?.(index); }}
+      onFocus={() => { setFocused(true); activate(); ensureDiscs(); ensureSiblings(); if (index !== undefined) onFocusIdx?.(index); _tileFocusScrub(selfRef.current, game.name); }}
       onBlur={() => setFocused(false)}
       onMouseEnter={() => { setFocused(true); activate(); ensureDiscs(); ensureSiblings(); }}
       onMouseLeave={() => setFocused(false)}
@@ -1546,16 +1554,22 @@ function CollectionTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: 
   // Terse footer labels — the long "Open · Hold: Actions" + "Sync collection"
   // pair wrapped the Deck's button legend onto two rows. The hold affordance
   // is already advertised by the tile's ⋯ HOLD chip.
+  const selfRef = useRef<any>(null);
+  const setRefs = (el: any) => {
+    selfRef.current = el;
+    if (typeof focusRef === 'function') focusRef(el);
+    else if (focusRef) (focusRef as any).current = el;
+  };
   return (
     <Focusable noFocusRing className="romm-ct-wrap"
-      ref={focusRef}
+      ref={setRefs}
       onClick={() => onOpen(group)}
       onActivate={onActivate}
       onButtonDown={onBtnDown}
       onOKActionDescription="Open"
       onOptionsButton={isVirtual ? undefined : toggleSync}
       onOptionsActionDescription={isVirtual ? undefined : (synced ? 'Sync off' : 'Sync')}
-      onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+      onFocus={() => { setFocused(true); _tileFocusScrub(selfRef.current, group.label); }} onBlur={() => setFocused(false)}
       onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
       style={{ cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: '8px' }}
     >
@@ -1683,11 +1697,17 @@ function PlatformIcon({ slug, fsSlug, size }: { slug?: string | null; fsSlug?: s
 // card, large icon on top, name + count, focus brand glow.
 function PlatformTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: (g: LibGroup) => void; focusRef?: React.Ref<any> }) {
   const [focused, setFocused] = useState(false);
+  const selfRef = useRef<any>(null);
+  const setRefs = (el: any) => {
+    selfRef.current = el;
+    if (typeof focusRef === 'function') focusRef(el);
+    else if (focusRef) (focusRef as any).current = el;
+  };
   return (
     <Focusable noFocusRing className="romm-ptile-wrap"
-      ref={focusRef}
+      ref={setRefs}
       onActivate={() => onOpen(group)} onClick={() => onOpen(group)}
-      onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+      onFocus={() => { setFocused(true); _tileFocusScrub(selfRef.current, group.label); }} onBlur={() => setFocused(false)}
       onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
       style={{ cursor: 'pointer' }}
     >
@@ -4177,6 +4197,28 @@ const _scrubLetterOf = (s: string) => {
   return c >= 'A' && c <= 'Z' ? c : '#';
 };
 
+// Tile-focus hook shared by all grid tiles (game/platform/collection):
+// 1. Reveal — Steam's own autoscroll only brings a tile to the viewport edge,
+//    so first-row tiles end up parked UNDER the fixed/sticky top chrome
+//    ("selected something I can't see"). If the focused tile sits in that band,
+//    recenter it.
+// 2. Glimpse — Big Picture shows the current letter while you scroll fast.
+//    Rapid successive tile-focus moves count as fast scrolling; after a short
+//    streak, surface the focused tile's letter via the visible page's overlay.
+let _scrubGlimpse: ((letter: string) => void) | null = null;
+let _scrubFocusTs = 0;
+let _scrubStreak = 0;
+function _tileFocusScrub(el: any, label: string) {
+  try {
+    const r = el?.getBoundingClientRect?.();
+    if (r && r.top < 120) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  } catch { /* ignore */ }
+  const now = Date.now();
+  _scrubStreak = now - _scrubFocusTs < 350 ? _scrubStreak + 1 : 1;
+  _scrubFocusTs = now;
+  if (_scrubStreak >= 3) { try { _scrubGlimpse?.(_scrubLetterOf(label)); } catch { /* ignore */ } }
+}
+
 // Shared jump math: given the displayed labels and the current index, the index
 // to land on. R2 → first item of the next letter block (last item from the last
 // block); L2 → first item of the current block, or of the previous block when
@@ -4292,6 +4334,12 @@ function GroupsPanel({ mode, visible, onOpenGroup, svcStatus }:
   const [scrubLetter, setScrubLetter] = useState<string | null>(null);
   const scrubTimer = useRef<any>(null);
   useEffect(() => () => clearTimeout(scrubTimer.current), []);
+  const showScrubRef = useRef<(l: string) => void>(() => { });
+  showScrubRef.current = (l) => {
+    setScrubLetter(l);
+    clearTimeout(scrubTimer.current);
+    scrubTimer.current = setTimeout(() => setScrubLetter(null), 750);
+  };
   const jumpRef = useRef<(dir: 1 | -1) => void>(() => { });
   jumpRef.current = (dir) => {
     const ord = orderRef.current;
@@ -4310,15 +4358,19 @@ function GroupsPanel({ mode, visible, onOpenGroup, svcStatus }:
       try { el.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch { /* ignore */ }
       playSteamSound('deck_ui_tab_transition_01');
     }
-    setScrubLetter(_scrubLetterOf(g.label));
-    clearTimeout(scrubTimer.current);
-    scrubTimer.current = setTimeout(() => setScrubLetter(null), 750);
+    showScrubRef.current(_scrubLetterOf(g.label));
   };
   useEffect(() => {
     if (!visible) return;
     const fn = (d: 1 | -1) => jumpRef.current(d);
     _libLetterJump = fn;
-    return () => { if (_libLetterJump === fn) _libLetterJump = null; };
+    // Fast-scroll glimpse: tiles report rapid focus moves here.
+    const gl = (l: string) => showScrubRef.current(l);
+    _scrubGlimpse = gl;
+    return () => {
+      if (_libLetterJump === fn) _libLetterJump = null;
+      if (_scrubGlimpse === gl) _scrubGlimpse = null;
+    };
   }, [visible]);
   const scrubOverlay = <ScrubOverlay letter={scrubLetter} />;
   // -----------------------------------------------------------------------
@@ -4870,6 +4922,18 @@ function LibraryGamesPage() {
   const scrubTimer = useRef<any>(null);
   const scrubFocusTimer = useRef<any>(null);
   useEffect(() => () => { clearTimeout(scrubTimer.current); clearTimeout(scrubFocusTimer.current); }, []);
+  const showScrubRef = useRef<(l: string) => void>(() => { });
+  showScrubRef.current = (l) => {
+    setScrubLetter(l);
+    clearTimeout(scrubTimer.current);
+    scrubTimer.current = setTimeout(() => setScrubLetter(null), 750);
+  };
+  // Fast-scroll glimpse while this page is up (tiles report rapid focus moves).
+  useEffect(() => {
+    const gl = (l: string) => showScrubRef.current(l);
+    _scrubGlimpse = gl;
+    return () => { if (_scrubGlimpse === gl) _scrubGlimpse = null; };
+  }, []);
   const scrubJump = (dir: 1 | -1) => {
     const list = gamesRef.current;
     if (!list.length) return;
@@ -4897,9 +4961,7 @@ function LibraryGamesPage() {
       clearTimeout(scrubFocusTimer.current);
       tryFocus(0);
     }
-    setScrubLetter(_scrubLetterOf(g.name));
-    clearTimeout(scrubTimer.current);
-    scrubTimer.current = setTimeout(() => setScrubLetter(null), 750);
+    showScrubRef.current(_scrubLetterOf(g.name));
   };
   // -----------------------------------------------------------------------
 
