@@ -418,11 +418,19 @@ const _dlActive = new Set<number>();
 // Display names for the registry (keyed by rom_id) so the account menu's
 // Downloads section can label each in-flight download.
 const _dlNames = new Map<number, string>();
+// Batch items waiting for a worker slot (rom_id → name) — shown as "Queued" on
+// the Downloads page. Seeded by downloadBatch, drained as each download starts.
+const _dlQueue = new Map<number, string>();
+// Roms whose download completed successfully this session, so a mounted tile
+// can light its downloaded dot the moment its global download finishes (the
+// games-list prop only updates on the next refetch).
+const _dlSucceeded = new Set<number>();
 const _dlListeners = new Set<() => void>();
+function _notifyDl() { _dlListeners.forEach((l) => { try { l(); } catch { } }); }
 function _setDlActive(romId: number, on: boolean, name?: string) {
   if (on) { _dlActive.add(romId); if (name) _dlNames.set(romId, name); }
   else { _dlActive.delete(romId); _dlNames.delete(romId); }
-  _dlListeners.forEach((l) => { try { l(); } catch { } });
+  _notifyDl();
 }
 // Downloads one game through the same path as the tile button: registers it in
 // the global registry (so its cover tile shows the ring), kicks off the backend
@@ -435,7 +443,15 @@ async function downloadOne(romId: number, name?: string): Promise<boolean> {
   try {
     const start = await downloadGame(romId);
     if (!start?.success) return false;
-    return (await awaitDownload(romId)).ok;
+    const ok = (await awaitDownload(romId)).ok;
+    if (ok) {
+      // Reflect the new local copy everywhere immediately: cached group lists
+      // (so a remounted grid seeds correct dots) and mounted tiles (via
+      // _dlSucceeded + the registry notification from _setDlActive below).
+      _dlSucceeded.add(romId);
+      libCacheSetDownloaded(romId, true);
+    }
+    return ok;
   } catch { return false; }
   finally { _setDlActive(romId, false); }
 }
@@ -445,23 +461,78 @@ async function downloadOne(romId: number, name?: string): Promise<boolean> {
 async function downloadBatch(
   items: { id: number; name: string }[], concurrency: number, onProgress: (done: number, ok: number) => void,
 ): Promise<number> {
+  for (const it of items) if (!_dlActive.has(it.id)) _dlQueue.set(it.id, it.name);
+  _notifyDl();
   let done = 0, ok = 0, i = 0;
   const worker = async () => {
     while (i < items.length) {
       const it = items[i++];
+      _dlQueue.delete(it.id); _notifyDl();
       if (await downloadOne(it.id, it.name)) ok++;
       done++;
       onProgress(done, ok);
     }
   };
-  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+  try {
+    await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+  } finally {
+    for (const it of items) _dlQueue.delete(it.id);
+    _notifyDl();
+  }
   return ok;
+}
+
+// One-shot collection batch with MODULE-level job state, keyed by the group's
+// cache key. The old per-page useState died on unmount, so leaving a syncing
+// collection and coming back lost the header progress even though the batch
+// kept running — this survives, and useBatchJob re-attaches any remount.
+interface BatchJob { done: number; ok: number; total: number; ids: number[]; }
+const _batchJobs = new Map<string, BatchJob>();
+function useBatchJob(key: string | null): BatchJob | null {
+  const [, force] = useState(0);
+  useEffect(() => {
+    const l = () => force((n) => n + 1);
+    _dlListeners.add(l);
+    return () => { _dlListeners.delete(l); };
+  }, []);
+  return key ? (_batchJobs.get(key) || null) : null;
+}
+async function runCollectionBatch(jobKey: string, items: { id: number; name: string }[]): Promise<void> {
+  if (_batchJobs.has(jobKey) || items.length === 0) return;
+  _batchJobs.set(jobKey, { done: 0, ok: 0, total: items.length, ids: items.map((i) => i.id) });
+  _notifyDl();
+  toaster.toast({ title: 'Syncing collection', body: `Downloading ${items.length} game${items.length === 1 ? '' : 's'}` });
+  let ok = 0;
+  try {
+    ok = await downloadBatch(items, 3, (done, okN) => {
+      const j = _batchJobs.get(jobKey);
+      if (j) { j.done = done; j.ok = okN; _notifyDl(); }
+    });
+  } finally {
+    _batchJobs.delete(jobKey); _notifyDl();
+  }
+  toaster.toast({ title: 'Sync complete', body: `${ok} of ${items.length} downloaded` });
+  // Any mounted grid refetches its list so downloaded dots reflect the batch
+  // even if the page that started it was unmounted meanwhile.
+  _broadcastLibRefresh();
 }
 
 // Snapshot of every in-flight download (frontend-initiated), for the account
 // menu's Downloads section. Re-renders on registry changes.
 function useActiveDownloads(): { romId: number; name: string }[] {
   const snap = () => Array.from(_dlActive).map((id) => ({ romId: id, name: _dlNames.get(id) || `ROM ${id}` }));
+  const [v, setV] = useState(snap);
+  useEffect(() => {
+    const l = () => setV(snap());
+    _dlListeners.add(l); l();
+    return () => { _dlListeners.delete(l); };
+  }, []);
+  return v;
+}
+
+// Batch items still waiting for a worker slot, for the Downloads page's Queued list.
+function useQueuedDownloads(): { romId: number; name: string }[] {
+  const snap = () => Array.from(_dlQueue, ([id, name]) => ({ romId: id, name }));
   const [v, setV] = useState(snap);
   useEffect(() => {
     const l = () => setV(snap());
@@ -484,7 +555,9 @@ function useDownloadGlimpse(): { count: number; pct: number | null } {
   }, []);
   const syncingCount = ((_lastStatus?.collections || []) as any[])
     .filter((c) => c.sync_state === 'syncing').length;
-  const count = _dlActive.size + syncingCount;
+  // Queued batch items count toward the badge (total outstanding work); the
+  // ring percent stays the mean of what's actually transferring.
+  const count = _dlActive.size + _dlQueue.size + syncingCount;
   const [pct, setPct] = useState<number | null>(null);
   const on = count > 0;
   useEffect(() => {
@@ -864,6 +937,13 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
   const dlPct = useDownloadProgress(activeDlRomId, busy === 'download')?.percent ?? null;
   const globalDownloading = useIsDownloading(activeDlRomId);
   const downloading = busy === 'download' || globalDownloading;
+  // A batch/global download for this tile finished successfully → light the dot
+  // now instead of waiting for the next list refetch.
+  const wasGlobalDl = useRef(false);
+  useEffect(() => {
+    if (wasGlobalDl.current && !globalDownloading && _dlSucceeded.has(game.rom_id)) setDl(true);
+    wasGlobalDl.current = globalDownloading;
+  }, [globalDownloading, game.rom_id]);
   // Offline: downloaded games still launch, but a fetch from the server can't
   // succeed — so block + visually dim download on not-yet-downloaded tiles
   // rather than letting the user trigger a guaranteed failure.
@@ -1401,9 +1481,9 @@ function CollectionTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: 
           const res = await getLibraryGames('collection', group.key).catch(() => null);
           const missing = res?.success ? (res.games || []).filter((g: LibGame) => !g.is_downloaded).map((g: LibGame) => ({ id: g.rom_id, name: g.name })) : [];
           if (!missing.length) { toaster.toast({ title: 'Nothing to sync', body: 'All games are already downloaded' }); return; }
-          toaster.toast({ title: 'Syncing collection', body: `Downloading ${missing.length} game${missing.length === 1 ? '' : 's'}` });
-          const ok = await downloadBatch(missing, 3, () => { });
-          toaster.toast({ title: 'Sync complete', body: `${ok} of ${missing.length} downloaded` });
+          // Shared module-level batch: same job key as the collection page, so
+          // opening the collection mid-batch shows the running header progress.
+          runCollectionBatch(`collection:${group.key}`, missing);
         }}>{isVirtual ? 'Download missing' : 'Sync missing'}</MenuItem>
         {!isVirtual && (
           <MenuItem tone="destructive" onSelected={() => {
@@ -4687,21 +4767,25 @@ function LibraryGamesPage() {
   };
 
   // One-shot "Sync missing": download every game in this collection that isn't
-  // already local, through the per-game download path (covers light up as they go).
-  const [syncJob, setSyncJob] = useState<{ done: number; total: number } | null>(null);
-  const syncIdsRef = useRef<number[]>([]); // rom_ids of the running one-shot batch
-  const syncMissing = async () => {
-    if (syncJob) return; // already running for this page
+  // already local, through the per-game download path (covers light up as they
+  // go). Job state lives in the module-level _batchJobs so it survives leaving
+  // and re-entering this page mid-batch.
+  const syncJob = useBatchJob(group ? cacheKey(group.key) : null);
+  const syncMissing = () => {
+    if (!group || syncJob) return; // already running for this group
     const missing = games.filter((g) => !g.is_downloaded).map((g) => ({ id: g.rom_id, name: g.name }));
     if (missing.length === 0) { toaster.toast({ title: 'Nothing to sync', body: 'All games are already downloaded' }); return; }
-    syncIdsRef.current = missing.map((m) => m.id);
-    setSyncJob({ done: 0, total: missing.length });
-    toaster.toast({ title: 'Syncing collection', body: `Downloading ${missing.length} game${missing.length === 1 ? '' : 's'}` });
-    const ok = await downloadBatch(missing, 3, (done) => setSyncJob({ done, total: missing.length }));
-    setSyncJob(null);
-    toaster.toast({ title: 'Sync complete', body: `${ok} of ${missing.length} downloaded` });
-    refreshGames();
+    runCollectionBatch(cacheKey(group.key), missing);
   };
+
+  // Re-pull the list when a batch completes anywhere (runCollectionBatch fires
+  // _broadcastLibRefresh), so the dots update even if the batch was started
+  // from a previous mount of this page or from a collection tile's menu.
+  useEffect(() => {
+    const l = () => { refreshGames(); };
+    _libRefreshListeners.add(l);
+    return () => { _libRefreshListeners.delete(l); };
+  }, [group?.key]);
 
   // Re-fetch this group's games (bypassing the stale cache) so the downloaded
   // dots reflect games pulled in by a collection sync without a plugin restart.
@@ -4755,7 +4839,7 @@ function LibraryGamesPage() {
     if (!syncJob) { setSyncStats({ frac: 0, speed: 0 }); return; }
     let alive = true;
     const tick = async () => {
-      const active = syncIdsRef.current.filter((id) => _dlActive.has(id));
+      const active = syncJob.ids.filter((id) => _dlActive.has(id));
       let frac = 0, speed = 0;
       await Promise.all(active.map(async (id) => {
         try {
@@ -6840,6 +6924,7 @@ function StatsPage() {
 // downloads from the backend activity log. Opened from the account menu.
 function DownloadsPage() {
   const activeDls = useActiveDownloads();
+  const queued = useQueuedDownloads();
   const status = useServiceStatus();
   const syncingCols = ((status?.collections || []) as any[]).filter((c) => c.sync_state === 'syncing');
   const activeCount = activeDls.length + syncingCols.length;
@@ -6904,6 +6989,30 @@ function DownloadsPage() {
             </div>
           )}
         </V2StatsSectionBox>
+
+        {queued.length > 0 && (
+          <V2StatsSectionBox title={`Queued (${queued.length})`} icon={<FaRegClock size={14} />}>
+            {queued.slice(0, 12).map((q, i) => (
+              <div key={q.romId} style={{
+                display: 'flex', alignItems: 'center', gap: '10px', padding: '9px 14px',
+                borderTop: i > 0 ? `1px solid ${V2.border}` : 'none',
+              }}>
+                <div style={{ flexShrink: 0, color: V2.fgMuted, display: 'flex' }}><FaRegClock size={12} /></div>
+                <div style={{
+                  flex: '1 1 auto', minWidth: 0, fontSize: '12.5px', fontWeight: 500, color: V2.fg2,
+                  whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                }}>{q.name}</div>
+                <div style={{ flexShrink: 0, fontSize: '10.5px', color: V2.fgMuted }}>Waiting</div>
+              </div>
+            ))}
+            {queued.length > 12 && (
+              <div style={{
+                padding: '9px 14px', fontSize: '11.5px', color: V2.fgMuted,
+                borderTop: `1px solid ${V2.border}`,
+              }}>and {queued.length - 12} more…</div>
+            )}
+          </V2StatsSectionBox>
+        )}
 
         <V2StatsSectionBox title="Recently completed" icon={<FaHistory size={14} />}>
           {recent.length === 0 ? (
