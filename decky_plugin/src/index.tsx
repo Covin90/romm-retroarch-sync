@@ -4197,26 +4197,19 @@ const _scrubLetterOf = (s: string) => {
   return c >= 'A' && c <= 'Z' ? c : '#';
 };
 
-// Tile-focus hook shared by all grid tiles (game/platform/collection):
-// 1. Reveal — Steam's own autoscroll only brings a tile to the viewport edge,
-//    so first-row tiles end up parked UNDER the fixed/sticky top chrome
-//    ("selected something I can't see"). If the focused tile sits in that band,
-//    recenter it.
-// 2. Glimpse — Big Picture shows the current letter while you scroll fast.
-//    Rapid successive tile-focus moves count as fast scrolling; after a short
-//    streak, surface the focused tile's letter via the visible page's overlay.
+// Fast-scroll glimpse (Big Picture-style): show the current letter only while
+// the user is genuinely flying through the grid — a sustained run of held-repeat
+// focus moves. Deliberate d-pad taps land ~250ms+ apart even when quick, while
+// Steam's held-repeat cadence is well under 200ms, so the tight window plus a
+// long streak keeps the overlay away from normal browsing.
 let _scrubGlimpse: ((letter: string) => void) | null = null;
 let _scrubFocusTs = 0;
 let _scrubStreak = 0;
-function _tileFocusScrub(el: any, label: string) {
-  try {
-    const r = el?.getBoundingClientRect?.();
-    if (r && r.top < 120) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  } catch { /* ignore */ }
+function _tileFocusScrub(_el: any, label: string) {
   const now = Date.now();
-  _scrubStreak = now - _scrubFocusTs < 350 ? _scrubStreak + 1 : 1;
+  _scrubStreak = now - _scrubFocusTs < 200 ? _scrubStreak + 1 : 1;
   _scrubFocusTs = now;
-  if (_scrubStreak >= 3) { try { _scrubGlimpse?.(_scrubLetterOf(label)); } catch { /* ignore */ } }
+  if (_scrubStreak >= 5) { try { _scrubGlimpse?.(_scrubLetterOf(label)); } catch { /* ignore */ } }
 }
 
 // Shared jump math: given the displayed labels and the current index, the index
@@ -4985,6 +4978,10 @@ function LibraryGamesPage() {
   // real width and mirror it to the left spacer so the carousel stays centred.
   const railRef = useRef<HTMLDivElement | null>(null);
   const [railW, setRailW] = useState(64);
+  // Which carousel name slot holds gamepad focus — the unselected slots are
+  // half-faded, so without an explicit focus tint, landing on one (UP from the
+  // first grid row) read as "selection disappeared".
+  const [focSlot, setFocSlot] = useState<string | null>(null);
   // Focus/hover state for the games-count action trigger, so it reads as a
   // pressable control rather than a static label.
   const [actHot, setActHot] = useState(false);
@@ -5278,6 +5275,7 @@ function LibraryGamesPage() {
                   ),
                   <Focusable noFocusRing key={g.key} ref={sel ? selSlotRef : undefined}
                     onActivate={() => jumpTo(g)} onClick={() => jumpTo(g)}
+                    onFocus={() => setFocSlot(g.key)} onBlur={() => setFocSlot((k) => (k === g.key ? null : k))}
                     style={{
                       flexShrink: 0, height: '100%',
                       display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -5285,12 +5283,17 @@ function LibraryGamesPage() {
                       fontSize: sel ? '22px' : '14px',
                       fontWeight: sel ? 800 : 500,
                       letterSpacing: sel ? '-0.01em' : '0',
-                      color: sel ? V2.fg : V2.fgMuted,
-                      opacity: sel ? 1 : 0.5,
+                      color: sel || focSlot === g.key ? V2.fg : V2.fgMuted,
+                      opacity: sel ? 1 : (focSlot === g.key ? 0.95 : 0.5),
                       whiteSpace: 'nowrap',
                       transition: 'opacity 0.32s, color 0.32s',
                     }}>
-                    {g.label}
+                    <span style={{
+                      padding: '4px 10px', borderRadius: V2.radiusPill,
+                      background: !sel && focSlot === g.key ? 'rgba(255,255,255,0.10)' : 'transparent',
+                      border: `1px solid ${!sel && focSlot === g.key ? V2.borderStrong : 'transparent'}`,
+                      transition: 'background 0.15s ease, border-color 0.15s ease',
+                    }}>{g.label}</span>
                   </Focusable>,
                 ];
               })}
