@@ -559,22 +559,35 @@ function useDownloadGlimpse(): { count: number; pct: number | null } {
   // ring percent stays the mean of what's actually transferring.
   const count = _dlActive.size + _dlQueue.size + syncingCount;
   const [pct, setPct] = useState<number | null>(null);
+  // Session ledger: every rom seen active/queued since the last idle moment.
+  // Overall percent = (finished units + in-flight fractions) / all units, so a
+  // download finishing contributes exactly 1.0 with no jump at the boundary
+  // (the old per-active mean lurched when an item entered or left the set).
+  // The value only drops when new work is genuinely added.
+  const seenIds = useRef(new Set<number>());
   const on = count > 0;
   useEffect(() => {
-    if (!on) { setPct(null); return; }
+    if (!on) { seenIds.current.clear(); setPct(null); return; }
     let alive = true;
     const tick = async () => {
-      let sum = 0, n = 0;
+      for (const id of _dlActive) seenIds.current.add(id);
+      for (const id of _dlQueue.keys()) seenIds.current.add(id);
+      let units = seenIds.current.size, done = 0;
+      for (const id of seenIds.current) {
+        if (!_dlActive.has(id) && !_dlQueue.has(id)) done += 1; // finished (or failed) unit
+      }
       await Promise.all(Array.from(_dlActive).map(async (id) => {
         try {
           const p = await getDownloadProgress(id);
-          if (typeof p?.percent === 'number') { sum += p.percent; n++; }
+          if (typeof p?.percent === 'number') done += p.percent / 100;
         } catch { /* transient */ }
       }));
       for (const c of ((_lastStatus?.collections || []) as any[])) {
-        if (c.sync_state === 'syncing' && typeof c.downloaded_pct === 'number') { sum += c.downloaded_pct; n++; }
+        if (c.sync_state === 'syncing' && typeof c.downloaded_pct === 'number') {
+          units += 1; done += c.downloaded_pct / 100;
+        }
       }
-      if (alive) setPct(n ? sum / n : null);
+      if (alive) setPct(units > 0 ? Math.min(100, (done / units) * 100) : null);
     };
     tick();
     const iv = setInterval(tick, 600);
@@ -2168,6 +2181,8 @@ function CollectionActionsModal({ title, isCollection, isVirtual, isSynced, miss
             label={`Download missing${missing ? ` (${missing})` : ''}`}
             disabled={syncDisabled}
             onSelect={() => { if (syncDisabled) return; closeModal?.(); onSyncMissing(); }} />
+          <UserMenuRow icon={<FaRegClock size={14} />} label="View downloads"
+            onSelect={() => { closeModal?.(); libNavigate("/romm-sync-downloads"); }} />
           {/* Auto-sync toggle — collections only (platforms have no continuous
               sync; virtual collections aren't tracked by the sync manager). */}
           {isCollection && !isVirtual && (
@@ -4180,8 +4195,12 @@ function GroupsPanel({ mode, visible, onOpenGroup, svcStatus }:
   }, [visible, offline]);
 
   // visible in the ready flag so the focus grab refires on each return to the
-  // tab (the panel no longer remounts).
-  const firstGroupRef = useAutoFocus(visible && !loading && groups.length > 0, mode);
+  // tab (the panel no longer remounts). Backing out of a group should land on
+  // the group you were just in, not the first tile — _libGroupHolder still
+  // holds the last-viewed group (updated on open AND on L1/R1 paging).
+  const lastKey = (_libGroupHolder && _libGroupHolder.mode === mode) ? _libGroupHolder.group.key : null;
+  const focusKey = (lastKey && groups.some((g) => g.key === lastKey)) ? lastKey : (groups[0]?.key ?? null);
+  const firstGroupRef = useAutoFocus(visible && !loading && groups.length > 0, `${mode}:${focusKey}`);
   const openGroup = (g: LibGroup) => onOpenGroup(mode, g, groups);
 
   if (loading) {
@@ -4206,7 +4225,7 @@ function GroupsPanel({ mode, visible, onOpenGroup, svcStatus }:
           gap: '14px', padding: '0 16px',
         }}
       >
-        {groups.map((g, i) => <PlatformTile key={g.key} group={g} onOpen={openGroup} focusRef={i === 0 ? firstGroupRef : undefined} />)}
+        {groups.map((g) => <PlatformTile key={g.key} group={g} onOpen={openGroup} focusRef={g.key === focusKey ? firstGroupRef : undefined} />)}
       </Focusable>
     );
   }
@@ -4217,12 +4236,14 @@ function GroupsPanel({ mode, visible, onOpenGroup, svcStatus }:
     { title: 'Smart', kinds: ['smart'] },
     { title: 'Virtual', kinds: ['virtual'] },
   ];
-  // Key of the very first rendered tile across all sections (gets focus).
+  // Focus target across all sections: the remembered group (focusKey) if it
+  // renders here, else the very first rendered tile.
   let firstKey: string | null = null;
   for (const s of sections) {
     const it = groups.find((g) => s.kinds.includes(g.kind || 'collection'));
     if (it) { firstKey = it.key; break; }
   }
+  if (focusKey && groups.some((g) => g.key === focusKey)) firstKey = focusKey;
   return (
     <>
       {sections.map((s) => {
@@ -4864,11 +4885,19 @@ function LibraryGamesPage() {
     : autoProg;
   // Fine-grained percent (0..100): one-shot uses completed + in-flight fraction;
   // auto-sync prefers the backend's byte-level pct, falling back to the ratio.
-  const progPct = !prog || !prog.total ? 0 : Math.min(100, Math.round(
+  const progPctRaw = !prog || !prog.total ? 0 : Math.min(100, Math.round(
     syncJob
       ? ((syncJob.done + syncStats.frac) / syncJob.total) * 100
       : (autoProg?.pct != null ? autoProg.pct : (prog.done / prog.total) * 100),
   ));
+  // Monotonic clamp: at download boundaries the in-flight fraction and the
+  // completed count update on different ticks, so the raw value can dip for a
+  // beat (finished item leaves the fraction before done++ lands, or a new item
+  // starts at 0). True batch progress never decreases — hold the max.
+  const progPctMax = useRef(0);
+  if (!prog) progPctMax.current = 0;
+  else progPctMax.current = Math.max(progPctMax.current, progPctRaw);
+  const progPct = prog ? progPctMax.current : 0;
   // Remaining-time estimate from the percentage velocity (works for both paths).
   const progEta = useEtaFromPct(progPct, !!prog);
 
