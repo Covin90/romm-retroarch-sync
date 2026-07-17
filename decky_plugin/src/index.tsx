@@ -427,6 +427,11 @@ const _dlQueue = new Map<number, string>();
 const _dlSucceeded = new Set<number>();
 const _dlListeners = new Set<() => void>();
 function _notifyDl() { _dlListeners.forEach((l) => { try { l(); } catch { } }); }
+// Timestamp of the last Y (OPTIONS) press that landed on a game tile. The
+// grid page also binds Y to "toggle auto-sync", and the tile's press bubbles
+// up to it — so Y-to-delete used to ALSO flip collection sync on. The page
+// checks this marker and ignores Y presses a tile just consumed.
+let _tileOptionsPressAt = 0;
 function _setDlActive(romId: number, on: boolean, name?: string) {
   if (on) { _dlActive.add(romId); if (name) _dlNames.set(romId, name); }
   else { _dlActive.delete(romId); _dlNames.delete(romId); }
@@ -940,11 +945,6 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
   const uriRef = useRef<string | null>(null);
   const [focused, setFocused] = useState(false);
   const [dl, setDl] = useState(!!game.is_downloaded);
-  // A collection sync (backend auto-sync or the one-shot batch) downloads through
-  // a path that doesn't touch this tile's handlers, so reflect the refreshed
-  // prop. Only light the dot — never clear it here — so an in-flight user
-  // download isn't visually undone by a transient refetch.
-  useEffect(() => { if (game.is_downloaded) setDl(true); }, [game.is_downloaded]);
   const [busy, setBusy] = useState<null | 'download' | 'delete' | 'launch'>(null);
   const [activeDlRomId, setActiveDlRomId] = useState<number>(game.rom_id);
   const dlPct = useDownloadProgress(activeDlRomId, busy === 'download')?.percent ?? null;
@@ -957,6 +957,15 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
     if (wasGlobalDl.current && !globalDownloading && _dlSucceeded.has(game.rom_id)) setDl(true);
     wasGlobalDl.current = globalDownloading;
   }, [globalDownloading, game.rom_id]);
+  // Track the list prop both ways: light when it turns downloaded, and CLEAR
+  // when it turns not-downloaded (bulk "Remove downloaded" flips the prop with
+  // no tile handler involved — the dot used to stay lit until re-entry). The
+  // guards keep a transient refetch from undoing an in-flight or just-finished
+  // download (_dlSucceeded is dropped again on delete by libCacheSetDownloaded).
+  useEffect(() => {
+    if (game.is_downloaded) setDl(true);
+    else if (!downloading && !_dlSucceeded.has(game.rom_id)) setDl(false);
+  }, [game.is_downloaded, downloading, game.rom_id]);
   // Offline: downloaded games still launch, but a fetch from the server can't
   // succeed — so block + visually dim download on not-yet-downloaded tiles
   // rather than letting the user trigger a guaranteed failure.
@@ -1161,7 +1170,7 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
       onButtonUp={onBtnUp}
       onSecondaryButton={() => onOpen(game)}
       onSecondaryActionDescription="Details"
-      onOptionsButton={() => { if (dl) requestDelete(); }}
+      onOptionsButton={() => { _tileOptionsPressAt = Date.now(); if (dl) requestDelete(); }}
       onOptionsActionDescription={dl ? (confirmDelete ? 'Confirm delete' : 'Delete') : undefined}
       onOKActionDescription={dl ? (isMultiRegion ? 'Launch (hold: regions)' : isMultiDisc ? (discsAreRegion ? 'Launch (hold: regions)' : 'Launch (hold: discs)') : 'Launch') : 'Download'}
       onFocus={() => { setFocused(true); activate(); ensureDiscs(); ensureSiblings(); if (index !== undefined) onFocusIdx?.(index); }}
@@ -1484,6 +1493,13 @@ function CollectionTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: 
       if (synced) { await toggleCollectionSync(group.key, false); setSynced(false); }
       const ok = await deleteCollectionRoms(group.key, 'collection');
       if (ok === false) throw new Error('backend declined');
+      // Mirror the deletion into the shared caches (these games also live in
+      // their platform lists), then refetch whatever is mounted — without this
+      // the dots stayed lit until the group was re-entered.
+      const list = _libGamesCache.get(`collection:${group.key}`) || [];
+      for (const g of list) if (g.is_downloaded) libCacheSetDownloaded(g.rom_id, false);
+      libCacheDelete(`collection:${group.key}`);
+      _broadcastLibRefresh();
     } catch (e) { toaster.toast({ title: 'Remove failed', body: String(e) }); }
   };
   const openMenu = () => {
@@ -2981,6 +2997,9 @@ function libCacheDelete(key: string) { _libGamesCache.delete(key); _dropLibGroup
 // flip is_downloaded across ALL of them. Without this, re-entering a group serves
 // the stale cached list and the deleted game still shows as downloaded.
 function libCacheSetDownloaded(romId: number, downloaded: boolean) {
+  // A deletion invalidates the "downloaded this session" marker, otherwise the
+  // tile's clear-guard would keep the dot lit after delete.
+  if (!downloaded) _dlSucceeded.delete(romId);
   for (const [key, list] of _libGamesCache) {
     if (!list.some((g) => g.rom_id === romId && !!g.is_downloaded !== downloaded)) continue;
     libCacheSet(key, list.map((g) => g.rom_id === romId ? { ...g, is_downloaded: downloaded } : g));
@@ -4922,6 +4941,7 @@ function LibraryGamesPage() {
       for (const g of games) if (g.is_downloaded) libCacheSetDownloaded(g.rom_id, false);
       setGames((gs) => gs.map((g) => ({ ...g, is_downloaded: false })));
       libCacheDelete(cacheKey(name));
+      _broadcastLibRefresh(); // Home/groups panels re-pull their downloaded counts
     } catch (e) {
       toaster.toast({ title: 'Remove failed', body: String(e) });
     }
@@ -4946,7 +4966,9 @@ function LibraryGamesPage() {
     const b = evt?.detail?.button;
     if (b === GamepadButton.BUMPER_LEFT) cycle(-1);
     else if (b === GamepadButton.BUMPER_RIGHT) cycle(1);
-    else if (b === GamepadButton.OPTIONS) toggleSync(); // Y
+    // Y toggles auto-sync — but only when the press wasn't aimed at a game
+    // tile (tiles bind Y to delete; their handler runs first and marks it).
+    else if (b === GamepadButton.OPTIONS) { if (Date.now() - _tileOptionsPressAt > 400) toggleSync(); }
     else if (b === GamepadButton.SELECT) { playSteamSound('deck_ui_show_modal'); libNavigate("/romm-sync-settings"); }
     else if (b === GamepadButton.START) openActions();                  // ☰ Start → games-count actions menu (top-right)
   };
