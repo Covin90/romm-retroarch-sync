@@ -2674,15 +2674,29 @@ class Plugin:
                         return {'success': False, 'games': [], 'message': 'Collection not found'}
                     roms = self._romm_client.get_virtual_collection_roms(key) or []
                 idx = self._games_index()
+                download_dir = Path(self._settings.get('Download', 'rom_directory',
+                                                       '~/RomMSync/roms')).expanduser()
                 games = []
                 for r in roms:
                     rid = r.get('id')
                     local = idx.get(rid)
+                    is_downloaded = bool(local and local.get('is_downloaded'))
+                    if not local:
+                        # Sibling variants are folded under their MAIN rom in the
+                        # grouped index, so idx misses them by id — check the
+                        # variant's actual file on disk instead. Without this a
+                        # downloaded variant reads as missing here, overstating
+                        # the collection's missing count and making batch sync
+                        # re-request files that already exist.
+                        fs = r.get('fs_name')
+                        slug = r.get('platform_slug')
+                        if fs and slug:
+                            is_downloaded = is_path_validly_downloaded(download_dir / slug / fs)
                     entry = {
                         'rom_id': rid,
                         'name': r.get('name') or (local or {}).get('display_name') or (local or {}).get('name') or r.get('fs_name_no_ext') or 'Unknown',
                         'platform': (local or {}).get('platform') or r.get('platform_name'),
-                        'is_downloaded': bool(local and local.get('is_downloaded')),
+                        'is_downloaded': is_downloaded,
                         'has_cover': bool(r.get('path_cover_small') or (local or {}).get('cover_path')),
                         'platform_slug': (local or {}).get('platform_slug') or r.get('platform_slug'),
                     }
