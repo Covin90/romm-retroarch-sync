@@ -932,7 +932,7 @@ function useAutoFocus(ready: boolean, dep?: any) {
 // onOpen, useState setter onActiveCover) only the newly focused/blurred tile
 // re-renders for its own scale animation.
 const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef, index, onFocusIdx }:
-  { game: LibGame; onOpen: (g: LibGame) => void; onActiveCover: (uri: string | null) => void; focusRef?: React.MutableRefObject<any>; index?: number; onFocusIdx?: (i: number) => void }) {
+  { game: LibGame; onOpen: (g: LibGame) => void; onActiveCover: (uri: string | null) => void; focusRef?: React.Ref<any>; index?: number; onFocusIdx?: (i: number) => void }) {
   const wide = !!game.screenshot;
   // Wide cards adopt the screenshot's NATURAL aspect ratio (RomM derives the
   // card width from the cover's true shape at a fixed height); 16:9 until loaded.
@@ -4177,6 +4177,50 @@ const _scrubLetterOf = (s: string) => {
   return c >= 'A' && c <= 'Z' ? c : '#';
 };
 
+// Shared jump math: given the displayed labels and the current index, the index
+// to land on. R2 → first item of the next letter block (last item from the last
+// block); L2 → first item of the current block, or of the previous block when
+// already there.
+function _scrubTargetIdx(labels: string[], cur: number, dir: 1 | -1): number {
+  const curL = _scrubLetterOf(labels[cur]);
+  if (dir === 1) {
+    for (let i = cur + 1; i < labels.length; i++) {
+      if (_scrubLetterOf(labels[i]) !== curL) return i;
+    }
+    return labels.length - 1;
+  }
+  let start = cur;
+  while (start > 0 && _scrubLetterOf(labels[start - 1]) === curL) start--;
+  if (start === cur && start > 0) {
+    const prevL = _scrubLetterOf(labels[start - 1]);
+    let i = start - 1;
+    while (i > 0 && _scrubLetterOf(labels[i - 1]) === prevL) i--;
+    return i;
+  }
+  return start;
+}
+
+// Big Picture-style centered letter overlay shown while scrubbing.
+function ScrubOverlay({ letter }: { letter: string | null }) {
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, display: 'grid', placeItems: 'center',
+      pointerEvents: 'none', zIndex: 60,
+      opacity: letter ? 1 : 0, transition: 'opacity 0.18s ease',
+    }}>
+      <div style={{
+        minWidth: '128px', height: '128px', padding: '0 26px',
+        display: 'grid', placeItems: 'center', borderRadius: '24px',
+        background: 'rgba(10,12,16,0.80)', border: `1px solid ${V2.borderStrong}`,
+        boxShadow: '0 12px 44px rgba(0,0,0,0.6)', backdropFilter: 'blur(8px)',
+        fontSize: '80px', fontWeight: 800, lineHeight: 1, color: V2.fg,
+      }}>
+        {letter ?? ''}
+      </div>
+    </div>
+  );
+}
+
 function GroupsPanel({ mode, visible, onOpenGroup, svcStatus }:
   { mode: 'platform' | 'collection'; visible: boolean; onOpenGroup: (mode: string, g: LibGroup, gs: LibGroup[]) => void; svcStatus: any }) {
   const c0 = _groupsCache[mode];
@@ -4258,26 +4302,7 @@ function GroupsPanel({ mode, visible, onOpenGroup, svcStatus }:
       return !!(el && focusEl && el.contains(focusEl));
     });
     if (cur < 0) cur = 0;
-    const curL = _scrubLetterOf(ord[cur].label);
-    let target = cur;
-    if (dir === 1) {
-      // Next letter block; from the last block, land on the last tile.
-      target = ord.length - 1;
-      for (let i = cur + 1; i < ord.length; i++) {
-        if (_scrubLetterOf(ord[i].label) !== curL) { target = i; break; }
-      }
-    } else {
-      // First tile of the current block; if already there, first tile of the
-      // previous block.
-      let start = cur;
-      while (start > 0 && _scrubLetterOf(ord[start - 1].label) === curL) start--;
-      if (start === cur && start > 0) {
-        const prevL = _scrubLetterOf(ord[start - 1].label);
-        let i = start - 1;
-        while (i > 0 && _scrubLetterOf(ord[i - 1].label) === prevL) i--;
-        target = i;
-      } else target = start;
-    }
+    const target = _scrubTargetIdx(ord.map((o) => o.label), cur, dir);
     const g = ord[target];
     const el = tileEls.current.get(g.key);
     if (el && target !== cur) {
@@ -4295,23 +4320,7 @@ function GroupsPanel({ mode, visible, onOpenGroup, svcStatus }:
     _libLetterJump = fn;
     return () => { if (_libLetterJump === fn) _libLetterJump = null; };
   }, [visible]);
-  const scrubOverlay = (
-    <div style={{
-      position: 'fixed', inset: 0, display: 'grid', placeItems: 'center',
-      pointerEvents: 'none', zIndex: 50,
-      opacity: scrubLetter ? 1 : 0, transition: 'opacity 0.18s ease',
-    }}>
-      <div style={{
-        minWidth: '128px', height: '128px', padding: '0 26px',
-        display: 'grid', placeItems: 'center', borderRadius: '24px',
-        background: 'rgba(10,12,16,0.80)', border: `1px solid ${V2.borderStrong}`,
-        boxShadow: '0 12px 44px rgba(0,0,0,0.6)', backdropFilter: 'blur(8px)',
-        fontSize: '80px', fontWeight: 800, lineHeight: 1, color: V2.fg,
-      }}>
-        {scrubLetter ?? ''}
-      </div>
-    </div>
-  );
+  const scrubOverlay = <ScrubOverlay letter={scrubLetter} />;
   // -----------------------------------------------------------------------
 
   if (loading) {
@@ -4806,6 +4815,7 @@ function LibraryGamesPage() {
   // so it doesn't invalidate memo(GameTile).
   const visNRef = useRef(visN); visNRef.current = visN;
   const gamesLenRef = useRef(games.length); gamesLenRef.current = games.length;
+  const gamesRef = useRef(games); gamesRef.current = games;
   const onTileFocus = useRef((i: number) => {
     if (i >= visNRef.current - 12)
       setVisN((n) => Math.min(gamesLenRef.current, Math.max(n, i + 1 + GRID_CHUNK)));
@@ -4847,9 +4857,55 @@ function LibraryGamesPage() {
   // and re-diffing all `visN` tiles — that O(mounted) reconciliation per dpad
   // press is what made scrolling degrade as more tiles mounted. Recomputed only
   // when the game list or mounted count actually changes.
+  // ---- L2/R2 letter scrubbing (same UX as the index grids) ---------------
+  // Every mounted tile registers its DOM node; the jump grows visN first (the
+  // target tile may not be mounted yet — the grid is virtualized) and then
+  // retries focusing until the tile appears.
+  const gameTileEls = useRef(new Map<number, any>());
+  const gameTileRef = (romId: number, first: boolean) => (el: any) => {
+    if (el) gameTileEls.current.set(romId, el); else gameTileEls.current.delete(romId);
+    if (first) firstTileRef.current = el;
+  };
+  const [scrubLetter, setScrubLetter] = useState<string | null>(null);
+  const scrubTimer = useRef<any>(null);
+  const scrubFocusTimer = useRef<any>(null);
+  useEffect(() => () => { clearTimeout(scrubTimer.current); clearTimeout(scrubFocusTimer.current); }, []);
+  const scrubJump = (dir: 1 | -1) => {
+    const list = gamesRef.current;
+    if (!list.length) return;
+    const focusEl = _gpFocusEl();
+    let cur = -1;
+    if (focusEl) {
+      for (let i = 0; i < list.length; i++) {
+        const el = gameTileEls.current.get(list[i].rom_id);
+        if (el && el.contains(focusEl)) { cur = i; break; }
+      }
+    }
+    if (cur < 0) cur = 0;
+    const target = _scrubTargetIdx(list.map((g) => g.name), cur, dir);
+    const g = list[target];
+    if (target !== cur) {
+      setVisN((n) => Math.min(gamesLenRef.current, Math.max(n, target + 1 + GRID_CHUNK)));
+      const tryFocus = (attempt: number) => {
+        const el = gameTileEls.current.get(g.rom_id);
+        if (el) {
+          _forceGamepadFocus(el);
+          try { el.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch { /* ignore */ }
+          playSteamSound('deck_ui_tab_transition_01');
+        } else if (attempt < 8) scrubFocusTimer.current = setTimeout(() => tryFocus(attempt + 1), 80);
+      };
+      clearTimeout(scrubFocusTimer.current);
+      tryFocus(0);
+    }
+    setScrubLetter(_scrubLetterOf(g.name));
+    clearTimeout(scrubTimer.current);
+    scrubTimer.current = setTimeout(() => setScrubLetter(null), 750);
+  };
+  // -----------------------------------------------------------------------
+
   const gridTiles = useMemo(() => games.slice(0, visN).map((g, i) => (
     <GameTile key={g.rom_id} game={g} onOpen={openGame} onActiveCover={setBgUri}
-      focusRef={i === 0 ? firstTileRef : undefined} index={i} onFocusIdx={onTileFocus} />
+      focusRef={gameTileRef(g.rom_id, i === 0)} index={i} onFocusIdx={onTileFocus} />
   )), [games, visN]);
 
   // L1 / R1 page through sibling groups (same mode) without backing out.
@@ -5073,6 +5129,10 @@ function LibraryGamesPage() {
     // games-count rail) and on the collection tile's hinted Y in the index grid.
     else if (b === GamepadButton.SELECT) { playSteamSound('deck_ui_show_modal'); libNavigate("/romm-sync-settings"); }
     else if (b === GamepadButton.START) openActions();                  // ☰ Start → games-count actions menu (top-right)
+    // L2/R2 → alphabet fast-scroll across the game grid.
+    else if (b === GamepadButton.TRIGGER_LEFT || b === GamepadButton.TRIGGER_RIGHT) {
+      scrubJump(b === GamepadButton.TRIGGER_RIGHT ? 1 : -1);
+    }
   };
   // Back → library index. Use onCancelButton (not a CANCEL case in onButtonDown):
   // it CONSUMES the B press so Steam's default router-back doesn't ALSO fire and
@@ -5262,6 +5322,7 @@ function LibraryGamesPage() {
           )}
         </Focusable>
       )}
+      <ScrubOverlay letter={scrubLetter} />
       <style>{`
         @keyframes libSlideR { from { transform: translateX(7%); } to { transform: translateX(0); } }
         @keyframes libSlideL { from { transform: translateX(-7%); } to { transform: translateX(0); } }
