@@ -1706,6 +1706,7 @@ function V2NavBar({ active, onTab, activeRef, chrome, onLaunchRd }:
   { active: NavId; onTab: (id: NavId) => void; activeRef?: React.MutableRefObject<any>;
     chrome: NavChrome; onLaunchRd: () => void }) {
   const { iso, word, username, role, avatar, rdEnabled, rdIcon } = chrome;
+  const wideBar = useWideTopBar();
   const tabs: { id: NavId; label: string; Icon: any }[] = [
     { id: 'home', label: 'Home', Icon: FaHome },
     { id: 'platforms', label: 'Platforms', Icon: FaGamepad },
@@ -1805,11 +1806,23 @@ function V2NavBar({ active, onTab, activeRef, chrome, onLaunchRd }:
           avatar(30) + username + chevron, pill radius, surface bg + strong
           border, tight 3px padding on the avatar side. Opens the account menu
           (Stats / Settings for now). */}
-      <div style={{ justifySelf: 'end' }}>
-        <UserPill username={username} role={role} avatar={avatar} />
+      <div style={{ justifySelf: 'end', display: 'flex', alignItems: 'center', gap: '8px' }}>
+        {/* Wide top bars get a dedicated download chip; on the Deck the same
+            glimpse collapses onto the user pill's avatar (no extra width). */}
+        <NavDownloadGlimpse />
+        <UserPill username={username} role={role} avatar={avatar} glimpse={!wideBar} />
       </div>
     </Focusable>
   );
+}
+
+// Renders the chip only when wide AND something is downloading — kept as its
+// own component so the glimpse polling doesn't re-render the whole nav bar.
+function NavDownloadGlimpse() {
+  const wide = useWideTopBar();
+  const dl = useDownloadGlimpse();
+  if (!wide || dl.count === 0) return null;
+  return <DownloadChip count={dl.count} pct={dl.pct} />;
 }
 
 // Circular avatar — real RomM avatar when uploaded, else the RAvatar fallback
@@ -2103,13 +2116,62 @@ function CollectionActionsModal({ title, isCollection, isVirtual, isSynced, miss
   );
 }
 
+// True on viewports with top-bar room to spare (external monitor / desktop Big
+// Picture). The Deck's 1280×800 stays false — there the download glimpse must
+// not add width, so it lives on the avatar instead of a separate chip.
+function useWideTopBar(): boolean {
+  const [wide, setWide] = useState(() => {
+    try { return window.matchMedia('(min-width: 1440px)').matches; } catch { return false; }
+  });
+  useEffect(() => {
+    try {
+      const mq = window.matchMedia('(min-width: 1440px)');
+      const l = (e: any) => setWide(e.matches);
+      mq.addEventListener('change', l);
+      return () => mq.removeEventListener('change', l);
+    } catch { /* ignore */ }
+  }, []);
+  return wide;
+}
+
+// Wide-viewport download glimpse: a dedicated pill next to the user pill with a
+// progress ring, active count and aggregate percent. Opens the Downloads page.
+// Only rendered while something is downloading (and only on wide top bars).
+function DownloadChip({ count, pct }: { count: number; pct: number | null }) {
+  const [active, setActive] = useState(false);
+  const open = () => libNavigate("/romm-sync-downloads");
+  return (
+    <Focusable noFocusRing onActivate={open} onClick={open}
+      onFocus={() => setActive(true)} onBlur={() => setActive(false)}
+      onMouseEnter={() => setActive(true)} onMouseLeave={() => setActive(false)}
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: '7px',
+        background: active ? 'rgba(255,255,255,0.10)' : V2.surface,
+        border: `1px solid ${V2.borderStrong}`,
+        borderRadius: V2.radiusPill, padding: '3px 12px 3px 5px',
+        color: V2.fg, cursor: 'pointer', transition: 'background 0.15s ease',
+      }}>
+      <ProgressRing pct={pct} size={26} stroke={2.5}>
+        <FaDownload size={10} style={{ color: V2.fg2 }} />
+      </ProgressRing>
+      <span style={{ fontSize: '12.5px', fontWeight: 600, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
+        {count}{pct != null ? ` · ${Math.round(pct)}%` : ''}
+      </span>
+    </Focusable>
+  );
+}
+
 // The account menu pill. Click/A opens the RomM-styled account dropdown.
-function UserPill({ username, role, avatar }: { username: string; role: string; avatar: string | null }) {
+// `glimpse` false suppresses the avatar download ring (a separate DownloadChip
+// is showing it instead on wide top bars).
+function UserPill({ username, role, avatar, glimpse = true }:
+  { username: string; role: string; avatar: string | null; glimpse?: boolean }) {
   const [active, setActive] = useState(false);
   // Download glimpse: while anything is downloading, the avatar gains an
   // aggregate progress ring + count dot — zero extra top-bar width (the Deck's
   // bar is too tight for a separate chip).
-  const dl = useDownloadGlimpse();
+  const dlRaw = useDownloadGlimpse();
+  const dl = glimpse ? dlRaw : { count: 0, pct: null };
   const openMenu = () => showModal(
     <UserMenuModal username={username} role={role} avatar={avatar} />,
   );
