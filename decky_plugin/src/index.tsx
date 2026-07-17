@@ -1768,13 +1768,12 @@ function NavLaunchButton({ iconSrc, label, onActivate }:
         display: 'inline-flex', alignItems: 'center', gap: '7px',
         height: '34px', padding: iconSrc ? '0 7px 0 5px' : '0 10px',
         borderRadius: V2.radiusPill, cursor: 'pointer',
-        // Focus affordance matches V2Segment: a pill-shaped tint layered over the
-        // surface fill, not a rectangular brand ring.
         background: active ? 'rgba(255,255,255,0.10)' : V2.surface,
         color: active ? V2.fg : V2.fg2,
         fontSize: '13px', fontWeight: 600, whiteSpace: 'nowrap',
-        border: `1px solid ${V2.borderStrong}`,
-        transition: 'background 0.15s, color 0.15s',
+        border: `1px solid ${active ? V2.brand : V2.borderStrong}`,
+        boxShadow: active ? `0 0 0 1px ${V2.brand}` : 'none',
+        transition: 'background 0.15s, color 0.15s, border-color 0.15s, box-shadow 0.15s',
       }}
     >
       {iconSrc
@@ -1916,10 +1915,12 @@ function V2NavBar({ active, onTab, activeRef, chrome, onLaunchRd }:
                     display: 'flex', alignItems: 'center', gap: '7px', padding: '7px 18px',
                     borderRadius: V2.radiusPill, fontSize: '13.5px', cursor: 'pointer',
                     fontWeight: on ? 600 : 500, color: on ? V2.bg : V2.fg2,
-                    // Same focus affordance as V2Segment: a pill-shaped tint on the
-                    // focused-but-not-active tab (the active tab has the indicator).
+                    // Focused-but-not-active tab: tint + brand ring (the bare tint
+                    // was invisible on the Deck panel; the active tab has the
+                    // sliding indicator instead).
                     background: (!on && focusedIdx === i) ? 'rgba(255,255,255,0.10)' : 'transparent',
-                    transition: 'color 0.2s ease, background 0.15s ease',
+                    boxShadow: (!on && focusedIdx === i) ? `inset 0 0 0 1.5px ${V2.brand}` : 'none',
+                    transition: 'color 0.2s ease, background 0.15s ease, box-shadow 0.15s ease',
                   }}>
                   <Icon size={12} /><span>{label}</span>
                 </div>
@@ -2276,9 +2277,10 @@ function DownloadChip({ count, pct }: { count: number; pct: number | null }) {
       style={{
         display: 'inline-flex', alignItems: 'center', gap: '7px',
         background: active ? 'rgba(255,255,255,0.10)' : V2.surface,
-        border: `1px solid ${V2.borderStrong}`,
+        border: `1px solid ${active ? V2.brand : V2.borderStrong}`,
+        boxShadow: active ? `0 0 0 1px ${V2.brand}` : 'none',
         borderRadius: V2.radiusPill, padding: '3px 12px 3px 5px',
-        color: V2.fg, cursor: 'pointer', transition: 'background 0.15s ease',
+        color: V2.fg, cursor: 'pointer', transition: 'background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease',
       }}>
       <ProgressRing pct={pct} size={26} stroke={2.5}>
         <FaDownload size={10} style={{ color: V2.fg2 }} />
@@ -2310,11 +2312,14 @@ function UserPill({ username, role, avatar, glimpse = true }:
       onMouseEnter={() => setActive(true)} onMouseLeave={() => setActive(false)}
       style={{
         display: 'inline-flex', alignItems: 'center', gap: '8px',
-        // Same pill-shaped focus tint as V2Segment / the nav tabs.
+        // Verified on-device: the old white tint was indistinguishable from the
+        // resting surface on the Deck panel, so focus landing here (UP from the
+        // first grid row) read as "selection disappeared". Brand ring instead.
         background: active ? 'rgba(255,255,255,0.10)' : V2.surface,
-        border: `1px solid ${V2.borderStrong}`,
+        border: `1px solid ${active ? V2.brand : V2.borderStrong}`,
+        boxShadow: active ? `0 0 0 1px ${V2.brand}` : 'none',
         borderRadius: V2.radiusPill, padding: '3px 12px 3px 3px',
-        color: V2.fg, cursor: 'pointer', transition: 'background 0.15s ease',
+        color: V2.fg, cursor: 'pointer', transition: 'background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease',
       }}>
       <div style={{ position: 'relative', flexShrink: 0 }}>
         {dl.count > 0 ? (
@@ -5291,7 +5296,7 @@ function LibraryGamesPage() {
                     <span style={{
                       padding: '4px 10px', borderRadius: V2.radiusPill,
                       background: !sel && focSlot === g.key ? 'rgba(255,255,255,0.10)' : 'transparent',
-                      border: `1px solid ${!sel && focSlot === g.key ? V2.borderStrong : 'transparent'}`,
+                      border: `1px solid ${!sel && focSlot === g.key ? V2.brand : 'transparent'}`,
                       transition: 'background 0.15s ease, border-color 0.15s ease',
                     }}>{g.label}</span>
                   </Focusable>,
@@ -5326,10 +5331,11 @@ function LibraryGamesPage() {
               display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
               gap: '6px', whiteSpace: 'nowrap', flexShrink: 0, textAlign: 'right',
               padding: '4px 8px', borderRadius: V2.radiusPill, boxSizing: 'border-box',
-              border: `1px solid ${actHot ? V2.borderStrong : V2.border}`,
+              border: `1px solid ${actHot ? V2.brand : V2.border}`,
+              boxShadow: actHot ? `0 0 0 1px ${V2.brand}` : 'none',
               background: actHot ? V2.surfaceHover : V2.surface,
               color: actHot ? V2.fg : V2.fgMuted,
-              transition: 'background 0.15s ease, border-color 0.15s ease, color 0.15s ease',
+              transition: 'background 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease',
             }}>
               {/* Synced indicator — same green dot as downloaded games/tiles. */}
               {isSynced && !prog && (
