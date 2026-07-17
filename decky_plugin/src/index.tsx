@@ -427,11 +427,6 @@ const _dlQueue = new Map<number, string>();
 const _dlSucceeded = new Set<number>();
 const _dlListeners = new Set<() => void>();
 function _notifyDl() { _dlListeners.forEach((l) => { try { l(); } catch { } }); }
-// Timestamp of the last Y (OPTIONS) press that landed on a game tile. The
-// grid page also binds Y to "toggle auto-sync", and the tile's press bubbles
-// up to it — so Y-to-delete used to ALSO flip collection sync on. The page
-// checks this marker and ignores Y presses a tile just consumed.
-let _tileOptionsPressAt = 0;
 function _setDlActive(romId: number, on: boolean, name?: string) {
   if (on) { _dlActive.add(romId); if (name) _dlNames.set(romId, name); }
   else { _dlActive.delete(romId); _dlNames.delete(romId); }
@@ -1170,7 +1165,7 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
       onButtonUp={onBtnUp}
       onSecondaryButton={() => onOpen(game)}
       onSecondaryActionDescription="Details"
-      onOptionsButton={() => { _tileOptionsPressAt = Date.now(); if (dl) requestDelete(); }}
+      onOptionsButton={() => { if (dl) requestDelete(); }}
       onOptionsActionDescription={dl ? (confirmDelete ? 'Confirm delete' : 'Delete') : undefined}
       onOKActionDescription={dl ? (isMultiRegion ? 'Launch (hold: regions)' : isMultiDisc ? (discsAreRegion ? 'Launch (hold: regions)' : 'Launch (hold: discs)') : 'Launch') : 'Download'}
       onFocus={() => { setFocused(true); activate(); ensureDiscs(); ensureSiblings(); if (index !== undefined) onFocusIdx?.(index); }}
@@ -4966,9 +4961,10 @@ function LibraryGamesPage() {
     const b = evt?.detail?.button;
     if (b === GamepadButton.BUMPER_LEFT) cycle(-1);
     else if (b === GamepadButton.BUMPER_RIGHT) cycle(1);
-    // Y toggles auto-sync — but only when the press wasn't aimed at a game
-    // tile (tiles bind Y to delete; their handler runs first and marks it).
-    else if (b === GamepadButton.OPTIONS) { if (Date.now() - _tileOptionsPressAt > 400) toggleSync(); }
+    // No page-level Y binding: Y is the tiles' delete button, and an invisible
+    // "toggle auto-sync" shortcut here could silently kick off (or cancel) a
+    // whole-collection download. Auto-sync lives in the actions menu (Start /
+    // games-count rail) and on the collection tile's hinted Y in the index grid.
     else if (b === GamepadButton.SELECT) { playSteamSound('deck_ui_show_modal'); libNavigate("/romm-sync-settings"); }
     else if (b === GamepadButton.START) openActions();                  // ☰ Start → games-count actions menu (top-right)
   };
