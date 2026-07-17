@@ -471,6 +471,45 @@ function useActiveDownloads(): { romId: number; name: string }[] {
   return v;
 }
 
+// Lightweight aggregate for the top-bar glimpse (the user pill's avatar ring):
+// how many downloads are running (per-game registry + backend collection
+// auto-sync passes) and their mean percent. Polls only while something is active.
+function useDownloadGlimpse(): { count: number; pct: number | null } {
+  const [, force] = useState(0);
+  useEffect(() => {
+    const l = () => force((n) => n + 1);
+    _dlListeners.add(l);
+    const unsub = _subscribeStatus(l);
+    return () => { _dlListeners.delete(l); unsub(); };
+  }, []);
+  const syncingCount = ((_lastStatus?.collections || []) as any[])
+    .filter((c) => c.sync_state === 'syncing').length;
+  const count = _dlActive.size + syncingCount;
+  const [pct, setPct] = useState<number | null>(null);
+  const on = count > 0;
+  useEffect(() => {
+    if (!on) { setPct(null); return; }
+    let alive = true;
+    const tick = async () => {
+      let sum = 0, n = 0;
+      await Promise.all(Array.from(_dlActive).map(async (id) => {
+        try {
+          const p = await getDownloadProgress(id);
+          if (typeof p?.percent === 'number') { sum += p.percent; n++; }
+        } catch { /* transient */ }
+      }));
+      for (const c of ((_lastStatus?.collections || []) as any[])) {
+        if (c.sync_state === 'syncing' && typeof c.downloaded_pct === 'number') { sum += c.downloaded_pct; n++; }
+      }
+      if (alive) setPct(n ? sum / n : null);
+    };
+    tick();
+    const iv = setInterval(tick, 600);
+    return () => { alive = false; clearInterval(iv); };
+  }, [on]);
+  return { count, pct: on ? pct : null };
+}
+
 function useIsDownloading(romId: number): boolean {
   const [v, setV] = useState(_dlActive.has(romId));
   useEffect(() => {
@@ -485,7 +524,7 @@ function useIsDownloading(romId: number): boolean {
 // is in flight, returning null when idle. Drives the cover download-ring and the
 // GameDetails button fill. Activates on either the local `active` flag or the
 // global registry, so progress is shared across the cover tile and details page.
-interface DlProgress { percent: number; speed: number; eta: number; }
+interface DlProgress { percent: number; speed: number; eta: number; downloaded: number; total: number; }
 function useDownloadProgress(romId: number, active: boolean): DlProgress | null {
   const globalActive = useIsDownloading(romId);
   const on = active || globalActive;
@@ -497,7 +536,7 @@ function useDownloadProgress(romId: number, active: boolean): DlProgress | null 
       try {
         const p = await getDownloadProgress(romId);
         if (!cancelled && p && typeof p.percent === 'number') {
-          setProg({ percent: p.percent, speed: p.speed || 0, eta: p.eta || 0 });
+          setProg({ percent: p.percent, speed: p.speed || 0, eta: p.eta || 0, downloaded: p.downloaded || 0, total: p.total || 0 });
         }
       } catch { /* transient */ }
     };
@@ -1812,25 +1851,29 @@ function UserMenuRow({ icon, label, danger, disabled, onSelect }:
   );
 }
 
-// One entry in the account menu's Downloads section: game name over a thin
-// live progress track, with percent (and speed while transferring) on the right.
+// One entry on the Downloads page: game name over a live progress track, with
+// speed/percent on the right and a bytes/ETA detail line while transferring.
 function DownloadStatusRow({ romId, name }: { romId: number; name: string }) {
   const prog = useDownloadProgress(romId, true);
   const pct = Math.max(0, Math.min(100, prog?.percent ?? 0));
+  const bytes = prog && prog.total > 0 ? `${fmtBytes(prog.downloaded)} / ${fmtBytes(prog.total)}` : '';
+  const eta = prog ? formatEta(prog.eta) : '';
+  const sub = [bytes, eta ? `${eta} left` : ''].filter(Boolean).join('  ·  ');
   return (
-    <div style={{ padding: '5px 12px 7px' }}>
+    <div style={{ padding: '10px 14px 12px' }}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: '10px', minWidth: 0 }}>
         <span style={{
-          fontSize: '12.5px', fontWeight: 500, color: V2.fg2, minWidth: 0,
+          fontSize: '13px', fontWeight: 600, color: V2.fg, minWidth: 0,
           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
         }}>{name}</span>
-        <span style={{ fontSize: '11px', fontWeight: 600, color: V2.fgMuted, flexShrink: 0, fontVariantNumeric: 'tabular-nums' }}>
+        <span style={{ fontSize: '11.5px', fontWeight: 600, color: V2.fgMuted, flexShrink: 0, fontVariantNumeric: 'tabular-nums' }}>
           {prog && prog.speed > 0 ? `${formatSpeed(prog.speed)} · ` : ''}{pct}%
         </span>
       </div>
-      <div style={{ height: '3px', borderRadius: '2px', background: V2.surface, marginTop: '5px', overflow: 'hidden' }}>
+      <div style={{ height: '4px', borderRadius: '2px', background: V2.surface, marginTop: '7px', overflow: 'hidden' }}>
         <div style={{ height: '100%', width: `${pct}%`, background: V2.brand, borderRadius: '2px', transition: 'width 0.3s ease' }} />
       </div>
+      {sub && <div style={{ fontSize: '10.5px', color: V2.fgMuted, marginTop: '5px', fontVariantNumeric: 'tabular-nums' }}>{sub}</div>}
     </div>
   );
 }
@@ -1843,17 +1886,17 @@ function CollectionSyncStatusRow({ col }: { col: any }) {
     ? Math.max(0, Math.min(100, col.downloaded_pct))
     : (col.total ? Math.max(0, Math.min(100, (col.downloaded || 0) / col.total * 100)) : 0);
   return (
-    <div style={{ padding: '5px 12px 7px' }}>
+    <div style={{ padding: '10px 14px 12px' }}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: '10px', minWidth: 0 }}>
         <span style={{
-          fontSize: '12.5px', fontWeight: 500, color: V2.fg2, minWidth: 0,
+          fontSize: '13px', fontWeight: 600, color: V2.fg, minWidth: 0,
           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-        }}>{col.name}</span>
-        <span style={{ fontSize: '11px', fontWeight: 600, color: V2.fgMuted, flexShrink: 0, fontVariantNumeric: 'tabular-nums' }}>
-          {col.speed > 0 ? `${formatSpeed(col.speed)} · ` : ''}{col.downloaded || 0}/{col.total || 0}
+        }}>Collection · {col.name}</span>
+        <span style={{ fontSize: '11.5px', fontWeight: 600, color: V2.fgMuted, flexShrink: 0, fontVariantNumeric: 'tabular-nums' }}>
+          {col.speed > 0 ? `${formatSpeed(col.speed)} · ` : ''}{col.downloaded || 0}/{col.total || 0} games
         </span>
       </div>
-      <div style={{ height: '3px', borderRadius: '2px', background: V2.surface, marginTop: '5px', overflow: 'hidden' }}>
+      <div style={{ height: '4px', borderRadius: '2px', background: V2.surface, marginTop: '7px', overflow: 'hidden' }}>
         <div style={{ height: '100%', width: `${pct}%`, background: V2.brand, borderRadius: '2px', transition: 'width 0.3s ease' }} />
       </div>
     </div>
@@ -1868,11 +1911,8 @@ function UserMenuModal({ username, role, avatar, closeModal }:
   const panelRef = useRef<HTMLDivElement>(null);
   useEffect(() => { const t = setTimeout(() => { if (panelRef.current) _forceGamepadFocus(panelRef.current); }, 60); return () => clearTimeout(t); }, []);
   const [refreshing, setRefreshing] = useState(false);
-  // Downloads section data: frontend-initiated downloads (registry) + backend
-  // collection auto-sync passes (shared status poll).
-  const activeDls = useActiveDownloads();
-  const status = useServiceStatus();
-  const syncingCols = ((status?.collections || []) as any[]).filter((c) => c.sync_state === 'syncing');
+  // Live count badge for the Downloads row (registry + collection auto-sync).
+  const dlGlimpse = useDownloadGlimpse();
 
   // In-library view when the library route hosts us (keeps the tabs tree
   // mounted underneath), real navigation otherwise.
@@ -1965,25 +2005,9 @@ function UserMenuModal({ username, role, avatar, closeModal }:
           <UserMenuRow
             icon={<FaSync size={15} style={refreshing ? { animation: 'spin 1s linear infinite' } : undefined} />}
             label={refreshing ? 'Refreshing…' : 'Refresh library'} disabled={refreshing} onSelect={doRefresh} />
-          <div style={{ height: '1px', background: V2.border, margin: '4px 4px' }} />
-          {/* Downloads — live status of every in-flight download (per-game
-              registry) and any backend collection auto-sync pass. */}
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: '7px',
-            fontSize: '10.5px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em',
-            color: V2.fgMuted, padding: '6px 12px 4px',
-          }}>
-            <FaDownload size={10} />
-            <span>Downloads{(activeDls.length + syncingCols.length) > 0 ? ` (${activeDls.length + syncingCols.length})` : ''}</span>
-          </div>
-          {activeDls.length === 0 && syncingCols.length === 0 ? (
-            <div style={{ fontSize: '12px', color: V2.fgFaint, padding: '2px 12px 8px' }}>No active downloads</div>
-          ) : (
-            <div style={{ paddingBottom: '4px' }}>
-              {syncingCols.map((c) => <CollectionSyncStatusRow key={`col-${c.name}`} col={c} />)}
-              {activeDls.map((d) => <DownloadStatusRow key={d.romId} romId={d.romId} name={d.name} />)}
-            </div>
-          )}
+          <UserMenuRow icon={<FaDownload size={15} />}
+            label={`Downloads${dlGlimpse.count > 0 ? ` (${dlGlimpse.count})` : ''}`}
+            onSelect={() => go("/romm-sync-downloads")} />
           <div style={{ height: '1px', background: V2.border, margin: '4px 4px' }} />
           <UserMenuRow icon={<FaSignOutAlt size={15} />} label="Log out" danger onSelect={doLogout} />
         </Focusable>
@@ -2082,6 +2106,10 @@ function CollectionActionsModal({ title, isCollection, isVirtual, isSynced, miss
 // The account menu pill. Click/A opens the RomM-styled account dropdown.
 function UserPill({ username, role, avatar }: { username: string; role: string; avatar: string | null }) {
   const [active, setActive] = useState(false);
+  // Download glimpse: while anything is downloading, the avatar gains an
+  // aggregate progress ring + count dot — zero extra top-bar width (the Deck's
+  // bar is too tight for a separate chip).
+  const dl = useDownloadGlimpse();
   const openMenu = () => showModal(
     <UserMenuModal username={username} role={role} avatar={avatar} />,
   );
@@ -2097,7 +2125,24 @@ function UserPill({ username, role, avatar }: { username: string; role: string; 
         borderRadius: V2.radiusPill, padding: '3px 12px 3px 3px',
         color: V2.fg, cursor: 'pointer', transition: 'background 0.15s ease',
       }}>
-      <UserAvatar username={username} avatar={avatar} size={30} />
+      <div style={{ position: 'relative', flexShrink: 0 }}>
+        {dl.count > 0 ? (
+          <ProgressRing pct={dl.pct} size={30} stroke={2.5}>
+            <UserAvatar username={username} avatar={avatar} size={24} />
+          </ProgressRing>
+        ) : (
+          <UserAvatar username={username} avatar={avatar} size={30} />
+        )}
+        {dl.count > 0 && (
+          <span style={{
+            position: 'absolute', top: '-3px', right: '-3px',
+            minWidth: '13px', height: '13px', padding: '0 3px', boxSizing: 'border-box',
+            borderRadius: '7px', background: V2.brand, color: '#fff',
+            fontSize: '8.5px', fontWeight: 700, lineHeight: '13px', textAlign: 'center',
+            border: '1.5px solid rgba(10,10,18,0.9)',
+          }}>{dl.count}</span>
+        )}
+      </div>
       <span style={{ fontSize: '13px', fontWeight: 500, whiteSpace: 'nowrap' }}>{username}</span>
       <FaChevronDown size={11} style={{ color: V2.fgMuted }} />
     </Focusable>
@@ -2671,13 +2716,14 @@ function navExitPlugin() {
 // These module hooks are only set while LibraryRootPage is mounted; when they
 // are null (e.g. Settings opened from the QAM as a real route) callers fall
 // back to genuine navigation, preserving the old behavior.
-type LibView = 'grid' | 'game' | 'settings' | 'stats' | 'cores';
+type LibView = 'grid' | 'game' | 'settings' | 'stats' | 'cores' | 'downloads';
 let _libPushView: ((v: LibView) => void) | null = null;
 let _libPopView: (() => void) | null = null;
 const _libViewForRoute: Record<string, LibView> = {
   '/romm-sync-settings': 'settings',
   '/romm-sync-stats': 'stats',
   '/romm-sync-cores': 'cores',
+  '/romm-sync-downloads': 'downloads',
 };
 // Open a plugin page: as an in-library view when the library route hosts us,
 // as a real route otherwise (QAM entry points, stale fallbacks).
@@ -4191,6 +4237,7 @@ function LibraryRootPage() {
           {top === 'settings' && <SettingsPage />}
           {top === 'stats' && <StatsPage />}
           {top === 'cores' && <CoresPage />}
+          {top === 'downloads' && <DownloadsPage />}
         </div>
       )}
     </>
@@ -6726,6 +6773,102 @@ function StatsPage() {
   );
 }
 
+// Downloads page: every in-flight download (per-game registry + backend
+// collection auto-sync passes) with live progress, plus recently completed
+// downloads from the backend activity log. Opened from the account menu.
+function DownloadsPage() {
+  const activeDls = useActiveDownloads();
+  const status = useServiceStatus();
+  const syncingCols = ((status?.collections || []) as any[]).filter((c) => c.sync_state === 'syncing');
+  const activeCount = activeDls.length + syncingCols.length;
+
+  const [recent, setRecent] = useState<Array<{ kind: string, title: string, detail: string, timestamp: number }>>([]);
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const res = await getRecentActivity(10);
+        if (alive && res?.events) setRecent(res.events.filter((e) => e.kind === 'download'));
+      } catch { /* transient */ }
+    };
+    load();
+    const iv = setInterval(load, 5000);
+    return () => { alive = false; clearInterval(iv); };
+  }, []);
+
+  // Same mount-focus dance as StatsPage: internally pushed views get no focus
+  // pass from Steam, so drop gamepad focus on the first focusable element.
+  const hostRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      try {
+        const first = hostRef.current?.querySelector('[tabindex]') as HTMLElement | null;
+        if (first) _forceGamepadFocus(first);
+      } catch { /* ignore */ }
+    }, 100);
+    return () => clearTimeout(t);
+  }, []);
+
+  return v2Page(
+    <Focusable noFocusRing
+      onCancelButton={() => libBack("/romm-sync-library")}
+      style={{ maxWidth: '760px', margin: '0 auto', padding: '20px 20px 80px' }}>
+      <div ref={hostRef} style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '24px' }}>
+        <GameActionButton icon={<FaChevronLeft size={16} />} onClick={() => libBack("/romm-sync-library")} />
+        <div style={{ fontSize: '24px', fontWeight: 800, letterSpacing: '-0.01em' }}>Downloads</div>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+        <V2StatsSectionBox title={`Active${activeCount ? ` (${activeCount})` : ''}`} icon={<FaDownload size={14} />}>
+          {activeCount === 0 ? (
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
+              padding: '24px', color: V2.fgMuted, fontSize: '13px',
+            }}>
+              <FaBoxOpen size={20} /><span>No active downloads</span>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column' }}>
+              {syncingCols.map((c, i) => (
+                <div key={`col-${c.name}`} style={{ borderTop: i > 0 ? `1px solid ${V2.border}` : 'none' }}>
+                  <CollectionSyncStatusRow col={c} />
+                </div>
+              ))}
+              {activeDls.map((d, i) => (
+                <div key={d.romId} style={{ borderTop: (i > 0 || syncingCols.length > 0) ? `1px solid ${V2.border}` : 'none' }}>
+                  <DownloadStatusRow romId={d.romId} name={d.name} />
+                </div>
+              ))}
+            </div>
+          )}
+        </V2StatsSectionBox>
+
+        <V2StatsSectionBox title="Recently completed" icon={<FaHistory size={14} />}>
+          {recent.length === 0 ? (
+            <div style={{ padding: '14px 16px', fontSize: '12px', color: V2.fgMuted }}>
+              Nothing yet — finished downloads will show up here.
+            </div>
+          ) : recent.map((e, i) => (
+            <div key={`${e.timestamp}-${i}`} style={{
+              display: 'flex', alignItems: 'center', gap: '10px', padding: '9px 14px',
+              borderTop: i > 0 ? `1px solid ${V2.border}` : 'none',
+            }}>
+              <div style={{ flexShrink: 0, color: V2.success, display: 'flex' }}><FaCheckCircle size={13} /></div>
+              <div style={{
+                flex: '1 1 auto', minWidth: 0, fontSize: '12.5px', fontWeight: 600, color: V2.fg,
+                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+              }}>{e.detail || e.title}</div>
+              <div style={{ flexShrink: 0, fontSize: '10.5px', color: V2.fgMuted, whiteSpace: 'nowrap' }}>
+                {fmtAgo(e.timestamp)}
+              </div>
+            </div>
+          ))}
+        </V2StatsSectionBox>
+      </div>
+    </Focusable>,
+  );
+}
+
 // Glassy core picker (RomM v2 chrome, like the account/collection menus).
 // Lists "Auto" + every installed core, with RetroDECK's choices surfaced first
 // and the current selection check-marked. closeModal is injected by showModal.
@@ -8515,6 +8658,7 @@ export default definePlugin(() => {
   routerHook.addRoute("/romm-sync-settings", () => <RouteGuard><SettingsPage /></RouteGuard>, { exact: true });
   routerHook.addRoute("/romm-sync-stats", () => <RouteGuard><StatsPage /></RouteGuard>, { exact: true });
   routerHook.addRoute("/romm-sync-cores", () => <RouteGuard><CoresPage /></RouteGuard>, { exact: true });
+  routerHook.addRoute("/romm-sync-downloads", () => <RouteGuard><DownloadsPage /></RouteGuard>, { exact: true });
   routerHook.addRoute("/romm-sync-config", () => <RouteGuard><ConfigPage /></RouteGuard>, { exact: true });
   routerHook.addRoute("/romm-sync-library", () => <RouteGuard><LibraryRootPage /></RouteGuard>, { exact: true });
   routerHook.addRoute("/romm-sync-library/:key", () => <RouteGuard><LibraryGamesPage /></RouteGuard>, { exact: true });
@@ -8654,6 +8798,7 @@ export default definePlugin(() => {
       routerHook.removeRoute("/romm-sync-settings");
       routerHook.removeRoute("/romm-sync-stats");
       routerHook.removeRoute("/romm-sync-cores");
+      routerHook.removeRoute("/romm-sync-downloads");
       routerHook.removeRoute("/romm-sync-config");
       routerHook.removeRoute("/romm-sync-library");
       routerHook.removeRoute("/romm-sync-library/:key");
