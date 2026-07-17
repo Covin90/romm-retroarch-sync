@@ -1543,15 +1543,18 @@ function CollectionTile({ group, onOpen, focusRef }: { group: LibGroup; onOpen: 
     : group.kind === 'virtual' ? { label: 'VIRTUAL', bg: V2.brandHover }
       : group.kind === 'favorite' ? { label: '★', bg: '#ff4f6b' }
         : null;
+  // Terse footer labels — the long "Open · Hold: Actions" + "Sync collection"
+  // pair wrapped the Deck's button legend onto two rows. The hold affordance
+  // is already advertised by the tile's ⋯ HOLD chip.
   return (
     <Focusable noFocusRing className="romm-ct-wrap"
       ref={focusRef}
       onClick={() => onOpen(group)}
       onActivate={onActivate}
       onButtonDown={onBtnDown}
-      onOKActionDescription="Open   ·   Hold: Actions"
+      onOKActionDescription="Open"
       onOptionsButton={isVirtual ? undefined : toggleSync}
-      onOptionsActionDescription={isVirtual ? undefined : (synced ? 'Stop syncing' : 'Sync collection')}
+      onOptionsActionDescription={isVirtual ? undefined : (synced ? 'Sync off' : 'Sync')}
       onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
       onMouseEnter={() => setFocused(true)} onMouseLeave={() => setFocused(false)}
       style={{ cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: '8px' }}
