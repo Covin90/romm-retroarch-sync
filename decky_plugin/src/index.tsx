@@ -4423,7 +4423,7 @@ function GroupsPanel({ mode, visible, onOpenGroup, svcStatus }:
       <Focusable noFocusRing {...NAV_MAINTAIN_X}
         style={{
           display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))',
-          gap: '14px', padding: '0 16px',
+          gap: '14px', padding: '0 16px 24px',
         }}
       >
         {groups.map((g) => <PlatformTile key={g.key} group={g} onOpen={openGroup} focusRef={tileRef(g.key, focusKey)} focusable={visible} />)}
