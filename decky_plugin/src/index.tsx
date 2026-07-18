@@ -1740,7 +1740,15 @@ function PlatformTile({ group, onOpen, focusRef, focusable }: { group: LibGroup;
         }}>
           <PlatformIcon slug={group.slug} fsSlug={group.fs_slug} size={72} />
         </div>
-        <div className="romm-ptile-lb" style={{ fontSize: '12px', fontWeight: 600, textAlign: 'center', lineHeight: 1.35, color: focused ? V2.fg : V2.fg2 }}>
+        {/* Fixed two-line box (clamped) so a long name can't make its tile
+            taller than its row siblings — every tile ends up the same height
+            regardless of label length. */}
+        <div className="romm-ptile-lb" style={{
+          fontSize: '12px', fontWeight: 600, textAlign: 'center', lineHeight: 1.35,
+          color: focused ? V2.fg : V2.fg2,
+          height: '2.7em', display: '-webkit-box', WebkitLineClamp: 2,
+          WebkitBoxOrient: 'vertical', overflow: 'hidden',
+        }}>
           {group.label}
         </div>
         <div style={{ fontSize: '11px', color: V2.fgMuted }}>
@@ -3953,7 +3961,7 @@ function SearchPanel({ onOpen, onBg, visible }: { onOpen: (g: LibGame) => void; 
       ) : (
         // Results present: keep the grid mounted even while a refined query is
         // in flight, so typing another letter doesn't flash "Searching…".
-        <Focusable noFocusRing style={{
+        <Focusable noFocusRing {...NAV_MAINTAIN_X} style={{
           display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(132px, 1fr))',
           gap: '18px 16px', padding: '6px 0',
         }}>
@@ -4047,7 +4055,7 @@ function CardRow({ icon, title, count, children }:
           onScroll={update}
           style={{ overflowX: 'auto', overflowY: 'visible' }}
         >
-          <Focusable noFocusRing flow-children="horizontal" style={{ display: 'flex', gap: '12px', padding: '24px 16px 28px' }}>
+          <Focusable noFocusRing flow-children="horizontal" {...NAV_MAINTAIN_X} style={{ display: 'flex', gap: '12px', padding: '24px 16px 28px' }}>
             {children}
           </Focusable>
         </div>
@@ -4215,6 +4223,15 @@ const _scrubLetterOf = (s: string) => {
   const c = (s || '').trim().charAt(0).toUpperCase();
   return c >= 'A' && c <= 'Z' ? c : '#';
 };
+
+// Entering a grid/row container from above or below should land on the tile in
+// the SAME COLUMN you came from, not the container's remembered last-active
+// child (Steam's default "preferred child" made UP/DOWN between rows snap back
+// to wherever you were last in that row — verified on-device by live-patching
+// nav nodes). 2 = NavEntryPositionPreferences.MAINTAIN_X (@decky/ui declares
+// the enum but doesn't export it at runtime). Spread as any: not in decky's
+// FocusableProps typing, but Steam's Focusable forwards it into m_Properties.
+const NAV_MAINTAIN_X = { navEntryPreferPosition: 2 } as any;
 
 // Fast-scroll glimpse (Big Picture-style): show the current letter only while
 // the user is genuinely flying through the grid — a sustained run of held-repeat
@@ -4403,7 +4420,7 @@ function GroupsPanel({ mode, visible, onOpenGroup, svcStatus }:
   }
   if (mode === 'platform') {
     return (
-      <Focusable noFocusRing
+      <Focusable noFocusRing {...NAV_MAINTAIN_X}
         style={{
           display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))',
           gap: '14px', padding: '0 16px',
@@ -4444,7 +4461,7 @@ function GroupsPanel({ mode, visible, onOpenGroup, svcStatus }:
             }}>
               <FaBookmark size={10} /><span>{s.title}</span>
             </div>
-            <Focusable noFocusRing
+            <Focusable noFocusRing {...NAV_MAINTAIN_X}
               style={{
                 display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(132px, 1fr))',
                 gap: '18px 16px', padding: '0 16px 8px',
@@ -5394,7 +5411,7 @@ function LibraryGamesPage() {
       ) : games.length === 0 ? (
         <div style={{ padding: '16px', color: V2.fgMuted, fontSize: '13px' }}>No games in this group.</div>
       ) : (
-        <Focusable noFocusRing
+        <Focusable noFocusRing {...NAV_MAINTAIN_X}
           key={`${group.key}:${reloadTick}`}
           className={slideDir === 1 ? 'lib-slide-r' : 'lib-slide-l'}
           style={{
