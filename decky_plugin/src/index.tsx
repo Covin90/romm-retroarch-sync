@@ -4423,10 +4423,13 @@ function GroupsPanel({ mode, visible, onOpenGroup, svcStatus }:
       <Focusable noFocusRing {...NAV_MAINTAIN_X}
         style={{
           display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))',
-          // Symmetric breathing room, measured on-device: v2Page already pads
-          // the page bottom by 40px, so the grid adds none of its own; the top
-          // gets 32px which + the 8px tab spacer = the same 40px above row one.
-          gap: '14px', padding: '32px 16px 0',
+          // Symmetric 24px above row one and below the last row, measured
+          // on-device AT REST (not scrolled): 16px here + the 8px tab spacer
+          // on top; v2Page's fixed 40px page-bottom padding pulled back to 24
+          // via the negative margin. With 40/40 the content overflowed the
+          // Deck viewport by a hair, parking the last row flush against the
+          // screen edge until you scrolled.
+          gap: '14px', padding: '16px 16px 0', marginBottom: '-16px',
         }}
       >
         {groups.map((g) => <PlatformTile key={g.key} group={g} onOpen={openGroup} focusRef={tileRef(g.key, focusKey)} focusable={visible} />)}
