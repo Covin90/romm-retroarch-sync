@@ -4423,7 +4423,10 @@ function GroupsPanel({ mode, visible, onOpenGroup, svcStatus }:
       <Focusable noFocusRing {...NAV_MAINTAIN_X}
         style={{
           display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))',
-          gap: '14px', padding: '0 16px 24px',
+          // Symmetric breathing room, measured on-device: v2Page already pads
+          // the page bottom by 40px, so the grid adds none of its own; the top
+          // gets 32px which + the 8px tab spacer = the same 40px above row one.
+          gap: '14px', padding: '32px 16px 0',
         }}
       >
         {groups.map((g) => <PlatformTile key={g.key} group={g} onOpen={openGroup} focusRef={tileRef(g.key, focusKey)} focusable={visible} />)}
