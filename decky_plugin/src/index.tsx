@@ -3609,7 +3609,11 @@ function v2Page(children: any, bgUri: string | null = null) {
     }}>
       <style>{V2_FOCUS_STYLE}{V2_ROW_STYLE}</style>
       <V2Bg uri={bgUri} />
-      <div style={{ position: 'relative', zIndex: 2, padding: '0 0 40px' }}>
+      {/* Bottom padding covers Steam's fixed footer button legend (measured
+          42px tall on-device, overlaying the screen bottom) + ~22px of real
+          clearance, so a fully scrolled last row sits above the glass bar
+          instead of under it. */}
+      <div style={{ position: 'relative', zIndex: 2, padding: '0 0 64px' }}>
         {children}
       </div>
     </div>
@@ -4423,13 +4427,11 @@ function GroupsPanel({ mode, visible, onOpenGroup, svcStatus }:
       <Focusable noFocusRing {...NAV_MAINTAIN_X}
         style={{
           display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))',
-          // Symmetric 24px above row one and below the last row, measured
-          // on-device AT REST (not scrolled): 16px here + the 8px tab spacer
-          // on top; v2Page's fixed 40px page-bottom padding pulled back to 24
-          // via the negative margin. With 40/40 the content overflowed the
-          // Deck viewport by a hair, parking the last row flush against the
-          // screen edge until you scrolled.
-          gap: '14px', padding: '16px 16px 0', marginBottom: '-16px',
+          // 16px + the 8px tab spacer = 24px above row one; the bottom gap
+          // comes from v2Page's 64px page padding, which nets ~22px of visible
+          // clearance above Steam's 42px footer legend once scrolled — the
+          // same breathing room as the top.
+          gap: '14px', padding: '16px 16px 0',
         }}
       >
         {groups.map((g) => <PlatformTile key={g.key} group={g} onOpen={openGroup} focusRef={tileRef(g.key, focusKey)} focusable={visible} />)}
