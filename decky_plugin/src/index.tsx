@@ -4280,20 +4280,20 @@ function _scrubTargetIdx(labels: string[], cur: number, dir: 1 | -1): number {
   return start;
 }
 
-// Big Picture-style centered letter overlay shown while scrubbing.
+// Big Picture-style letter overlay shown while scrubbing — dims/blurs the
+// whole screen (not just a small centered card) so the letter reads as a
+// full-screen state change rather than a floating window.
 function ScrubOverlay({ letter }: { letter: string | null }) {
   return (
     <div style={{
       position: 'fixed', inset: 0, display: 'grid', placeItems: 'center',
       pointerEvents: 'none', zIndex: 60,
+      background: 'rgba(6,7,10,0.55)', backdropFilter: 'blur(6px)',
       opacity: letter ? 1 : 0, transition: 'opacity 0.18s ease',
     }}>
       <div style={{
-        minWidth: '128px', height: '128px', padding: '0 26px',
-        display: 'grid', placeItems: 'center', borderRadius: '24px',
-        background: 'rgba(10,12,16,0.80)', border: `1px solid ${V2.borderStrong}`,
-        boxShadow: '0 12px 44px rgba(0,0,0,0.6)', backdropFilter: 'blur(8px)',
-        fontSize: '80px', fontWeight: 800, lineHeight: 1, color: V2.fg,
+        fontSize: '220px', fontWeight: 800, lineHeight: 1, color: V2.fg,
+        textShadow: '0 12px 44px rgba(0,0,0,0.6)',
       }}>
         {letter ?? ''}
       </div>
