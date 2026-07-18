@@ -3941,7 +3941,7 @@ function SearchPanel({ onOpen, onBg, visible }: { onOpen: (g: LibGame) => void; 
   }, [visible]);
 
   return (
-    <div style={{ padding: '0 16px' }}>
+    <div style={{ padding: '16px 16px 0' }}>
       <div style={{ maxWidth: '520px', margin: '0 auto 16px' }}>
         {/* Unmounted while the tab is hidden: the wrapper Focusable AND the
             TextField's DialogInput otherwise linger in Steam's nav tree as 0×0
@@ -4139,7 +4139,7 @@ function HomePanel({ onOpen, onOpenGroup, onBg, visible }:
     );
   }
   return (
-    <div>
+    <div style={{ paddingTop: '8px' }}>
       {/* Continue playing — per-user last_played from RomM (cross-device). */}
       {continuePlaying.length > 0 && (
         <CardRow icon={<FaPlay size={14} />} title="Continue playing" count={continuePlaying.length}>
@@ -4455,7 +4455,7 @@ function GroupsPanel({ mode, visible, onOpenGroup, svcStatus }:
   }
   if (focusKey && groups.some((g) => g.key === focusKey)) firstKey = focusKey;
   return (
-    <>
+    <div style={{ paddingTop: '16px' }}>
       {scrubOverlay}
       {sections.map((s) => {
         const items = groups.filter((g) => s.kinds.includes(g.kind || 'collection'));
@@ -4480,7 +4480,7 @@ function GroupsPanel({ mode, visible, onOpenGroup, svcStatus }:
           </div>
         );
       })}
-    </>
+    </div>
   );
 }
 
@@ -5424,7 +5424,7 @@ function LibraryGamesPage() {
           className={slideDir === 1 ? 'lib-slide-r' : 'lib-slide-l'}
           style={{
             display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(132px, 1fr))',
-            gap: '18px 16px', padding: '6px 16px',
+            gap: '18px 16px', padding: '16px 16px 0',
           }}
         >
           {gridTiles}
