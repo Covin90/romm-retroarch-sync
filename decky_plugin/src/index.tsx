@@ -3931,7 +3931,14 @@ function SearchPanel({ onOpen, onBg, visible }: { onOpen: (g: LibGame) => void; 
   return (
     <div style={{ padding: '0 16px' }}>
       <div style={{ maxWidth: '520px', margin: '0 auto 16px' }}>
-        <V2SearchField ref={searchFieldRef} value={q} onChange={setQ} />
+        {/* Unmounted while the tab is hidden: the wrapper Focusable AND the
+            TextField's DialogInput otherwise linger in Steam's nav tree as 0×0
+            phantom focus targets (display:none doesn't remove them — verified
+            on-device; these two were the last phantoms after the tiles got
+            focusable={visible}). Remount is cheap — it's one input, and `q`
+            lives up here so the text survives. */}
+        {visible ? <V2SearchField ref={searchFieldRef} value={q} onChange={setQ} />
+          : <div style={{ height: '40px' }} />}
       </div>
       {tooShort ? (
         <div style={{ padding: '24px', color: V2.fgMuted, fontSize: '13px', textAlign: 'center' }}>
