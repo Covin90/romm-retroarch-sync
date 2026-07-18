@@ -3042,6 +3042,11 @@ function libCacheSetDownloaded(romId: number, downloaded: boolean) {
     if (!list.some((g) => g.rom_id === romId && !!g.is_downloaded !== downloaded)) continue;
     libCacheSet(key, list.map((g) => g.rom_id === romId ? { ...g, is_downloaded: downloaded } : g));
   }
+  // A single-game download/delete doesn't otherwise touch _homeCache, so Home's
+  // "Downloaded" row (and any other mounted grid) would only pick it up on the
+  // next tab switch. Bulk syncs already broadcast after the batch (see
+  // runCollectionBatch); mirror that here for the single-game path.
+  _broadcastLibRefresh();
 }
 function persistHomeCache() {
   if (!_lsAvail || !_homeCache) return;
