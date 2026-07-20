@@ -731,19 +731,44 @@ class SettingsManager:
         self.load_settings()
 
     def _setup_encryption(self):
-        """Setup encryption key"""
+        """Setup encryption key.
+
+        The key is derived from a stable per-machine id so saved credentials
+        survive hostname changes (roaming laptops, dynamic DHCP/Starlink names).
+        Older builds keyed on username+hostname; that cipher is kept as a
+        decrypt-only fallback so a config written under the old scheme still
+        loads on the machine that wrote it and gets re-encrypted under the new
+        key on next save. Credentials never cross machines — a config copied
+        from another host simply can't be decrypted and must be re-entered.
+        """
+        self.cipher = None
+        self._legacy_ciphers = []
         try:
             from cryptography.fernet import Fernet
             import hashlib
             import getpass
-            
-            # Create key from username + hostname for basic protection
-            key_material = f"{getpass.getuser()}-{socket.gethostname()}".encode()
-            key = hashlib.sha256(key_material).digest()
-            self.cipher = Fernet(base64.urlsafe_b64encode(key))
+
+            def _fernet(material):
+                key = hashlib.sha256(material.encode()).digest()
+                return Fernet(base64.urlsafe_b64encode(key))
+
+            user = getpass.getuser()
+            self.cipher = _fernet(f"{user}-{self._machine_id()}")
+            # Legacy username+hostname key, for migrating pre-existing configs.
+            self._legacy_ciphers.append(_fernet(f"{user}-{socket.gethostname()}"))
         except ImportError:
             print("⚠️ cryptography not available, using plain text storage")
-            self.cipher = None
+
+    def _machine_id(self):
+        """Stable per-installation identifier, independent of hostname."""
+        for path in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+            try:
+                mid = Path(path).read_text().strip()
+                if mid:
+                    return mid
+            except Exception:
+                pass
+        return socket.gethostname()  # last resort: previous behavior
 
     def _encrypt(self, value):
         """Encrypt sensitive data"""
@@ -755,12 +780,20 @@ class SettingsManager:
         return value
 
     def _decrypt(self, value):
-        """Decrypt sensitive data"""
-        if self.cipher and value:
+        """Decrypt sensitive data, trying the current key then legacy keys."""
+        if not value:
+            return value
+        for cipher in ([self.cipher] if self.cipher else []) + self._legacy_ciphers:
             try:
-                return self.cipher.decrypt(value.encode()).decode()
-            except:
-                pass
+                return cipher.decrypt(value.encode()).decode()
+            except Exception:
+                continue
+        # Undecryptable. If it looks like a Fernet token it was encrypted under
+        # a key we don't have (e.g. copied from another machine) — return empty
+        # so we never send ciphertext to the server as a credential. Otherwise
+        # assume it's legacy plaintext and pass it through unchanged.
+        if value.startswith("gAAAAA"):
+            return ''
         return value
 
     def load_settings(self):
