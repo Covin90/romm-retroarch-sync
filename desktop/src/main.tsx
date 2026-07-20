@@ -2,6 +2,7 @@ import { StrictMode, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 
 import { callable } from "./shim/api";
+import { startGamepad } from "./shim/gamepad";
 import { ModalHost, ToastHost } from "./shim/overlays";
 import { Navigation, matchRoute, useRoutePath, useRouteRegistry } from "./shim/router";
 import "./shim/shim.css";
@@ -23,6 +24,10 @@ const LIBRARY_ROUTE = "/romm-sync-library";
 const SETUP_ROUTE = "/romm-sync-setup";
 
 const getConfig = callable<[], { configured?: boolean }>("get_config");
+
+// Read the controller and drive focus/navigation. Safe to start once at module
+// load — it polls via requestAnimationFrame and no-ops until a pad reports in.
+startGamepad();
 
 function App() {
   useRouteRegistry(); // re-render when routes are added or removed

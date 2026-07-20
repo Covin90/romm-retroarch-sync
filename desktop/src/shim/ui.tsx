@@ -5,13 +5,20 @@
 // which must stay byte-identical between the two targets.
 import {
   forwardRef,
+  useCallback,
+  useRef,
   type CSSProperties,
   type ReactNode,
   type Ref,
 } from "react";
 import { pushModal, type ModalHandle } from "./overlays";
+import { registerFocusable } from "./gamepad";
+import { GamepadButtonId } from "./gamepad-buttons";
 
 export { Navigation, Router } from "./router";
+
+// Re-exported under the name index.tsx imports it by.
+export { GamepadButtonId as GamepadButton };
 
 // ── Focus containers ────────────────────────────────────────────────────────
 
@@ -25,6 +32,12 @@ export type FocusableProps = {
   onActivate?: (e: any) => void;
   onClick?: (e: any) => void;
   onCancel?: (e: any) => void;
+  // Steam controller callbacks the plugin attaches to Focusables. These are
+  // driven by the gamepad manager (gamepad.ts), which routes button presses up
+  // the Focusable ancestor chain.
+  onButtonDown?: (e: any) => void;
+  onButtonUp?: (e: any) => void;
+  onCancelButton?: (e: any) => void;
   onSecondaryButton?: (e: any) => void;
   onOptionsButton?: (e: any) => void;
   onMenuButton?: (e: any) => void;
@@ -50,6 +63,9 @@ export const Focusable = forwardRef(function Focusable(
     onActivate,
     onClick,
     onCancel,
+    onButtonDown,
+    onButtonUp,
+    onCancelButton,
     onSecondaryButton,
     onOptionsButton,
     onMenuButton,
@@ -68,9 +84,34 @@ export const Focusable = forwardRef(function Focusable(
 
   const activate = onActivate ?? onClick;
 
+  // Register this Focusable's controller handlers so the gamepad manager can
+  // route button events to it (and its ancestors). Re-registers if a handler
+  // identity changes. The callback ref also forwards to any external ref.
+  const cleanup = useRef<(() => void) | null>(null);
+  const setRef = useCallback(
+    (el: HTMLDivElement | null) => {
+      cleanup.current?.();
+      cleanup.current = null;
+      if (el) {
+        cleanup.current = registerFocusable(el, {
+          onButtonDown,
+          onButtonUp,
+          onCancelButton,
+          onSecondaryButton,
+          onOptionsButton,
+          onMenuButton,
+        });
+      }
+      if (typeof ref === "function") ref(el);
+      else if (ref) (ref as any).current = el;
+    },
+    [ref, onButtonDown, onButtonUp, onCancelButton, onSecondaryButton,
+     onOptionsButton, onMenuButton],
+  );
+
   return (
     <div
-      ref={ref}
+      ref={setRef}
       style={style}
       className={
         "shim-focusable" +
@@ -84,9 +125,9 @@ export const Focusable = forwardRef(function Focusable(
         if (activate && (e.key === "Enter" || e.key === " ")) {
           e.preventDefault();
           activate(e);
-        } else if (onCancel && e.key === "Escape") {
+        } else if ((onCancelButton ?? onCancel) && e.key === "Escape") {
           e.preventDefault();
-          onCancel(e);
+          (onCancelButton ?? onCancel)!(e);
         }
       }}
       onBlur={onGamepadBlur}
@@ -360,22 +401,3 @@ export function showContextMenu(element: any, _parent?: any): ModalHandle {
 export const staticClasses = {
   Title: "shim-title",
 };
-
-// Steam's controller button codes. Only the members index.tsx references are
-// guaranteed accurate; the numeric values match Steam's enum ordering.
-export enum GamepadButton {
-  OK = 1,
-  CANCEL = 2,
-  SECONDARY = 3,
-  OPTIONS = 4,
-  START = 5,
-  SELECT = 6,
-  TRIGGER_LEFT = 7,
-  TRIGGER_RIGHT = 8,
-  BUMPER_LEFT = 9,
-  BUMPER_RIGHT = 10,
-  DIR_UP = 11,
-  DIR_DOWN = 12,
-  DIR_LEFT = 13,
-  DIR_RIGHT = 14,
-}
