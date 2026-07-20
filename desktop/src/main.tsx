@@ -1,6 +1,7 @@
 import { StrictMode, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 
+import { callable } from "./shim/api";
 import { ModalHost, ToastHost } from "./shim/overlays";
 import { Navigation, matchRoute, useRoutePath, useRouteRegistry } from "./shim/router";
 import "./shim/shim.css";
@@ -17,21 +18,39 @@ import "../../decky_plugin/src/index";
 // Where the desktop app lands. The Decky Quick Access panel (plugin.content) is
 // a Deck-only surface — sized for the 240px sidebar and reached via SteamOS —
 // so the desktop app never renders it. The library browser is the real
-// full-window home: it carries its own nav (Settings/Stats/Cores/Downloads via
-// its user menu) and self-forwards to the setup wizard when RomM isn't
-// configured yet.
-const HOME_ROUTE = "/romm-sync-library";
+// full-window home; the setup wizard is where an unconfigured install begins.
+const LIBRARY_ROUTE = "/romm-sync-library";
+const SETUP_ROUTE = "/romm-sync-setup";
+
+const getConfig = callable<[], { configured?: boolean }>("get_config");
 
 function App() {
   useRouteRegistry(); // re-render when routes are added or removed
   const path = useRoutePath();
   const route = matchRoute(path);
 
-  // No matching route (initial "/" load, or a bare path) → go home. Never fall
-  // back to the plugin panel.
+  // No matching route (initial "/" load, or a bare path) → pick the landing
+  // page from config and go there directly. We must NOT trampoline through the
+  // library route while unconfigured: LibraryRootPage bounces an unconfigured
+  // install back with NavigateBack(), which lands on "/" again → this effect
+  // re-fires → flicker loop between library and setup. Resolving the
+  // destination here (setup when unconfigured, library otherwise) means the
+  // library page only ever mounts when it will actually stay.
   useEffect(() => {
-    if (!route) Navigation.Navigate(HOME_ROUTE);
-  }, [route]);
+    if (route) return;
+    let cancelled = false;
+    (async () => {
+      let dest = LIBRARY_ROUTE;
+      try {
+        const c = await getConfig();
+        if (!c?.configured) dest = SETUP_ROUTE;
+      } catch {
+        dest = SETUP_ROUTE; // backend unreachable → send to setup, not a blank
+      }
+      if (!cancelled) Navigation.Navigate(dest);
+    })();
+    return () => { cancelled = true; };
+  }, [route, path]);
 
   return (
     <div className="shim-app">
