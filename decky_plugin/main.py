@@ -246,6 +246,75 @@ def _version_key(v):
     return (core_t, (0, tuple(ids)))
 
 
+def _release_asset(rel, suffix):
+    """First asset on `rel` whose name ends with `suffix`, or None."""
+    return next((a for a in (rel.get('assets') or [])
+                 if (a.get('name') or '').endswith(suffix)), None)
+
+
+def _iter_releases(max_pages=5, per_page=100):
+    """Yield non-draft releases, newest pages first.
+
+    Paginated because a fast beta cadence can push the newest *stable* release
+    well past the first page — a single per_page=50 fetch could return nothing
+    but prereleases and miss it entirely. Bounded so we never walk the whole
+    history of the repo.
+    """
+    import requests
+    headers = {'Accept': 'application/vnd.github+json'}
+    for page in range(1, max_pages + 1):
+        resp = requests.get(f"{GITHUB_API}/releases", headers=headers,
+                            params={'per_page': per_page, 'page': page}, timeout=15)
+        resp.raise_for_status()
+        batch = resp.json()
+        if not batch:
+            return
+        for r in batch:
+            if not r.get('draft'):
+                yield r
+        if len(batch) < per_page:
+            return
+
+
+def select_release(channel: str, asset_suffix: str):
+    """Newest release on `channel` that actually carries `asset_suffix`.
+
+    Releases lacking the asset are skipped during selection rather than picked
+    and then rejected. Otherwise publishing an artifact-only release (say an
+    AppImage build with no -decky.zip) would outrank every older release that
+    does have one, and updates would silently report "none available".
+
+    Suffix is a parameter so other front-ends can reuse this with their own
+    artifact naming.
+    """
+    import requests
+    if channel == 'stable':
+        # Fast path: GitHub's "latest" is correct whenever it carries the asset.
+        try:
+            resp = requests.get(f"{GITHUB_API}/releases/latest",
+                                headers={'Accept': 'application/vnd.github+json'},
+                                timeout=15)
+            resp.raise_for_status()
+            rel = resp.json()
+            if _release_asset(rel, asset_suffix):
+                return rel
+            logging.info("[UPDATE] /releases/latest lacks "
+                         f"{asset_suffix}; enumerating releases")
+        except Exception as e:
+            logging.warning(f"[UPDATE] /releases/latest failed ({e}); enumerating")
+
+    candidates = [r for r in _iter_releases()
+                  if (channel == 'beta' or not r.get('prerelease'))
+                  and _release_asset(r, asset_suffix)]
+    # GitHub's /releases order is NOT newest-first by version — tags sort
+    # roughly lexicographically, so v1.7.0-beta.10 lists BELOW beta.9
+    # ("1" < "9"). Never trust the API order; pick the semver max ourselves.
+    if not candidates:
+        return None
+    return max(candidates,
+               key=lambda r: _version_key(r.get('tag_name') or r.get('name') or ''))
+
+
 # ---------------------------------------------------------------------------
 # Plugin
 # ---------------------------------------------------------------------------
@@ -1853,49 +1922,34 @@ class Plugin:
         logging.info(f"[UPDATE] check_on_startup set to {bool(enabled)}")
         return bool(enabled)
 
-    def _select_release(self, channel: str):
+    def _select_release(self, channel: str, asset_suffix: str = UPDATE_ASSET_SUFFIX):
         """Return the GitHub release dict for the given channel, or None.
 
-        stable → latest non-prerelease. beta → newest release overall (which may
-        be a prerelease or a stable, whichever is more recent), so beta testers
-        always track the leading edge.
+        stable → newest non-prerelease carrying the asset. beta → newest release
+        overall carrying it (prerelease or stable, whichever is more recent), so
+        beta testers always track the leading edge.
         """
-        import requests
-        headers = {'Accept': 'application/vnd.github+json'}
-        if channel == 'beta':
-            resp = requests.get(f"{GITHUB_API}/releases",
-                                headers=headers, params={'per_page': 50}, timeout=15)
-            resp.raise_for_status()
-            releases = [r for r in resp.json() if not r.get('draft')]
-            # GitHub's /releases order is NOT newest-first by version — tags sort
-            # roughly lexicographically, so v1.7.0-beta.10 lists BELOW beta.9
-            # ("1" < "9"). Never trust releases[0]; pick the semver max ourselves.
-            if not releases:
-                return None
-            return max(releases, key=lambda r: _version_key(r.get('tag_name') or r.get('name') or ''))
-        resp = requests.get(f"{GITHUB_API}/releases/latest", headers=headers, timeout=15)
-        resp.raise_for_status()
-        return resp.json()
+        return select_release(channel, asset_suffix)
 
-    async def check_for_update(self, channel: str = None):
+    async def check_for_update(self, channel: str = None,
+                               asset_suffix: str = UPDATE_ASSET_SUFFIX):
         """Query GitHub for a newer release on the selected channel.
 
         Returns dict: {success, available, current, latest, channel, prerelease,
         notes, url, asset_name}. `available` is only True when a newer version
-        AND a downloadable -decky.zip asset both exist.
+        AND a downloadable asset both exist.
         """
         try:
             channel = channel if channel in VALID_CHANNELS else \
                 load_decky_settings().get('update_channel', 'stable')
-            rel = self._select_release(channel)
+            rel = self._select_release(channel, asset_suffix)
             if not rel:
                 return {'success': True, 'available': False, 'current': PLUGIN_VERSION,
                         'latest': PLUGIN_VERSION, 'channel': channel,
                         'notes': '', 'url': None,
-                        'message': 'No releases found for this channel'}
+                        'message': f'No {asset_suffix} release found for this channel'}
 
-            asset = next((a for a in rel.get('assets', [])
-                          if a.get('name', '').endswith(UPDATE_ASSET_SUFFIX)), None)
+            asset = _release_asset(rel, asset_suffix)
             latest = (rel.get('tag_name') or rel.get('name') or '').lstrip('v')
             newer = _version_key(latest) > _version_key(PLUGIN_VERSION)
             available = bool(newer and asset)
