@@ -77,7 +77,7 @@ cd "$ROOT"
 # Step 2: Package into the versioned zip.
 # VERSION is derived from decky_plugin/package.json (the single source of truth),
 # not hardcoded — bump it there and the zip name follows automatically.
-VERSION="$(node -p "require('./decky_plugin/package.json').version.split('.').slice(0,2).join('.')")"
+VERSION="$(node -p "require('./decky_plugin/package.json').version")"
 PLUGIN_NAME="romm-sync-monitor"
 PLUGIN_DIR="decky_plugin"
 OUT_ZIP="RomM-RetroArch-Sync-v${VERSION}-decky.zip"
@@ -101,6 +101,31 @@ The output zip is at the **repo root**: `RomM-RetroArch-Sync-v<VERSION>-decky.zi
 bundled libs), where `<VERSION>` comes from `decky_plugin/package.json`. To release a new
 version, bump `"version"` in that file — the zip name (and this whole flow) follows. The name
 matches the AppImage pattern `RomM-RetroArch-Sync-v<VERSION>.AppImage`.
+
+## Publish a release
+
+The zip is named for the exact version, so it can be handed to `gh` as-is:
+
+```bash
+VERSION="$(node -p "require('./decky_plugin/package.json').version")"
+git tag "v${VERSION}" && git push origin "v${VERSION}"
+gh release create "v${VERSION}" \
+  --prerelease \
+  --notes-file notes.md \
+  "RomM-RetroArch-Sync-v${VERSION}-decky.zip"
+```
+
+**Push the tag before creating the release.** `gh` creates the release against `tag_name`;
+if that tag doesn't exist on the remote yet, GitHub silently creates it pointing at the
+default branch, anchoring the release to the wrong commit.
+
+**Pass `--prerelease` for any `-beta.N` version.** The updater's stable channel serves the
+newest non-prerelease release, so a beta published without the flag is offered to every user
+on stable. Omit it only for a real stable release.
+
+Every release must carry a `*-decky.zip` asset — `check_for_update` skips releases that lack
+one when picking the newest (see `select_release` in `main.py`), so a release published
+without it is invisible to the updater rather than breaking it.
 
 **Why `cp -rL`?** `py_modules/sync_core.py` and `py_modules/bios_manager.py` are symlinks in
 the dev tree. The `-L` flag dereferences all symlinks so real file content goes into the zip.

@@ -31,7 +31,10 @@ else
 fi
 
 # ── Step 2: assemble the staging tree ────────────────────────────────────────
-VERSION="$("$NODE_BIN" -p "require('./$PLUGIN_DIR/package.json').version.split('.').slice(0,2).join('.')")"
+# Full version, NOT truncated to major.minor: the release asset must be named
+# for the exact version so `gh release create` can take the built zip as-is and
+# the updater's asset lookup lines up with the tag.
+VERSION="$("$NODE_BIN" -p "require('./$PLUGIN_DIR/package.json').version")"
 OUT_ZIP="RomM-RetroArch-Sync-v${VERSION}-decky.zip"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
