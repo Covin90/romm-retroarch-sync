@@ -19,11 +19,11 @@ function App() {
 
   // The plugin's sidebar panel is its entry surface; on desktop it becomes the
   // home page, with the registered routes as the pages it navigates to.
-  const Content = plugin?.content;
-
+  // NOTE: definePlugin's `content` is a React ELEMENT (`<Content />`), not a
+  // component — render it as a node, never `<Content/>` (that throws #130).
   return (
     <div className="shim-app">
-      {route ? route.component() : Content ? <Content /> : null}
+      {route ? route.component() : (plugin?.content ?? null)}
       <ModalHost />
       <ToastHost />
     </div>
