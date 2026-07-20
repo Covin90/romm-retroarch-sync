@@ -203,11 +203,15 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
-def main():
-    global ENGINE
-    host = os.environ.get("ROMM_HOST", "127.0.0.1")
-    port = int(os.environ.get("ROMM_PORT", "8723"))
+def serve(host="127.0.0.1", port=8723):
+    """Start the engine + HTTP server and return (httpd, engine).
 
+    Blocks until the engine is ready and the socket is bound, then returns
+    without serving — the caller drives serve_forever() (in a thread for the
+    desktop shell, or directly for the CLI). This lets the window shell run the
+    backend in-process and know exactly when the UI can be loaded.
+    """
+    global ENGINE
     ENGINE = Engine()
     print("[server] starting engine…", flush=True)
     ENGINE.start()
@@ -215,12 +219,19 @@ def main():
 
     httpd = ThreadingHTTPServer((host, port), Handler)
     print(f"[server] listening on http://{host}:{port}", flush=True)
+    return httpd, ENGINE
+
+
+def main():
+    host = os.environ.get("ROMM_HOST", "127.0.0.1")
+    port = int(os.environ.get("ROMM_PORT", "8723"))
+    httpd, engine = serve(host, port)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        ENGINE.stop()
+        engine.stop()
 
 
 if __name__ == "__main__":
