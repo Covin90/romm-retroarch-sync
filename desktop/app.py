@@ -17,6 +17,11 @@ import sys
 import threading
 from pathlib import Path
 
+# WebKitGTK's DMABUF renderer trips a Wayland protocol error (Gdk "Error 71")
+# on many compositors, killing the window at startup. Disabling it forces the
+# stable GLES path. Must be set before WebKit2 is imported. Overridable.
+os.environ.setdefault("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
+
 import gi
 
 gi.require_version("Gtk", "3.0")
