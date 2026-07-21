@@ -89,13 +89,19 @@ const FOCUS_SELECTOR = [
 ].join(",");
 
 function isVisible(el: HTMLElement) {
+  // "Rendered", not "on-screen". offsetParent===null catches display:none (so
+  // the inactive, still-mounted home/platforms/collections panels are excluded),
+  // and width/height>0 catches collapsed nodes. We deliberately do NOT require
+  // the element to intersect the viewport: gamepad nav has no free-scroll wheel,
+  // so a target still below the fold (a lower Home section) or off to the side
+  // in a long horizontal row must stay reachable — move() navigates to it by
+  // geometry and focusAndReveal() scrolls it into view. Gating on viewport
+  // intersection is what dead-ended a Down move at the last on-screen row.
   if (el.offsetParent === null && getComputedStyle(el).position !== "fixed") {
     return false;
   }
   const r = el.getBoundingClientRect();
-  return r.width > 0 && r.height > 0 &&
-    r.bottom > 0 && r.right > 0 &&
-    r.top < window.innerHeight && r.left < window.innerWidth;
+  return r.width > 0 && r.height > 0;
 }
 
 // When a modal/context menu is open, trap focus inside the topmost one.
@@ -139,6 +145,39 @@ function dedupe(els: HTMLElement[]): HTMLElement[] {
   return out;
 }
 
+// Focus a target AND scroll it into view. On the Deck, Steam's nav controller
+// scrolls the focused element into the viewport; a raw .focus() here only nudges
+// the single nearest scrollable ancestor (and not at all for off-screen tiles in
+// some WebKit cases), so gamepad moves would light up an element that stays
+// clipped — no vertical scroll down a long grid, no horizontal scroll along a
+// card row. scrollIntoView with block/inline 'nearest' walks EVERY scrollable
+// ancestor, so both axes track the focus; it honours the page's
+// scroll-padding-top (120px) so the item never hides under the sticky top bar.
+// preventScroll on focus() stops the browser's own jump from fighting our scroll.
+//
+// `horizontal` (a Left/Right move) uses inline:'center' so the focused cover —
+// scaled up with a glow that overflows its box — stays fully visible with room at
+// a card row's far ends (inline:'nearest' would scroll it flush to the edge and
+// clip the glow), giving the row a console-style "cursor centred, row slides under
+// it" feel. A vertical move keeps inline:'nearest' instead: centring on Up/Down
+// would also re-centre the LANDED row horizontally, so rows visibly slid sideways
+// every time you moved between them — read as flicker/jitter. block:'nearest'
+// keeps page scroll minimal and honours the 120px scroll-padding-top so nothing
+// hides under the sticky top bar.
+function focusAndReveal(el: HTMLElement, horizontal = false, smooth = true) {
+  try { el.focus({ preventScroll: true } as any); }
+  catch { el.focus(); }
+  try {
+    el.scrollIntoView({
+      block: "nearest",
+      inline: horizontal ? "center" : "nearest",
+      behavior: smooth ? "smooth" : "auto",
+    });
+  } catch {
+    try { el.scrollIntoView(); } catch { /* ignore */ }
+  }
+}
+
 function center(el: HTMLElement) {
   const r = el.getBoundingClientRect();
   return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
@@ -147,7 +186,7 @@ function center(el: HTMLElement) {
 // Pick the nearest focus target in `dir` from the currently focused element.
 // Score favours alignment on the travel axis (cross-axis offset weighted
 // heavier than same-axis distance), the usual spatial-nav heuristic.
-function move(dir: "up" | "down" | "left" | "right") {
+function move(dir: "up" | "down" | "left" | "right", smooth = true) {
   const targets = focusTargets();
   if (!targets.length) return;
 
@@ -164,7 +203,7 @@ function move(dir: "up" | "down" | "left" | "right") {
   const rawActive = document.activeElement as HTMLElement | null;
   const active = rawActive ? fieldFootprint(rawActive) : null;
   if (!active || active === document.body) {
-    targets[0].focus();
+    focusAndReveal(targets[0], false, smooth);
     return;
   }
 
@@ -194,6 +233,17 @@ function move(dir: "up" | "down" | "left" | "right") {
       ? Math.min(ar.bottom, r.bottom) - Math.max(ar.top, r.top)
       : Math.min(ar.right, r.right) - Math.max(ar.left, r.left);
     const penalty = overlap > 0 ? 0 : 1e6;
+    // A horizontal move must stay within the focused element's row. Card rows
+    // (Home) let you scroll off-screen tiles into view, so Left/Right needs to
+    // reach same-row tiles that are currently clipped — but it must NEVER fall
+    // back to a vertically-offset control in another row. Allowing that (the
+    // penalty fallback) made a Left/Right at a row's edge jump to a neighbouring
+    // row, which both swapped rows unpredictably and stranded you so the row
+    // could never scroll back to its start. Requiring cross-overlap here keeps
+    // off-screen same-row tiles eligible (they share the row's vertical extent)
+    // while excluding other rows entirely. Vertical moves keep the fallback so
+    // differently-x-aligned sections below the fold stay reachable.
+    if (horizontal && penalty) continue;
     // Reject targets that are more to the SIDE than in the travel direction and
     // don't overlap the cross-axis: they're beside the origin, not ahead of it.
     // Without this, Up from the top ROM-directory field jumped to that row's
@@ -221,7 +271,7 @@ function move(dir: "up" | "down" | "left" | "right") {
     if (primary) best = primary;
   }
 
-  if (best) best.focus();
+  if (best) focusAndReveal(best, horizontal, smooth);
 }
 
 // If `target` sits inside a footer-like row (horizontal Focusable using
@@ -303,9 +353,12 @@ export function startGamepad() {
     clearInterval(repeatTimer);
     delayTimer = repeatTimer = null;
     if (dir) {
-      move(dir);
+      // A single press animates (smooth); held-repeat steps jump instantly.
+      // Smooth-scrolling every ~110ms repeat re-targets the in-flight animation
+      // and the row oscillates, making covers shake during fast movement.
+      move(dir, true);
       delayTimer = setTimeout(() => {
-        repeatTimer = setInterval(() => move(dir), REPEAT_INTERVAL);
+        repeatTimer = setInterval(() => move(dir, false), REPEAT_INTERVAL);
       }, REPEAT_DELAY);
     }
   }

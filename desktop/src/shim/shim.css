@@ -19,6 +19,10 @@ body,
 #root {
   height: 100%;
   margin: 0;
+  /* Only the in-app .romm-ui container scrolls. Without this the body can
+     overflow (e.g. a page slightly taller than the viewport) and scrollIntoView
+     would scroll the BODY, dragging the "sticky" top bar out of place. */
+  overflow: hidden;
 }
 
 body {
@@ -31,6 +35,45 @@ body {
 .shim-app {
   min-height: 100%;
   position: relative;
+}
+
+/* ── No scrollbars ─────────────────────────────────────────────────────────
+ *
+ * The Deck's UI is gamepad/touch-scrolled and never paints a scrollbar. On the
+ * desktop WebView, every overflow:auto container (the page, card rows, modals,
+ * the file picker) draws a WebKit scrollbar, which looks foreign against the
+ * Deck chrome. Hide the visual bar everywhere — scrolling still works by wheel,
+ * drag, and the gamepad focus-reveal. Desktop-only; index.tsx is untouched.
+ */
+* {
+  scrollbar-width: none;          /* Firefox/standards */
+  -ms-overflow-style: none;       /* legacy */
+}
+*::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;                  /* WebKitGTK */
+}
+
+/* ── Page container: no Steam status-bar reservation ───────────────────────
+ *
+ * v2Page (index.tsx) reserves the top 40px of every page for the Steam Deck's
+ * system status bar (clock / battery / wifi) with an inline
+ * `margin-top: 40px; height: calc(100vh - 40px)`. The desktop window has no
+ * such bar, so that strip is just dead space above the app's own sticky top
+ * bar. Reclaim it: the page starts flush with the window top and fills the full
+ * height. !important beats the component's inline style. Modal overlays that
+ * also carry `.romm-ui` are `position: fixed; inset: 0`, so margin-top is a
+ * no-op there and height:100vh matches their existing viewport box — safe.
+ * Desktop-only; index.tsx is untouched.
+ */
+.romm-ui {
+  margin-top: 0 !important;
+  height: 100vh !important;
+  /* Keep the wizard's padding-bottom (below) INSIDE the 100vh box; with the
+     default content-box it would add to the height, overflow the viewport, and
+     let the body scroll the sticky top bar around. */
+  box-sizing: border-box !important;
 }
 
 /* ── Setup wizard: no virtual-keyboard make-room ───────────────────────────
@@ -76,6 +119,67 @@ div[class*="v2pf-"] {
 }
 div[class*="v2pf-"] > div {
   width: auto !important;
+}
+
+/* ── Card-row end padding ──────────────────────────────────────────────────
+ *
+ * A CardRow's horizontal track (index.tsx) lays its covers in a flex row with
+ * `padding: 24px 16px 28px` — only 16px at each end. The focused cover scales to
+ * 1.04 and paints an ~18px glow, so at the row's far left/right (where the track
+ * is scrolled hard against an end and can't recentre) that overflow is clipped
+ * by the track's overflow clip. Widen just the inline ends so the first and last
+ * covers have the same breathing room as the middle ones. The track's inner flex
+ * row is the `.shim-focusable` that is the DIRECT CHILD of the CardRow track.
+ * That track's `overflowX:'auto', overflowY:'visible'` serializes in the DOM as
+ * the SHORTHAND `overflow: auto visible` (verified by live inspection — NOT
+ * `overflow-x: auto`, which is why earlier substring selectors matched nothing),
+ * so we key off that and pad its direct `.shim-focusable` flex-row child. Padding
+ * lives on the row (scroll CONTENT), not the track, because WebKit historically
+ * drops a scroll container's own padding-right. That inline overflow shorthand is
+ * unique to these card tracks, so grids / nav bar / footers are untouched.
+ * Desktop-only; index.tsx is untouched.
+ */
+[style*="overflow: auto visible"] > .shim-focusable {
+  padding-left: 28px !important;
+}
+/* Trailing breathing room: a flex scroll-container's own padding-right is NOT
+ * honoured as scrollable trailing space by this WebKit (verified — at far-right
+ * scroll the last cover paints flush against the track edge and its scale+glow
+ * clips, even though scrollWidth includes the 48px). A real flex ITEM at the end
+ * IS reserved, so add a zero-content ::after spacer instead of padding-right.
+ * padding-left (the leading edge) works fine, so it stays. */
+[style*="overflow: auto visible"] > .shim-focusable::after {
+  content: "";
+  flex: 0 0 28px;
+  align-self: stretch;
+}
+
+/* ── Cover: no scale/glow animation, no promoted layer ──────────────────────
+ *
+ * index.tsx gives a focused cover `transform: scale(1.04)` + glow with a 0.18s
+ * transition. On desktop the horizontal reveal SMOOTH-scrolls the row under the
+ * cursor, which surfaced two artifacts, fixed together here:
+ *
+ *  • Flicker (originally): the 0.18s transform TRANSITION re-layerized the cover
+ *    every frame as focus moved. Snapping the transition to 0s removes the
+ *    per-frame transform animation entirely, so there is nothing left to flicker.
+ *  • "Shake"/over-scale shimmer: at fullscreen the page is zoomed (~1.8x =
+ *    height/800), and `will-change: transform` pins each cover to a cached GPU
+ *    texture. During the smooth slide the compositor UPSCALES that cached texture
+ *    by the 1.04 instead of re-rasterizing, so the cover briefly looks bigger and
+ *    soft, then snaps crisp when motion stops — read as the cover "scaling more
+ *    than 100%" / shaking. With the transition snapped there's no animation to
+ *    stabilize, so `will-change` no longer earns its keep and is dropped: the
+ *    cover is rasterized at its true (zoom x 1.04) size every frame — crisp,
+ *    no upscale shimmer.
+ *
+ * Net: the focused cover is simply AT scale(1.04) (still visibly grown), with no
+ * animation and no promoted layer. Scroll geometry was already proven clean (no
+ * scrollY shift, no scrollLeft reversal). Desktop-only; index.tsx untouched.
+ */
+.romm-gt-cover,
+.romm-ct-cover {
+  transition-duration: 0s !important;
 }
 
 /* ── Focusable ─────────────────────────────────────────────────────────── */
