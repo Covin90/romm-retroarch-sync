@@ -348,6 +348,11 @@ function enterGamepadMode() {
   document.documentElement.style.cursor = "none";
   if (document.body) document.body.style.pointerEvents = "none";
 }
+function isEditable(el: HTMLElement) {
+  const tag = el.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" ||
+    el.isContentEditable;
+}
 function enterMouseMode(e?: Event) {
   // Record what the pointer is over so a later gamepad press can resume from it.
   const t = e && (e.target as HTMLElement | null);
@@ -356,6 +361,13 @@ function enterMouseMode(e?: Event) {
   mouseMode = true;
   document.documentElement.style.cursor = "";
   if (document.body) document.body.style.pointerEvents = "";
+  // Clear the gamepad selection so its focus highlight (tile scale/glow/border,
+  // driven by the Focusable's focus state) doesn't linger under the mouse's own
+  // hover highlight — two selections at once. Blur the focused element on the
+  // switch to mouse. Skip editable fields so moving the mouse mid-typing doesn't
+  // kick the caret out of a text box.
+  const active = document.activeElement as HTMLElement | null;
+  if (active && active !== document.body && !isEditable(active)) active.blur();
 }
 
 export function startGamepad() {
