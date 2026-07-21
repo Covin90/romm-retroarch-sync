@@ -317,6 +317,12 @@ export function ModalRoot({
   onCancel,
   onEscKeypress,
   bHideCloseIcon,
+  className,
+  // Deck-only prop naming the inner panel element; the shim's modal is a single
+  // div, so consume it here rather than letting it spread onto the DOM (React
+  // would warn about an unknown `modalClassName` attribute). Callers that style
+  // via it also pass the same value as `className`, which we keep below.
+  modalClassName: _modalClassName,
   ...rest
 }: {
   children?: ReactNode;
@@ -324,6 +330,8 @@ export function ModalRoot({
   onCancel?: () => void;
   onEscKeypress?: () => void;
   bHideCloseIcon?: boolean;
+  className?: string;
+  modalClassName?: string;
   [key: string]: any;
 }) {
   const dismiss = onCancel ?? onEscKeypress ?? closeModal;
@@ -341,7 +349,10 @@ export function ModalRoot({
   return (
     <div
       ref={rootRef}
-      className="shim-modal"
+      // Compose, don't let a caller's className replace shim-modal: the gamepad
+      // focus trap (focusRoot) keys off .shim-modal, so dropping it makes the
+      // modal uncontrollable and nav leaks to the background.
+      className={"shim-modal" + (className ? " " + className : "")}
       role="dialog"
       onKeyDown={(e) => {
         if (e.key === "Escape") {

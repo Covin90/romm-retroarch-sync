@@ -242,6 +242,16 @@ function move(dir: "up" | "down" | "left" | "right", smooth = true) {
     focusAndReveal(targets[0], false, smooth);
     return;
   }
+  // Focus sits on a WRAPPER that encloses the targets rather than on a target
+  // itself — e.g. a modal panel with autoFocus (index.tsx focuses the inner
+  // Focusable, not a leaf row). Every candidate is then a descendant of `active`
+  // and gets skipped by the descendant guard in the scan below, dead-ending the
+  // move so the overlay looks uncontrollable. Enter from the first target
+  // instead, the same as the no-origin seed above.
+  if (targets.every((t) => t !== active && active.contains(t))) {
+    focusAndReveal(targets[0], false, smooth);
+    return;
+  }
 
   const from = center(active);
   const ar = active.getBoundingClientRect();
