@@ -6,13 +6,14 @@
 import {
   forwardRef,
   useCallback,
+  useEffect,
   useRef,
   type CSSProperties,
   type ReactNode,
   type Ref,
 } from "react";
 import { pushModal, type ModalHandle } from "./overlays";
-import { registerFocusable } from "./gamepad";
+import { focusFirstIn, registerFocusable } from "./gamepad";
 import { GamepadButtonId } from "./gamepad-buttons";
 
 export { Navigation, Router } from "./router";
@@ -326,8 +327,20 @@ export function ModalRoot({
   [key: string]: any;
 }) {
   const dismiss = onCancel ?? onEscKeypress ?? closeModal;
+  const rootRef = useRef<HTMLDivElement>(null);
+  // Seed controller focus into the modal on mount, the way Steam's ModalRoot
+  // hands gamepad focus to the modal on the Deck. Without it the pad's origin
+  // stays on the background control that opened the modal and the modal can't be
+  // driven. Deferred a frame so children (and any inner Focusable) have mounted.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if (rootRef.current) focusFirstIn(rootRef.current);
+    }, 60);
+    return () => clearTimeout(t);
+  }, []);
   return (
     <div
+      ref={rootRef}
       className="shim-modal"
       role="dialog"
       onKeyDown={(e) => {
@@ -412,11 +425,25 @@ export function MenuItem({
   );
 }
 
-export function showContextMenu(element: any, _parent?: any): ModalHandle {
-  return pushModal((handle) => (
-    <div className="shim-context-menu" onClick={handle.Close}>
+function ContextMenuOverlay({ element, onClose }: { element: ReactNode; onClose: () => void }) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  // Seed controller focus into the menu on mount (see ModalRoot's effect).
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if (rootRef.current) focusFirstIn(rootRef.current);
+    }, 60);
+    return () => clearTimeout(t);
+  }, []);
+  return (
+    <div ref={rootRef} className="shim-context-menu" onClick={onClose}>
       {element}
     </div>
+  );
+}
+
+export function showContextMenu(element: any, _parent?: any): ModalHandle {
+  return pushModal((handle) => (
+    <ContextMenuOverlay element={element} onClose={handle.Close} />
   ));
 }
 

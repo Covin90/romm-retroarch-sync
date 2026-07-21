@@ -110,6 +110,36 @@ function focusRoot(): ParentNode {
   return overlays.length ? overlays[overlays.length - 1] : document;
 }
 
+// Seed controller focus into an overlay's first target. On the Deck, ModalRoot
+// hands gamepad focus to the modal it opens; the desktop shim has no Steam nav
+// controller, so without this the pad's origin (document.activeElement) stays on
+// the background control that opened the overlay — directional moves then compute
+// from OUTSIDE the overlay and A-button routing walks the wrong subtree, leaving
+// settings menus and start modals uncontrollable. Exported so ModalRoot/
+// showContextMenu can seed on mount for an immediate highlight; move()/button()
+// call the guard below as a net in case focus later escapes the overlay.
+export function focusFirstIn(root: ParentNode): boolean {
+  const all = (Array.from(root.querySelectorAll(FOCUS_SELECTOR)) as HTMLElement[])
+    .filter(isVisible)
+    // Don't land on the modal's ✕ close button — start on real content.
+    .filter((el) => !el.classList.contains("shim-modal-close"));
+  const inner = all.filter((el) => !all.some((o) => o !== el && el.contains(o)));
+  const first = dedupe(inner.map(fieldFootprint))[0];
+  if (!first) return false;
+  focusAndReveal(first, false, false);
+  return true;
+}
+
+// If an overlay is open but focus escaped it, pull focus to the overlay's first
+// target so both directional nav and button routing operate inside the overlay.
+function ensureFocusInOverlay(): boolean {
+  const root = focusRoot();
+  if (root === document) return false;
+  const active = document.activeElement as HTMLElement | null;
+  if (active && (root as HTMLElement).contains(active)) return false;
+  return focusFirstIn(root);
+}
+
 function focusTargets(): HTMLElement[] {
   const root = focusRoot();
   const all = (Array.from(root.querySelectorAll(FOCUS_SELECTOR)) as HTMLElement[])
@@ -189,6 +219,12 @@ function center(el: HTMLElement) {
 function move(dir: "up" | "down" | "left" | "right", smooth = true) {
   const targets = focusTargets();
   if (!targets.length) return;
+
+  // An overlay is open but focus never entered it (nothing seeded it, or focus
+  // drifted back out): land on its first target rather than navigating from a
+  // background control outside the overlay. The press that enters the overlay
+  // just seeds the highlight, matching move()'s no-origin behaviour below.
+  if (ensureFocusInOverlay()) return;
 
   // Seed at the first target only when there's no usable origin at all. An
   // element can be focused yet absent from `targets`: focusTargets() collapses
@@ -396,7 +432,7 @@ export function startGamepad() {
   }
 
   function button(id: number, pressed: boolean) {
-    if (pressed) enterGamepadMode();
+    if (pressed) { enterGamepadMode(); ensureFocusInOverlay(); }
     if (pressed) {
       routeButton("down", id, false,
         id === GamepadButtonId.OK ? undefined : dedicatedFor(id));
