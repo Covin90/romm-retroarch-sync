@@ -339,12 +339,14 @@ export function ModalRoot({
   // Seed controller focus into the modal on mount, the way Steam's ModalRoot
   // hands gamepad focus to the modal on the Deck. Without it the pad's origin
   // stays on the background control that opened the modal and the modal can't be
-  // driven. Deferred a frame so children (and any inner Focusable) have mounted.
+  // driven. Two ticks: 60ms lands the highlight fast; the later tick re-asserts
+  // past a plugin panel that grabs `autoFocus` after us (which otherwise leaves
+  // focus on the enclosing wrapper, not a row). focusFirstIn leaves focus alone
+  // if it's already on a real row, so the re-assert never fights the user.
   useEffect(() => {
-    const t = setTimeout(() => {
-      if (rootRef.current) focusFirstIn(rootRef.current);
-    }, 60);
-    return () => clearTimeout(t);
+    const timers = [60, 260].map((d) =>
+      setTimeout(() => { if (rootRef.current) focusFirstIn(rootRef.current); }, d));
+    return () => timers.forEach(clearTimeout);
   }, []);
   return (
     <div
@@ -440,10 +442,9 @@ function ContextMenuOverlay({ element, onClose }: { element: ReactNode; onClose:
   const rootRef = useRef<HTMLDivElement>(null);
   // Seed controller focus into the menu on mount (see ModalRoot's effect).
   useEffect(() => {
-    const t = setTimeout(() => {
-      if (rootRef.current) focusFirstIn(rootRef.current);
-    }, 60);
-    return () => clearTimeout(t);
+    const timers = [60, 260].map((d) =>
+      setTimeout(() => { if (rootRef.current) focusFirstIn(rootRef.current); }, d));
+    return () => timers.forEach(clearTimeout);
   }, []);
   return (
     <div ref={rootRef} className="shim-context-menu" onClick={onClose}>

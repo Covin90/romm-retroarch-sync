@@ -124,10 +124,49 @@ export function focusFirstIn(root: ParentNode): boolean {
     // Don't land on the modal's ✕ close button — start on real content.
     .filter((el) => !el.classList.contains("shim-modal-close"));
   const inner = all.filter((el) => !all.some((o) => o !== el && el.contains(o)));
-  const first = dedupe(inner.map(fieldFootprint))[0];
+  const targets = dedupe(inner.map(fieldFootprint));
+  const first = targets[0];
   if (!first) return false;
+  // Leave focus alone if it's already on a real leaf target inside `root` — the
+  // caller (a page/modal with its own autoFocus, or a re-assert tick) shouldn't
+  // yank focus off a control the user is already on. Only act when focus sits on
+  // nothing, the body, or a WRAPPER that merely encloses the targets (e.g. a
+  // modal panel that grabbed autoFocus), which is the state that needs seeding.
+  const active = document.activeElement as HTMLElement | null;
+  if (active && active !== document.body && targets.includes(fieldFootprint(active))) {
+    return true;
+  }
   focusAndReveal(first, false, false);
   return true;
+}
+
+// Seed controller focus onto the current page/overlay's first target — used
+// after a navigation so a gamepad user lands on a control by default. On the
+// Deck, Steam's useAutoFocus does this; the shim honours useAutoFocus too, but
+// pages without it (e.g. Settings) would otherwise come up with nothing
+// selected. No-op in mouse mode (a mouse user needs no forced highlight), and
+// focusFirstIn() leaves an already-focused control alone, so pages that DO
+// self-focus (the library grid) are untouched.
+export function seedFocus(): void {
+  if (mouseMode) return;
+  // If focus grabbed a WRAPPER that encloses targets (a page/panel with
+  // autoFocus, e.g. SettingsPage's outer Focusable), seed within it so we land
+  // on its first control rather than the global top nav that sits above it.
+  const a = document.activeElement as HTMLElement | null;
+  const root =
+    a && a !== document.body && document.contains(a) && a.querySelector(FOCUS_SELECTOR)
+      ? a
+      : focusRoot();
+  focusFirstIn(root);
+}
+
+// Whether focus currently sits on a real, visible, tabbable control (as opposed
+// to <body>, a detached node, or a non-tabbable wrapper). Used to decide when a
+// page/view swap has stranded the controller and needs a re-seed.
+function focusIsUseful(): boolean {
+  const a = document.activeElement as HTMLElement | null;
+  if (!a || a === document.body || !document.contains(a)) return false;
+  return a.matches(FOCUS_SELECTOR) && isVisible(a);
 }
 
 // If an overlay is open but focus escaped it, pull focus to the overlay's first
@@ -418,6 +457,24 @@ function enterMouseMode(e?: Event) {
 
 export function startGamepad() {
   window.addEventListener("mousemove", enterMouseMode, true);
+
+  // Re-seed focus when a page/view swap strands the controller. index.tsx swaps
+  // the in-library views (Settings/Stats/Cores/Downloads) by toggling `display`
+  // rather than navigating, which blurs the focused grid tile to <body>; those
+  // views set no focus of their own (unlike the grid's useAutoFocus), so the pad
+  // is left with nothing selected. Watch the tree and, once mutations settle,
+  // seed the current page's first target — but ONLY when focus has actually
+  // fallen to <body> in gamepad mode, so normal navigation (focus on a live
+  // control) and mouse use are never disturbed.
+  let reseedTimer: any = null;
+  const observer = new MutationObserver(() => {
+    if (mouseMode || focusIsUseful()) return;
+    clearTimeout(reseedTimer);
+    reseedTimer = setTimeout(() => {
+      if (!mouseMode && !focusIsUseful()) seedFocus();
+    }, 120);
+  });
+  if (document.body) observer.observe(document.body, { childList: true, subtree: true });
 
   let curDir: DirName | null = null;
   let delayTimer: any = null;
