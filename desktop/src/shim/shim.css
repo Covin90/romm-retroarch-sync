@@ -33,6 +33,51 @@ body {
   position: relative;
 }
 
+/* ── Setup wizard: no virtual-keyboard make-room ───────────────────────────
+ *
+ * On the Steam Deck, focusing a wizard field inflates the scroll container's
+ * bottom padding to 52vh (index.tsx `padding: kbRoom ? '28px 24px 52vh' : …`)
+ * so the on-screen keyboard has room and the field can be lifted clear of it.
+ * The card is vertically centered with `margin: auto 0`, so that extra 52vh
+ * makes the content exceed the viewport and collapses the top auto-margin —
+ * snapping the whole card upward on every field focus.
+ *
+ * The desktop app has a real hardware keyboard and no on-screen keyboard, so
+ * none of that room is wanted. Pin the bottom padding to its resting value;
+ * a stylesheet !important beats the component's inline `padding` shorthand,
+ * keeping the layout still when a field is focused. (This is desktop-only —
+ * the plugin never loads this stylesheet.)
+ */
+.romm-ui {
+  padding-bottom: 28px !important;
+}
+
+/* ── Setup wizard: pair-code caret alignment ───────────────────────────────
+ *
+ * PairCodeField (index.tsx) overlays a transparent, LEFT-aligned <input> (its
+ * caret is the only visible part) on top of a decorative 9-glyph slot template.
+ * The template <div> inherits `text-align: center` from a wizard ancestor, but
+ * the <input> does not — form controls default to `start` — so the centered
+ * glyphs sit ~1 slot-block to the right of the left-aligned caret, and the
+ * caret never lines up with the slot it's editing.
+ *
+ * On the Deck this is masked by SteamOS quirks; on desktop it's plainly wrong.
+ * Fix without touching index.tsx: collapse the input's wrapper (the inline
+ * `width:100%` div) to the template's own width. The field is already a
+ * flex/justify-center box, so the shrunk block re-centers as a whole; the
+ * transparent input (`position:absolute; inset:0`) now spans exactly the
+ * template width, so its left-aligned text — and caret — line up glyph-for-
+ * glyph with the slots while the code stays visually centered in the field.
+ * text-align:left on the template keeps it flush with the input's origin.
+ * Desktop-only; index.tsx is untouched.
+ */
+div[class*="v2pf-"] {
+  text-align: left !important;
+}
+div[class*="v2pf-"] > div {
+  width: auto !important;
+}
+
 /* ── Focusable ─────────────────────────────────────────────────────────── */
 
 .shim-focusable:focus-visible {
