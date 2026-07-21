@@ -130,8 +130,15 @@ function move(dir: "up" | "down" | "left" | "right") {
   const targets = focusTargets();
   if (!targets.length) return;
 
+  // Seed at the first target only when there's no usable origin at all. An
+  // element can be focused yet absent from `targets`: focusTargets() collapses
+  // nested focusables to the innermost, but the plugin's fields auto-focus the
+  // OUTER wrapper (e.g. useAutoFocus on a Focusable). Teleporting to targets[0]
+  // in that case sent the first D-pad press to the top of the step instead of
+  // the neighbour below. Navigate from the focused element's own geometry
+  // instead — its rect is the field's rect, so directional nav is correct.
   const active = document.activeElement as HTMLElement | null;
-  if (!active || !targets.includes(active)) {
+  if (!active || active === document.body) {
     targets[0].focus();
     return;
   }
@@ -143,7 +150,9 @@ function move(dir: "up" | "down" | "left" | "right") {
   let best: HTMLElement | null = null;
   let bestScore = Infinity;
   for (const t of targets) {
-    if (t === active) continue;
+    // Skip the origin and any target sharing its subtree (the field's own inner
+    // input sits at the same spot — don't let it swallow the move).
+    if (t === active || t.contains(active) || active.contains(t)) continue;
     const c = center(t);
     const along = horizontal ? c.x - from.x : c.y - from.y;
     const cross = horizontal ? c.y - from.y : c.x - from.x;
