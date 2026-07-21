@@ -17,16 +17,33 @@ import sys
 import threading
 from pathlib import Path
 
-# WebKitGTK's DMABUF renderer trips a Wayland protocol error (Gdk "Error 71")
-# on many compositors, killing the window at startup. Disabling it forces the
-# stable GLES path. Must be set before WebKit2 is imported. Overridable.
-os.environ.setdefault("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
+# ── Renderer path ───────────────────────────────────────────────────────────
+#
+# We keep WebKitGTK's DMABUF renderer (GPU-accelerated compositing) — the same
+# fast path SteamOS uses on the Deck — but disable NVIDIA's explicit GPU sync,
+# which is the specific thing that breaks WebKit on the proprietary driver:
+#
+#   • Without this, native Wayland + DMABUF dies at startup with a Wayland
+#     protocol error (Gdk "Error 71") — the DMABUF/explicit-sync handshake with
+#     the NVIDIA EGL driver fails, reproducibly ~100% of the time. (XWayland
+#     dodges the crash but then renders a blank GL surface.)
+#   • With __NV_DISABLE_EXPLICIT_SYNC=1 the handshake uses implicit sync, the
+#     crash is gone, and the UI renders fully GPU-composited — verified on this
+#     box (Wayland + RTX 2080 Ti, WebKitGTK 2.52). This is the fix the wider
+#     ecosystem converged on for the same bug (Tauri/Yaak/WebKit #261874).
+#
+# This restores GPU compositing, so live backdrop-filter blur etc. are cheap
+# again — but we leave the shim.css blur removal in place as a harmless, no-cost
+# simplification. Falling back to the software rasterizer is still possible by
+# exporting WEBKIT_DISABLE_DMABUF_RENDERER=1 for machines where even this path
+# misbehaves. Must run before WebKit2 is imported.
+os.environ.setdefault("__NV_DISABLE_EXPLICIT_SYNC", "1")
 
 import gi
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("WebKit2", "4.1")
-from gi.repository import Gtk, WebKit2, GLib  # noqa: E402
+from gi.repository import Gtk, WebKit2  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "backend"))
