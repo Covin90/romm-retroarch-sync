@@ -106,8 +106,16 @@ function focusRoot(): ParentNode {
 
 function focusTargets(): HTMLElement[] {
   const root = focusRoot();
-  return (Array.from(root.querySelectorAll(FOCUS_SELECTOR)) as HTMLElement[])
+  const all = (Array.from(root.querySelectorAll(FOCUS_SELECTOR)) as HTMLElement[])
     .filter(isVisible);
+  // Collapse nested focusables to a single stop. The plugin wraps controls in a
+  // Focusable (which the shim makes tabbable), so a text field is BOTH the
+  // wrapper div and the inner <input> — two landing spots for one field, which
+  // is what made a field take two presses (and drop into edit mode on the
+  // second). Keep only the innermost interactive element: if a candidate
+  // contains another candidate, drop the outer one. Button routing still works
+  // because routeButton() walks DOM ancestors from the focused element up.
+  return all.filter((el) => !all.some((o) => o !== el && el.contains(o)));
 }
 
 function center(el: HTMLElement) {
