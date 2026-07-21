@@ -123,11 +123,7 @@ function move(dir: "up" | "down" | "left" | "right") {
   if (!targets.length) return;
 
   const active = document.activeElement as HTMLElement | null;
-  // Nothing meaningful focused → seed focus on the first target. Otherwise
-  // navigate relative to the current element even if it has scrolled out of the
-  // viewport filter (its rect is still valid) — never yank focus to the first
-  // element, which reads as a "phantom" jump.
-  if (!active || active === document.body || !(active instanceof HTMLElement)) {
+  if (!active || !targets.includes(active)) {
     targets[0].focus();
     return;
   }
@@ -147,7 +143,7 @@ function move(dir: "up" | "down" | "left" | "right") {
     const score = Math.abs(along) + Math.abs(cross) * 2;
     if (score < bestScore) { bestScore = score; best = t; }
   }
-  if (best) best.focus(); // no candidate in this direction → stay put
+  if (best) best.focus();
 }
 
 // ── Injection API (driven by the native libmanette bridge) ───────────────────
