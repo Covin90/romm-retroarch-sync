@@ -287,16 +287,3 @@ body {
   font: inherit;
   padding: 8px 14px;
 }
-
-/* ── PairCodeField caret ───────────────────────────────────────────────────
- * index.tsx's masked pair-code field overlays a transparent, left-aligned
- * <input> on a centered 8-slot template. On the Deck the container is
- * content-width so the caret lands on the active slot; on desktop the wider
- * container puts the real caret far from the visible slots ("misplaced bar").
- * No CSS alignment tracks a fixed-slot template as the input grows, and the
- * template already shows progress (filled vs muted slots), so suppress the
- * stray caret. Specificity (html body … input) beats the component's inline
- * `.uid input { caret-color … !important }`. */
-html body [class*="v2pf-"] input {
-  caret-color: transparent !important;
-}
