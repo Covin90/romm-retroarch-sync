@@ -50,6 +50,7 @@ class GamepadBridge:
         self._sy = 0.0
         self._trig = {_TRIGGER_LEFT: False, _TRIGGER_RIGHT: False}
         self._dir = None
+        self._wired = set()  # device ids already connected (avoid double events)
 
         self._monitor = Manette.Monitor.new()
         try:
@@ -72,6 +73,9 @@ class GamepadBridge:
         self._add(device)
 
     def _add(self, dev):
+        if id(dev) in self._wired:
+            return
+        self._wired.add(id(dev))
         for sig, cb in (
             ("button-press-event", self._press),
             ("button-release-event", self._release),
@@ -137,9 +141,8 @@ class GamepadBridge:
             if pressed != self._trig[gid]:
                 self._trig[gid] = pressed
                 self._button(gid, pressed)
-        elif idx == STICK_X:
-            self._sx = val
-            self._emit_dir()
-        elif idx == STICK_Y:
-            self._sy = val
-            self._emit_dir()
+        # Left-stick navigation is intentionally NOT wired: the stick axis
+        # indices aren't confirmed on this pad, and an axis that rests off-centre
+        # would emit a held direction on its own ("phantom" navigation). The
+        # d-pad (hat) covers directional input. Revisit once stick axes are
+        # verified.
