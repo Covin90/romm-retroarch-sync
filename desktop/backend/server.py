@@ -137,7 +137,33 @@ def shim_list_dir(path: str, include_files: bool = False) -> dict:
     return {"path": str(p), "parent": parent, "entries": entries}
 
 
-LOCAL_RPC = {"shim_list_dir": shim_list_dir}
+ASSETS_DIR = (PLUGIN_DIR / "assets").resolve()
+
+
+def get_image(path: str = ""):
+    """Serve bundled /assets/* images locally, delegate the rest to the engine.
+
+    The plugin's get_image fetches every path over the authenticated RomM
+    session and returns nothing when there's no connection (main.py: `if not
+    self._romm_client.authenticated: return`). On the Deck the plugin is always
+    connected, so V2Bg's default background art (`/assets/auth_background.svg`)
+    loads. On desktop — and especially in the setup wizard, which runs BEFORE
+    any connection exists — that fetch fails and the wizard falls back to a flat
+    colour. Those /assets/* files are shipped in the plugin bundle, so serve
+    them straight off disk (no connection needed); anything else falls through
+    to the engine's get_image exactly as before.
+    """
+    if path.startswith("/assets/"):
+        f = (ASSETS_DIR / path[len("/assets/"):]).resolve()
+        if ASSETS_DIR in f.parents and f.is_file():
+            import base64
+            mime = mimetypes.guess_type(str(f))[0] or "application/octet-stream"
+            b64 = base64.b64encode(f.read_bytes()).decode()
+            return {"success": True, "data_uri": f"data:{mime};base64,{b64}"}
+    return ENGINE.call("get_image", [path])
+
+
+LOCAL_RPC = {"shim_list_dir": shim_list_dir, "get_image": get_image}
 
 
 # ── HTTP ────────────────────────────────────────────────────────────────────
