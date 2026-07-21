@@ -348,6 +348,23 @@ export function ModalRoot({
       setTimeout(() => { if (rootRef.current) focusFirstIn(rootRef.current); }, d));
     return () => timers.forEach(clearTimeout);
   }, []);
+  // Register the modal root itself as a Focusable carrying onCancelButton, so the
+  // controller's B button dismisses the modal. On the Deck, ModalRoot's onCancel/
+  // onEscKeypress are wired to Steam's native B handling; the shim has no such
+  // wiring, and a bHideCloseIcon modal (e.g. the core picker) then has no ✕ and
+  // no B route either — trapping the user. Registering here means routeButton()
+  // finds this handler while walking up from any focused row inside the modal.
+  const dismissRef = useRef(dismiss);
+  dismissRef.current = dismiss;
+  useEffect(() => {
+    if (!rootRef.current) return;
+    return registerFocusable(rootRef.current, {
+      onCancelButton: (e: any) => {
+        e?.stopPropagation?.();
+        dismissRef.current?.();
+      },
+    });
+  }, []);
   return (
     <div
       ref={rootRef}
@@ -446,6 +463,13 @@ function ContextMenuOverlay({ element, onClose }: { element: ReactNode; onClose:
       setTimeout(() => { if (rootRef.current) focusFirstIn(rootRef.current); }, d));
     return () => timers.forEach(clearTimeout);
   }, []);
+  // B dismisses the menu (see ModalRoot's registration).
+  useEffect(() => {
+    if (!rootRef.current) return;
+    return registerFocusable(rootRef.current, {
+      onCancelButton: (e: any) => { e?.stopPropagation?.(); onClose(); },
+    });
+  }, [onClose]);
   return (
     <div ref={rootRef} className="shim-context-menu" onClick={onClose}>
       {element}

@@ -176,10 +176,39 @@ div[class*="v2pf-"] > div {
  * Net: the focused cover is simply AT scale(1.04) (still visibly grown), with no
  * animation and no promoted layer. Scroll geometry was already proven clean (no
  * scrollY shift, no scrollLeft reversal). Desktop-only; index.tsx untouched.
+ *
+ * Every V2Focus.tile() target must be listed here, not just game covers: any tile
+ * whose focused state animates `transform: scale(1.04)` re-layerizes each frame
+ * and shimmers the same way. Platform tiles (.romm-ptile-v) do it MOST — they're
+ * bigger and the Platforms row scrolls farther per step — plus the generic
+ * .romm-tile. Keep this list in sync with index.tsx's V2Focus.tile() callers.
  */
 .romm-gt-cover,
-.romm-ct-cover {
+.romm-ct-cover,
+.romm-ptile-v,
+.romm-tile {
   transition-duration: 0s !important;
+}
+
+/* ── Card-row cards: own backing layer, so the scroller can't seam them ──────
+ *
+ * The horizontal track (CardRow) is an overflow scroller, so WebKit backs it
+ * with a TILED store. A card parked half-off the right edge only rasterizes its
+ * visible half into a tile; scrolled inward, the compositor stitches that cached
+ * partial tile to a freshly-rastered one, and the seam at the old clip boundary
+ * shows as a 1px vertical line inside the card — worst on the big platform cards,
+ * and only on the live GPU surface (a fresh get_snapshot re-raster never shows
+ * it). Promoting each card's WRAP to its own backing layer makes the card
+ * rasterize as one unit in its own space and merely TRANSLATE as the row scrolls,
+ * so the scroller's tile seam can't cut through it. Applied on the wrap (which
+ * carries no inline transform) not the scaled inner element, so it doesn't fight
+ * V2Focus.tile()'s scale(1.04); and because the scale transition is snapped to 0s
+ * above, there's no animated scale to upscale-shimmer a promoted layer.
+ */
+.romm-gt-wrap,
+.romm-ct-wrap,
+.romm-ptile-wrap {
+  transform: translateZ(0);
 }
 
 /* ── Focusable ─────────────────────────────────────────────────────────── */

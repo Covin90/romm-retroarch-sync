@@ -381,6 +381,10 @@ function footerPrimary(target: HTMLElement, origin: HTMLElement): HTMLElement | 
 
 const REPEAT_DELAY = 400;
 const REPEAT_INTERVAL = 110;
+// Two horizontal presses closer than this collapse to instant scroll (see
+// direction()): fast L/R taps otherwise stack interrupted smooth-scroll layers
+// and the focused cover shimmers/over-scales.
+const H_COALESCE_MS = 140;
 
 type DirName = "up" | "down" | "left" | "right";
 
@@ -438,7 +442,22 @@ function isEditable(el: HTMLElement) {
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" ||
     el.isContentEditable;
 }
+let lastPointerX = NaN;
+let lastPointerY = NaN;
 function enterMouseMode(e?: Event) {
+  // Scrolling content under a physically-stationary pointer makes WebKit
+  // synthesize a mousemove (new element slides under the cursor). After a D-pad
+  // press our smooth scrollIntoView does exactly that, so ~0.5s later a phantom
+  // mousemove would hand control back to the mouse even though the user never
+  // touched it. Real motion changes the pointer coordinates; a scroll-induced one
+  // repeats the last position — ignore those so only genuine movement re-arms the
+  // mouse. (Non-mousemove callers, e.g. an explicit switch, pass no event.)
+  const me = e as MouseEvent | undefined;
+  if (me && me.type === "mousemove") {
+    if (me.clientX === lastPointerX && me.clientY === lastPointerY) return;
+    lastPointerX = me.clientX;
+    lastPointerY = me.clientY;
+  }
   // Record what the pointer is over so a later gamepad press can resume from it.
   const t = e && (e.target as HTMLElement | null);
   hovered = t ? (t.closest(FOCUS_SELECTOR) as HTMLElement | null) : hovered;
@@ -479,6 +498,8 @@ export function startGamepad() {
   let curDir: DirName | null = null;
   let delayTimer: any = null;
   let repeatTimer: any = null;
+  // Timestamp of the last horizontal press, to coalesce fast dpad mashing.
+  let lastHMove = 0;
 
   function direction(dir: DirName | null) {
     if (dir === curDir) return;
@@ -491,7 +512,21 @@ export function startGamepad() {
       // A single press animates (smooth); held-repeat steps jump instantly.
       // Smooth-scrolling every ~110ms repeat re-targets the in-flight animation
       // and the row oscillates, making covers shake during fast movement.
-      move(dir, true);
+      //
+      // Distinct FAST taps of Left/Right are the same hazard as held-repeat:
+      // each new smooth scrollIntoView interrupts the previous one mid-flight,
+      // so the card row's composited scroll layer never settles between presses.
+      // At the ~1.8x page zoom the GPU keeps resampling that in-flight layer, and
+      // the focused cover (scale(1.04) + glow) occasionally paints oversized/soft
+      // for a frame — the intermittent "cover scales up big" shimmer. Coalesce:
+      // if a horizontal press lands within COALESCE_MS of the previous one, jump
+      // instantly (no animated layer to catch), keeping the smooth console-glide
+      // only for relaxed single presses. Vertical moves are unaffected.
+      const now = Date.now();
+      const horizontal = dir === "left" || dir === "right";
+      const smooth = !(horizontal && now - lastHMove < H_COALESCE_MS);
+      if (horizontal) lastHMove = now;
+      move(dir, smooth);
       delayTimer = setTimeout(() => {
         repeatTimer = setInterval(() => move(dir, false), REPEAT_INTERVAL);
       }, REPEAT_DELAY);
