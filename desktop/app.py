@@ -76,6 +76,21 @@ class AppWindow:
         self.webview.load_uri(url)
         self.window.add(self.webview)
 
+        # Controller input via libmanette (the W3C Gamepad API in WebKit mangles
+        # Xbox-over-BT pads). Non-fatal if libmanette or a pad is missing.
+        self._gamepad = None
+        try:
+            from gamepad_bridge import GamepadBridge
+            self._gamepad = GamepadBridge(self._inject_js)
+        except Exception as e:
+            print(f"[gamepad] controller support unavailable: {e}", flush=True)
+
+    def _inject_js(self, js):
+        try:
+            self.webview.evaluate_javascript(js, -1, None, None, None, None, None)
+        except Exception:
+            pass
+
     def show(self):
         if self._fullscreen:
             self.window.fullscreen()

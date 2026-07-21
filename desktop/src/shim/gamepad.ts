@@ -2,16 +2,17 @@
 //
 // On the Steam Deck, Steam reads the controller, moves focus between Focusable
 // elements, and dispatches button events (onButtonDown/onCancelButton/…) into
-// the focused subtree. The desktop app has none of that, so this module
-// reproduces it against the W3C Gamepad API (WebKitGTK exposes it):
+// the focused subtree. The desktop app reproduces that here.
 //
-//   • d-pad / left stick  → move DOM focus to the nearest control in that
-//     direction (spatial navigation).
-//   • A (OK)              → onButtonDown(OK) on press; activate (click) on
-//     release, so the tile tap/hold split still works.
-//   • B / X / Y / bumpers / triggers / start / select → onButtonDown(<btn>)
-//     routed up the Focusable ancestor chain, plus the dedicated
-//     onCancelButton / onSecondaryButton / onOptionsButton callbacks.
+// Input does NOT come from the W3C Gamepad API: WebKitGTK's mapping for
+// Xbox-compatible pads over Bluetooth is broken (d-pad and triggers collapse
+// onto stick axes, indistinguishable). Instead the native shell reads the
+// controller with libmanette (correct, named events) and calls the injection
+// API this module installs on `window.__rommGamepad`:
+//
+//   • direction("up"|"down"|"left"|"right"|null) → spatial focus move + repeat
+//   • button(id, pressed) → onButtonDown/onButtonUp routed up the Focusable
+//     tree; A(OK) also activates (clicks) the focused control on release.
 //
 // Focusable (ui.tsx) registers its button handlers here so we can route to the
 // focused subtree; focus *targets* are found by DOM query so native buttons and
@@ -143,100 +144,63 @@ function move(dir: "up" | "down" | "left" | "right") {
     if (score < bestScore) { bestScore = score; best = t; }
   }
   if (best) best.focus();
-  else if (!active) targets[0].focus();
 }
 
-// ── Gamepad polling ─────────────────────────────────────────────────────────
+// ── Injection API (driven by the native libmanette bridge) ───────────────────
 
-// Standard-mapping button index → our GamepadButton enum value. Directions are
-// handled as focus movement, not routed, so they map to a sentinel.
-const DIR = -1;
-const BUTTON_MAP: Record<number, number> = {
-  0: GamepadButtonId.OK,             // A / South
-  1: GamepadButtonId.CANCEL,         // B / East
-  2: GamepadButtonId.SECONDARY,      // X / West
-  3: GamepadButtonId.OPTIONS,        // Y / North
-  4: GamepadButtonId.BUMPER_LEFT,    // LB
-  5: GamepadButtonId.BUMPER_RIGHT,   // RB
-  6: GamepadButtonId.TRIGGER_LEFT,   // LT
-  7: GamepadButtonId.TRIGGER_RIGHT,  // RT
-  8: GamepadButtonId.SELECT,         // Back / View
-  9: GamepadButtonId.START,          // Start / Menu
-  12: DIR, 13: DIR, 14: DIR, 15: DIR, // d-pad
-};
-
-const DEADZONE = 0.5;
 const REPEAT_DELAY = 400;
 const REPEAT_INTERVAL = 110;
 
 type DirName = "up" | "down" | "left" | "right";
 
+function dedicatedFor(btn: number): keyof FocusHandlers | undefined {
+  if (btn === GamepadButtonId.CANCEL) return "onCancelButton";
+  if (btn === GamepadButtonId.SECONDARY) return "onSecondaryButton";
+  if (btn === GamepadButtonId.OPTIONS) return "onOptionsButton";
+  if (btn === GamepadButtonId.START) return "onMenuButton";
+  return undefined;
+}
+
+declare global {
+  interface Window {
+    __rommGamepad?: {
+      direction: (dir: DirName | null) => void;
+      button: (id: number, pressed: boolean) => void;
+    };
+  }
+}
+
 export function startGamepad() {
-  const pressed = new Set<number>();          // button indices currently down
-  let dir: DirName | null = null;             // active direction (dpad or stick)
-  let dirNextRepeat = 0;
+  let curDir: DirName | null = null;
+  let delayTimer: any = null;
+  let repeatTimer: any = null;
 
-  const dedicatedFor = (btn: number): keyof FocusHandlers | undefined => {
-    if (btn === GamepadButtonId.CANCEL) return "onCancelButton";
-    if (btn === GamepadButtonId.SECONDARY) return "onSecondaryButton";
-    if (btn === GamepadButtonId.OPTIONS) return "onOptionsButton";
-    if (btn === GamepadButtonId.START) return "onMenuButton";
-    return undefined;
-  };
-
-  function readDirection(gp: Gamepad): DirName | null {
-    const b = gp.buttons;
-    if (b[12]?.pressed) return "up";
-    if (b[13]?.pressed) return "down";
-    if (b[14]?.pressed) return "left";
-    if (b[15]?.pressed) return "right";
-    const [ax, ay] = gp.axes;
-    if (ay <= -DEADZONE) return "up";
-    if (ay >= DEADZONE) return "down";
-    if (ax <= -DEADZONE) return "left";
-    if (ax >= DEADZONE) return "right";
-    return null;
-  }
-
-  function tick() {
-    const pads = navigator.getGamepads?.() ?? [];
-    const gp = Array.from(pads).find((p) => p) as Gamepad | undefined;
-    if (gp) {
-      const now = performance.now();
-
-      // Directions: initial press + auto-repeat while held.
-      const d = readDirection(gp);
-      if (d && d !== dir) {
-        dir = d; dirNextRepeat = now + REPEAT_DELAY; move(d);
-      } else if (d && d === dir && now >= dirNextRepeat) {
-        dirNextRepeat = now + REPEAT_INTERVAL; move(d);
-      } else if (!d) {
-        dir = null;
-      }
-
-      // Buttons: edge-detected press/release.
-      gp.buttons.forEach((btn, i) => {
-        const mapped = BUTTON_MAP[i];
-        if (mapped === undefined || mapped === DIR) return;
-        if (btn.pressed && !pressed.has(i)) {
-          pressed.add(i);
-          if (mapped === GamepadButtonId.OK) {
-            routeButton("down", mapped, false);
-          } else {
-            routeButton("down", mapped, false, dedicatedFor(mapped));
-          }
-        } else if (!btn.pressed && pressed.has(i)) {
-          pressed.delete(i);
-          routeButton("up", mapped, false);
-          if (mapped === GamepadButtonId.OK) {
-            // Tap-activate on release (tile onActivate; native button click).
-            (document.activeElement as HTMLElement | null)?.click();
-          }
-        }
-      });
+  function direction(dir: DirName | null) {
+    if (dir === curDir) return;
+    curDir = dir;
+    clearTimeout(delayTimer);
+    clearInterval(repeatTimer);
+    delayTimer = repeatTimer = null;
+    if (dir) {
+      move(dir);
+      delayTimer = setTimeout(() => {
+        repeatTimer = setInterval(() => move(dir), REPEAT_INTERVAL);
+      }, REPEAT_DELAY);
     }
-    requestAnimationFrame(tick);
   }
 
-  requestAnimationFrame(tick);
+  function button(id: number, pressed: boolean) {
+    if (pressed) {
+      routeButton("down", id, false,
+        id === GamepadButtonId.OK ? undefined : dedicatedFor(id));
+    } else {
+      routeButton("up", id, false);
+      if (id === GamepadButtonId.OK) {
+        // Tap-activate on release (tile onActivate; native button click).
+        (document.activeElement as HTMLElement | null)?.click();
+      }
+    }
+  }
+
+  window.__rommGamepad = { direction, button };
 }
