@@ -1566,6 +1566,17 @@ class Plugin:
                 logging.info(f"Auto-configured RetroDECK paths: ROMs={rom_directory}, "
                              f"saves={save_directory}, BIOS={bios_directory}")
 
+            # Still no BIOS path (no custom setting, no RetroDECK): fall back to
+            # RetroArch's own system/BIOS directory. bios_manager already probed
+            # every common install layout (native, Flatpak, Steam, Snap, AppImage)
+            # at startup, so reuse that result. RetroDECK above takes priority.
+            # Just a suggestion for the wizard — not persisted; save_config writes
+            # whatever the user confirms.
+            if not bios_directory and self._retroarch \
+                    and getattr(self._retroarch, 'bios_manager', None) \
+                    and self._retroarch.bios_manager.system_dir:
+                bios_directory = str(self._retroarch.bios_manager.system_dir)
+
             import socket
             try:
                 hostname = socket.gethostname() or 'SteamOS'
