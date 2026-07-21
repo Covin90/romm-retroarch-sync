@@ -325,13 +325,33 @@ declare global {
 // NOT the programmatic .focus()/.click() this layer uses) and hide the cursor;
 // restore both the instant the real mouse moves.
 let mouseMode = true;
+// The focus target currently under the mouse pointer (updated only on real
+// pointer movement). When the controller takes over, gamepad nav seeds from this
+// so mouse and pad are complementary: hover a cover with the mouse, then a D-pad
+// press continues from THAT cover (and A activates it) instead of resuming from
+// wherever focus happened to sit before.
+let hovered: HTMLElement | null = null;
 function enterGamepadMode() {
+  // Continue from the hovered element even if we're already in gamepad mode:
+  // moving the mouse (enterMouseMode) then pressing the pad must always hand off
+  // from the pointer, and mouseMode may already be false from an earlier press.
+  // Consume the hover hand-off exactly once: seed focus from it, then clear it so
+  // subsequent presses navigate from the moved focus, not snap back to the cover
+  // the pointer last sat on. A new pointer move re-arms it.
+  if (hovered && document.contains(hovered) && isVisible(hovered)) {
+    try { hovered.focus({ preventScroll: true } as any); }
+    catch { hovered.focus(); }
+  }
+  hovered = null;
   if (!mouseMode) return;
   mouseMode = false;
   document.documentElement.style.cursor = "none";
   if (document.body) document.body.style.pointerEvents = "none";
 }
-function enterMouseMode() {
+function enterMouseMode(e?: Event) {
+  // Record what the pointer is over so a later gamepad press can resume from it.
+  const t = e && (e.target as HTMLElement | null);
+  hovered = t ? (t.closest(FOCUS_SELECTOR) as HTMLElement | null) : hovered;
   if (mouseMode) return;
   mouseMode = true;
   document.documentElement.style.cursor = "";
