@@ -15,7 +15,9 @@ runs. Only the transport differs: HTTP here, Decky IPC there.
 """
 import asyncio
 import inspect
+import io
 import json
+import logging
 import mimetypes
 import os
 import sys
@@ -138,6 +140,37 @@ def shim_list_dir(path: str, include_files: bool = False) -> dict:
 
 
 ASSETS_DIR = (PLUGIN_DIR / "assets").resolve()
+_ASSET_URI_CACHE: dict = {}
+
+
+def _rasterize_svg(data: bytes):
+    """Render an SVG to PNG bytes via librsvg + cairo.
+
+    WebKit re-rasterizes an SVG used as a CSS background on every repaint of the
+    (fullscreen, zoomed) layer — and auth_background.svg carries @keyframes and
+    masked blob paths, so on the software compositing path (DMABUF disabled for
+    Wayland) it makes the whole wizard crawl. Rasterizing once to a PNG lets
+    WebKit cache and blit a bitmap instead; the 28px backdrop blur hides any
+    loss from rasterizing at the SVG's own pixel size.
+    """
+    import cairo
+    import gi
+    gi.require_version("Rsvg", "2.0")
+    from gi.repository import Rsvg
+    h = Rsvg.Handle.new_from_data(data)
+    ok, w, ht = h.get_intrinsic_size_in_pixels()
+    if not ok or not w or not ht:
+        dim = h.get_dimensions()
+        w, ht = dim.width, dim.height
+    w, ht = int(w), int(ht)
+    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, ht)
+    ctx = cairo.Context(surf)
+    vp = Rsvg.Rectangle()
+    vp.x, vp.y, vp.width, vp.height = 0, 0, w, ht
+    h.render_document(ctx, vp)
+    buf = io.BytesIO()
+    surf.write_to_png(buf)
+    return buf.getvalue()
 
 
 def get_image(path: str = ""):
@@ -151,15 +184,27 @@ def get_image(path: str = ""):
     any connection exists — that fetch fails and the wizard falls back to a flat
     colour. Those /assets/* files are shipped in the plugin bundle, so serve
     them straight off disk (no connection needed); anything else falls through
-    to the engine's get_image exactly as before.
+    to the engine's get_image exactly as before. SVGs are rasterized to PNG so
+    WebKit can cache a bitmap rather than re-rasterizing the vector every paint.
     """
     if path.startswith("/assets/"):
         f = (ASSETS_DIR / path[len("/assets/"):]).resolve()
         if ASSETS_DIR in f.parents and f.is_file():
             import base64
-            mime = mimetypes.guess_type(str(f))[0] or "application/octet-stream"
-            b64 = base64.b64encode(f.read_bytes()).decode()
-            return {"success": True, "data_uri": f"data:{mime};base64,{b64}"}
+            key = (str(f), f.stat().st_mtime_ns)
+            uri = _ASSET_URI_CACHE.get(key)
+            if uri is None:
+                raw = f.read_bytes()
+                mime = mimetypes.guess_type(str(f))[0] or "application/octet-stream"
+                if f.suffix.lower() == ".svg":
+                    try:
+                        raw, mime = _rasterize_svg(raw), "image/png"
+                    except Exception as e:
+                        logging.warning(f"svg rasterize failed for {f.name}: {e}")
+                uri = f"data:{mime};base64,{base64.b64encode(raw).decode()}"
+                _ASSET_URI_CACHE.clear()  # only ever a handful of assets
+                _ASSET_URI_CACHE[key] = uri
+            return {"success": True, "data_uri": uri}
     return ENGINE.call("get_image", [path])
 
 

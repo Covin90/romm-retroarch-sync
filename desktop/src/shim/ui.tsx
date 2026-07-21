@@ -84,6 +84,21 @@ export const Focusable = forwardRef(function Focusable(
 
   const activate = onActivate ?? onClick;
 
+  // Disabled controls (e.g. GameActionButton with disabled) render as this
+  // Focusable WITHOUT a `disabled` prop — the callers gate their own onClick and
+  // only signal disabled visually, by dimming inline opacity. Detect that and
+  // drop the tabindex entirely (not -1: a -1 element is still script-focusable).
+  // A non-tabbable div is neither a spatial-nav target nor a `.focus()` landing
+  // spot, so index.tsx's footer focus-repair (Back's onFocused →
+  // _forceGamepadFocus → el.focus() on the primary) can't strand gamepad focus
+  // on a greyed-out, invisible button. Inline opacity only reflects what a
+  // caller set directly (CSS keyframe fades don't appear here), so this keys off
+  // the disabled convention specifically. Restored automatically when the
+  // control re-enables (opacity back to 1 → re-render).
+  const dimmed =
+    style?.opacity != null && Number(style.opacity) < 1;
+  const tabIndex = dimmed ? undefined : activate ? 0 : -1;
+
   // Register this Focusable's controller handlers so the gamepad manager can
   // route button events to it (and its ancestors). Re-registers if a handler
   // identity changes. The callback ref also forwards to any external ref.
@@ -118,11 +133,20 @@ export const Focusable = forwardRef(function Focusable(
         (noFocusRing ? " shim-no-focus-ring" : "") +
         (className ? " " + className : "")
       }
-      tabIndex={activate ? 0 : -1}
+      tabIndex={tabIndex}
       autoFocus={autoFocus}
       onClick={activate}
       onKeyDown={(e) => {
-        if (activate && (e.key === "Enter" || e.key === " ")) {
+        // Don't hijack Enter/Space when the key was pressed inside an editable
+        // control nested under this Focusable — the input needs the space to
+        // type it and Enter to submit. Without this, keydown bubbling up to a
+        // wrapping Focusable eats every space in wizard text fields.
+        const t = e.target as HTMLElement;
+        const editable =
+          t.tagName === "INPUT" ||
+          t.tagName === "TEXTAREA" ||
+          t.isContentEditable;
+        if (!editable && activate && (e.key === "Enter" || e.key === " ")) {
           e.preventDefault();
           activate(e);
         } else if ((onCancelButton ?? onCancel) && e.key === "Escape") {

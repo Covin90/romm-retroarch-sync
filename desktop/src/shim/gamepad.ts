@@ -115,7 +115,28 @@ function focusTargets(): HTMLElement[] {
   // second). Keep only the innermost interactive element: if a candidate
   // contains another candidate, drop the outer one. Button routing still works
   // because routeButton() walks DOM ancestors from the focused element up.
-  return all.filter((el) => !all.some((o) => o !== el && el.contains(o)));
+  const inner = all.filter((el) => !all.some((o) => o !== el && el.contains(o)));
+  // Represent a wizard field by its full-width `.wiz-field` wrapper rather than
+  // the inner <input>: the pair-code input is deliberately narrow-and-centered
+  // (so its caret lands on the slots), which would otherwise give spatial nav a
+  // tiny footprint that fails to line up with the off-centre footer buttons.
+  // Using the wrapper's row-wide box makes vertical moves between fields and the
+  // footer behave. Activation still works — OK clicks the wrapper Focusable,
+  // whose onActivate focuses the inner input for typing.
+  return dedupe(inner.map(fieldFootprint));
+}
+
+// The element spatial-nav should treat as `el`'s footprint: its enclosing
+// wizard field wrapper if it sits in one, else the element itself.
+function fieldFootprint(el: HTMLElement): HTMLElement {
+  return (el.closest(".wiz-field") as HTMLElement | null) ?? el;
+}
+
+function dedupe(els: HTMLElement[]): HTMLElement[] {
+  const seen = new Set<HTMLElement>();
+  const out: HTMLElement[] = [];
+  for (const el of els) if (!seen.has(el)) { seen.add(el); out.push(el); }
+  return out;
 }
 
 function center(el: HTMLElement) {
@@ -137,13 +158,18 @@ function move(dir: "up" | "down" | "left" | "right") {
   // in that case sent the first D-pad press to the top of the step instead of
   // the neighbour below. Navigate from the focused element's own geometry
   // instead — its rect is the field's rect, so directional nav is correct.
-  const active = document.activeElement as HTMLElement | null;
+  // Use the field footprint as the origin too, so a move that starts from a
+  // narrow inner input (e.g. mid-typing in the pair-code field) still navigates
+  // by the field's full row box.
+  const rawActive = document.activeElement as HTMLElement | null;
+  const active = rawActive ? fieldFootprint(rawActive) : null;
   if (!active || active === document.body) {
     targets[0].focus();
     return;
   }
 
   const from = center(active);
+  const ar = active.getBoundingClientRect();
   const horizontal = dir === "left" || dir === "right";
   const sign = dir === "down" || dir === "right" ? 1 : -1;
 
@@ -153,14 +179,67 @@ function move(dir: "up" | "down" | "left" | "right") {
     // Skip the origin and any target sharing its subtree (the field's own inner
     // input sits at the same spot — don't let it swallow the move).
     if (t === active || t.contains(active) || active.contains(t)) continue;
+    const r = t.getBoundingClientRect();
     const c = center(t);
     const along = horizontal ? c.x - from.x : c.y - from.y;
     const cross = horizontal ? c.y - from.y : c.x - from.x;
     if (Math.sign(along) !== sign || along === 0) continue; // wrong direction
-    const score = Math.abs(along) + Math.abs(cross) * 2;
+    // Strongly prefer targets whose cross-axis extent overlaps the active
+    // element's: a Left/Right move should land on something in the same row,
+    // not a control that's merely nearer diagonally (e.g. from the footer's
+    // Next, Left must reach Back — not jump up to the centered field above it).
+    // Misaligned targets are still eligible as a fallback (large penalty) so
+    // navigation never dead-ends.
+    const overlap = horizontal
+      ? Math.min(ar.bottom, r.bottom) - Math.max(ar.top, r.top)
+      : Math.min(ar.right, r.right) - Math.max(ar.left, r.left);
+    const penalty = overlap > 0 ? 0 : 1e6;
+    // Reject targets that are more to the SIDE than in the travel direction and
+    // don't overlap the cross-axis: they're beside the origin, not ahead of it.
+    // Without this, Up from the top ROM-directory field jumped to that row's
+    // Browse button — rendered a few px higher (align-items:flex-end) with
+    // nothing genuinely above — instead of doing nothing. Right still reaches
+    // Browse (it cross-overlaps the field's row, so penalty is 0).
+    if (penalty && Math.abs(along) < Math.abs(cross)) continue;
+    // Weight the travel axis above the cross axis so the NEAREST row/column
+    // wins among aligned candidates — not a control that's further along but
+    // better column-aligned. On the Folders step the footer's Next sits in the
+    // same column as the Browse buttons, so an Up from Next must reach the
+    // Device-name field just above it, not leapfrog up the Browse column.
+    const score = Math.abs(along) * 3 + Math.abs(cross) + penalty;
     if (score < bestScore) { bestScore = score; best = t; }
   }
+  // Entering the wizard footer from above: land on the primary button directly
+  // rather than on Back. index.tsx's footer auto-advances focus from Back to the
+  // primary (a Deck focus-repair path), which on desktop shows as a Back→Next
+  // flicker. Jump straight to the primary so there's no flash. Scoped to Down
+  // (you only ever enter a footer by moving down onto it) and to a footer-shaped
+  // container (a horizontal, space-between Focusable), so the top nav bar and
+  // in-footer left/right moves are untouched.
+  if (best && dir === "down") {
+    const primary = footerPrimary(best, active);
+    if (primary) best = primary;
+  }
+
   if (best) best.focus();
+}
+
+// If `target` sits inside a footer-like row (horizontal Focusable using
+// space-between) that the origin is NOT already inside, return that footer's
+// last focus target (its primary button); otherwise null.
+function footerPrimary(target: HTMLElement, origin: HTMLElement): HTMLElement | null {
+  for (let node = target.parentElement; node; node = node.parentElement) {
+    if (!node.classList.contains("shim-focusable")) continue;
+    const cs = getComputedStyle(node);
+    if (cs.display !== "flex" || cs.justifyContent !== "space-between" ||
+        cs.flexDirection.startsWith("column")) continue;
+    if (node.contains(origin)) return null; // already inside — don't hijack
+    const inside = (Array.from(node.querySelectorAll(FOCUS_SELECTOR)) as HTMLElement[])
+      .filter(isVisible);
+    const last = inside[inside.length - 1];
+    return last && last !== target ? last : null;
+  }
+  return null;
 }
 
 // ── Injection API (driven by the native libmanette bridge) ───────────────────
@@ -187,13 +266,38 @@ declare global {
   }
 }
 
+// Input-mode arbitration. On desktop the mouse pointer sits still over the
+// window, so when the controller changes pages, elements render UNDER the
+// stationary cursor and WebKit fires mouseenter — lighting up whatever the
+// pointer happens to overlap (e.g. the Device-name field) with a hover
+// highlight the gamepad never set and can't clear. While the controller is
+// driving, disable pointer hit-testing (which suppresses hover/mouseenter but
+// NOT the programmatic .focus()/.click() this layer uses) and hide the cursor;
+// restore both the instant the real mouse moves.
+let mouseMode = true;
+function enterGamepadMode() {
+  if (!mouseMode) return;
+  mouseMode = false;
+  document.documentElement.style.cursor = "none";
+  if (document.body) document.body.style.pointerEvents = "none";
+}
+function enterMouseMode() {
+  if (mouseMode) return;
+  mouseMode = true;
+  document.documentElement.style.cursor = "";
+  if (document.body) document.body.style.pointerEvents = "";
+}
+
 export function startGamepad() {
+  window.addEventListener("mousemove", enterMouseMode, true);
+
   let curDir: DirName | null = null;
   let delayTimer: any = null;
   let repeatTimer: any = null;
 
   function direction(dir: DirName | null) {
     if (dir === curDir) return;
+    if (dir) enterGamepadMode();
     curDir = dir;
     clearTimeout(delayTimer);
     clearInterval(repeatTimer);
@@ -207,6 +311,7 @@ export function startGamepad() {
   }
 
   function button(id: number, pressed: boolean) {
+    if (pressed) enterGamepadMode();
     if (pressed) {
       routeButton("down", id, false,
         id === GamepadButtonId.OK ? undefined : dedicatedFor(id));
