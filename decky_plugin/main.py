@@ -49,6 +49,7 @@ try:
         BiosTrackingManager,
         SteamShortcutManager, CoverArtManager,
         build_sync_status, is_path_validly_downloaded, detect_retrodeck,
+        _extract_archive, _archive_member_names,
     )
     SYNC_CORE_AVAILABLE = True
 except ImportError as e:
@@ -161,6 +162,28 @@ def _list_standalone_games(folder):
             continue
         games.append(f)
     return sorted(games, key=lambda x: x.name.lower())
+
+
+def _resolve_download_path(download_dir, platform_slug, file_name):
+    """Return (local_path, is_downloaded) for a ROM, recognizing extractions.
+
+    A single-file .zip/.7z download whose content needs it is unpacked into a
+    sibling folder named for the archive stem and the archive is deleted (see
+    Plugin._maybe_unzip_download). So when the literal <file_name> is gone, also
+    accept that extracted folder before declaring the game not downloaded —
+    otherwise a restart re-scans for the now-deleted archive and reports every
+    unpacked game as missing.
+    """
+    base = Path(download_dir) / platform_slug / file_name
+    if is_path_validly_downloaded(base):
+        return base, True
+    if Path(file_name).suffix.lower() in ('.zip', '.7z'):
+        stem = Path(file_name).stem
+        for cand in (Path(download_dir) / platform_slug / stem,
+                     Path(download_dir) / platform_slug / (stem + '__extracted')):
+            if is_path_validly_downloaded(cand):
+                return cand, True
+    return base, False
 
 
 def _detect_multi_disc(local_path, is_downloaded):
@@ -707,8 +730,8 @@ class Plugin:
                 for rom in raw_games:
                     platform_slug = rom.get('platform_slug', 'Unknown')
                     file_name     = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
-                    local_path    = download_dir / platform_slug / file_name
-                    is_downloaded = is_path_validly_downloaded(local_path)
+                    local_path, is_downloaded = _resolve_download_path(
+                        download_dir, platform_slug, file_name)
                     local_size    = 0
                     if is_downloaded and local_path.exists():
                         if local_path.is_dir():
@@ -1196,8 +1219,8 @@ class Plugin:
                             rom_id = rom.get('id')
                             platform_slug = rom.get('platform_slug', 'Unknown')
                             file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
-                            local_path = download_dir / platform_slug / file_name
-                            is_downloaded = is_path_validly_downloaded(local_path)
+                            local_path, is_downloaded = _resolve_download_path(
+                                download_dir, platform_slug, file_name)
                             local_size = 0
 
                             if is_downloaded and local_path.exists():
@@ -1249,8 +1272,8 @@ class Plugin:
                     for rom in raw_games:
                         platform_slug = rom.get('platform_slug', 'Unknown')
                         file_name = rom.get('fs_name') or f"{rom.get('name', 'unknown')}.rom"
-                        local_path = download_dir / platform_slug / file_name
-                        is_downloaded = is_path_validly_downloaded(local_path)
+                        local_path, is_downloaded = _resolve_download_path(
+                            download_dir, platform_slug, file_name)
                         local_size = 0
 
                         if is_downloaded and local_path.exists():
@@ -1846,6 +1869,86 @@ class Plugin:
         except Exception as e:
             logging.error(f"set_retrodeck_button_enabled error: {e}")
             return False
+
+    # Disc-image extensions whose presence in an archive means RetroArch can't
+    # boot it compressed: a .cue references sibling .bins, disc sets are
+    # multi-file, and .chd/.iso/etc. are what disc cores expect on disk. This is
+    # the real "needs extraction" signal — it's a property of the CONTENT, not
+    # the core (block_extract lives inside the core binary, not any readable
+    # metadata), so peeking the archive is both simpler and more accurate than
+    # maintaining a core/platform table.
+    _DISC_IMAGE_EXTS = ('.cue', '.bin', '.iso', '.chd', '.gdi', '.cdi',
+                        '.mdf', '.nrg', '.ccd', '.img', '.pbp')
+
+    def _archive_needs_extract(self, archive_path: Path) -> bool:
+        """True when this archive must be unpacked for RetroArch to launch it.
+
+        RetroArch's built-in zip loading only handles a SINGLE member with a
+        core-supported extension; it can't follow a .cue to its .bins or pick
+        one file out of a disc set. So we extract when the archive holds a
+        disc-image file, or more than one launchable file — and leave a lone
+        cartridge ROM (.nes/.sfc/.gb/…) compressed, which RetroArch reads
+        natively. Unreadable/empty listing → be safe and extract.
+        """
+        members = [m for m in _archive_member_names(archive_path)
+                   if m and not m.endswith('/')]
+        if not members:
+            return True
+        exts = [Path(m).suffix.lower() for m in members]
+        if any(e in self._DISC_IMAGE_EXTS for e in exts):
+            return True
+        launchable = [e for e in exts if e not in _NON_GAME_EXTS]
+        return len(launchable) > 1
+
+    def _maybe_unzip_download(self, dest: Path, rom_id: int = None) -> Path:
+        """Extract a freshly-downloaded archive when its content needs it.
+
+        A .zip/.7z whose members require extraction (disc image / multi-file —
+        see _archive_needs_extract) is unpacked into a sibling folder named for
+        the archive, the archive is deleted, and the boot target is repointed:
+        a real disc set / .m3u resolves through the folder; a lone game file is
+        returned directly. A single cartridge ROM is left compressed (RetroArch
+        loads it natively, keeping the download small). Any failure (extractor
+        missing, bad archive) leaves the original archive untouched — callers
+        keep working exactly as before. Returns the local_path to use.
+        """
+        try:
+            if not dest.is_file() or dest.suffix.lower() not in ('.zip', '.7z'):
+                return dest
+            if not self._archive_needs_extract(dest):
+                return dest
+            # Surface an "Extracting… N%" state so the UI doesn't sit at a silent
+            # 100% while a large disc archive unpacks (can take many seconds). The
+            # extractor streams a real percentage via this callback.
+            def _on_extract(pct):
+                if rom_id is not None:
+                    self._download_progress[rom_id] = {
+                        'percent': pct, 'downloaded': 0, 'total': 0, 'speed': 0,
+                        'eta': 0, 'state': 'extracting', 'message': 'Extracting…',
+                    }
+            _on_extract(0)
+            folder = dest.with_suffix('')
+            # Avoid clobbering an existing same-named folder (e.g. a prior
+            # extraction); extract into a fresh sibling if it's taken.
+            if folder.exists():
+                folder = dest.parent / (dest.stem + '__extracted')
+            if not _extract_archive(dest, folder, _on_extract):
+                logging.info(f"unzip skipped (no extractor / unsupported): {dest.name}")
+                return dest
+            try:
+                dest.unlink()
+            except Exception as e:
+                logging.warning(f"could not remove archive after extract: {e}")
+            # Always hand back the FOLDER: _resolve_launch_path/_list_local_discs
+            # turn it into the right .cue/.m3u/region file at launch, and it's the
+            # same value _resolve_download_path reconstructs on the next startup,
+            # so "is downloaded" survives a restart. (We only reach here for disc
+            # or multi-file content — see _archive_needs_extract — so the folder
+            # always resolves to something launchable.)
+            return folder
+        except Exception as e:
+            logging.warning(f"_maybe_unzip_download error (keeping archive): {e}")
+            return dest
 
     async def get_core_mappings(self):
         """For the core-mapping settings page: one row per platform in the
@@ -3490,17 +3593,20 @@ class Plugin:
                         pass
                 try:
                     ok, msg = self._romm_client.download_rom(rom_id, name, dest, _on_progress)
+                    # grout-style: unpack a single-file .zip/.7z on arrival so
+                    # disc cores get a real .cue/.m3u (no-op if disabled/plain ROM).
+                    final = self._maybe_unzip_download(dest, rom_id) if ok else dest
                     if ok and g:
                         g['is_downloaded'] = True
-                        g['local_path'] = str(dest)
-                        is_md, dc = _detect_multi_disc(str(dest), True)
+                        g['local_path'] = str(final)
+                        is_md, dc = _detect_multi_disc(str(final), True)
                         g['is_multi_disc'] = is_md
                         g['disc_count'] = dc
                     elif ok and not g:
                         # Sibling ROM downloaded — add to the in-memory index so
                         # launch_game can find it. Safe under CPython's GIL (same
                         # assumption as the g[] mutations above).
-                        is_md, dc = _detect_multi_disc(str(dest), True)
+                        is_md, dc = _detect_multi_disc(str(final), True)
                         self._available_games.append({
                             'name': name or 'Unknown',
                             'rom_id': rom_id,
@@ -3510,8 +3616,8 @@ class Plugin:
                             'is_downloaded': True,
                             'is_multi_disc': is_md,
                             'disc_count': dc,
-                            'local_path': str(dest),
-                            'local_size': dest.stat().st_size if dest.exists() else 0,
+                            'local_path': str(final),
+                            'local_size': final.stat().st_size if final.exists() else 0,
                             'cover_path': None,
                             'cover_path_large': None,
                             '_sibling_files': [],

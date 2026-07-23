@@ -13,7 +13,7 @@ import {
   type Ref,
 } from "react";
 import { pushModal, type ModalHandle } from "./overlays";
-import { focusFirstIn, registerFocusable } from "./gamepad";
+import { focusFirstIn, registerFocusable, registerActions } from "./gamepad";
 import { GamepadButtonId } from "./gamepad-buttons";
 
 export { Navigation, Router } from "./router";
@@ -77,6 +77,12 @@ export const Focusable = forwardRef(function Focusable(
     autoFocus,
     focusWithinClassName,
     actionDescriptionMap,
+    // Button-hint labels for the footer legend (Steam's bottom bar on the Deck).
+    // Destructured out so they don't leak onto the DOM as unknown attributes;
+    // registered with the gamepad layer below.
+    onOKActionDescription,
+    onSecondaryActionDescription,
+    onOptionsActionDescription,
     // Steam layout hint with no web equivalent — drop it so React doesn't warn
     // about an unknown DOM attribute.
     "flow-children": _flowChildren,
@@ -84,6 +90,20 @@ export const Focusable = forwardRef(function Focusable(
   } = props;
 
   const activate = onActivate ?? onClick;
+
+  // Live snapshot of this Focusable's button hints, read by computeLegend() when
+  // it's the focused/hovered target. Kept in a ref so re-registration isn't
+  // needed each time a label changes (e.g. "Delete" → "Confirm delete").
+  const descRef = useRef({});
+  descRef.current = {
+    ok: onOKActionDescription,
+    secondary: onSecondaryActionDescription,
+    options: onOptionsActionDescription,
+    activatable: !!(onActivate ?? onClick),
+    canCancel: !!(onCancelButton ?? onCancel),
+    select: actionDescriptionMap?.[GamepadButtonId.SELECT],
+    start: actionDescriptionMap?.[GamepadButtonId.START],
+  };
 
   // Disabled controls (e.g. GameActionButton with disabled) render as this
   // Focusable WITHOUT a `disabled` prop — the callers gate their own onClick and
@@ -104,10 +124,13 @@ export const Focusable = forwardRef(function Focusable(
   // route button events to it (and its ancestors). Re-registers if a handler
   // identity changes. The callback ref also forwards to any external ref.
   const cleanup = useRef<(() => void) | null>(null);
+  const cleanupActions = useRef<(() => void) | null>(null);
   const setRef = useCallback(
     (el: HTMLDivElement | null) => {
       cleanup.current?.();
       cleanup.current = null;
+      cleanupActions.current?.();
+      cleanupActions.current = null;
       if (el) {
         cleanup.current = registerFocusable(el, {
           onButtonDown,
@@ -117,6 +140,7 @@ export const Focusable = forwardRef(function Focusable(
           onOptionsButton,
           onMenuButton,
         });
+        cleanupActions.current = registerActions(el, () => descRef.current);
       }
       if (typeof ref === "function") ref(el);
       else if (ref) (ref as any).current = el;

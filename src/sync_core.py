@@ -1351,42 +1351,134 @@ def _archive_member_names(archive_path):
     return []
 
 
-def _extract_archive(archive_path, dest_dir):
+def _extract_archive(archive_path, dest_dir, on_progress=None):
     """Extract a .zip or .7z archive to dest_dir. Returns True on success.
 
-    .7z uses py7zr if installed, else the system 7z/7za/7zr CLI. Returns False
-    (without raising) when .7z support is unavailable, so the caller can leave the
-    archive in place (RetroArch reads .zip/.7z natively for most cores anyway).
+    .7z uses the system 7z/7za/7zr CLI (streaming its own percentage) when
+    available, else py7zr if installed. Returns False (without raising) when .7z
+    support is unavailable, so the caller can leave the archive in place
+    (RetroArch reads .zip/.7z natively for most cores anyway).
+
+    on_progress(percent) — when given, called with an integer 0..100 as the
+    extraction advances (best-effort: 7z reports real percent via -bsp1; the zip
+    path reports per-file progress). Lets the UI show a live "Extracting… N%"
+    instead of a silent pause after the download hits 100%.
     """
     archive_path = Path(archive_path)
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
     ext = archive_path.suffix.lower()
+
+    def _emit(pct):
+        if on_progress:
+            try:
+                on_progress(max(0, min(100, int(pct))))
+            except Exception:
+                pass
+
     try:
         if ext == '.zip':
             import zipfile
             with zipfile.ZipFile(archive_path, 'r') as zf:
-                zf.extractall(dest_dir)
+                members = zf.infolist()
+                total = sum(m.file_size for m in members) or 1
+                done = 0
+                _emit(0)
+                for m in members:
+                    zf.extract(m, dest_dir)
+                    done += m.file_size
+                    _emit(done * 100 / total)
+            _emit(100)
             return True
         if ext == '.7z':
+            # Prefer the CLI: it runs in a child process (releasing the GIL, so
+            # the async engine keeps serving progress polls) and streams a real
+            # percentage via -bsp1. py7zr is the in-process fallback.
+            exe = _find_7z()
+            if exe:
+                return _extract_7z_cli(exe, archive_path, dest_dir, _emit)
             try:
                 import py7zr
+                _emit(0)
                 with py7zr.SevenZipFile(archive_path, 'r') as z:
                     z.extractall(path=dest_dir)
+                _emit(100)
                 return True
             except ImportError:
-                import subprocess
-                exe = _find_7z()
-                if exe:
-                    subprocess.run([exe, 'x', '-y', f'-o{dest_dir}', str(archive_path)],
-                                   check=True, capture_output=True)
-                    return True
-                logging.warning("No .7z extractor available (install py7zr or p7zip); "
+                logging.warning("No .7z extractor available (install p7zip or py7zr); "
                                 "leaving archive as-is for RetroArch to load")
                 return False
     except Exception as e:
         logging.warning(f"Failed to extract {archive_path}: {e}")
     return False
+
+
+def _sevenzip_total_size(exe, archive_path):
+    """Total uncompressed byte size of a .7z's members, via `7z l -slt`.
+
+    Returns 0 when it can't be determined (caller then skips % and just shows a
+    spinner). 7z overwrites progress on a tty, not a pipe, so we can't read a
+    live percentage from it — instead we size the payload up front and watch the
+    output directory grow (see _extract_7z_cli).
+    """
+    import subprocess, re
+    try:
+        out = subprocess.run([exe, 'l', '-slt', str(archive_path)],
+                             capture_output=True, text=True, timeout=60).stdout
+    except Exception:
+        return 0
+    total = 0
+    for m in re.finditer(r'^Size = (\d+)', out, re.MULTILINE):
+        total += int(m.group(1))
+    return total
+
+
+def _dir_size(path):
+    """Sum of regular-file sizes under path (best-effort, ignores races)."""
+    total = 0
+    try:
+        for root, _dirs, files in os.walk(path):
+            for f in files:
+                try:
+                    total += os.path.getsize(os.path.join(root, f))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
+
+def _extract_7z_cli(exe, archive_path, dest_dir, emit):
+    """Run `7z x` in a child process and report progress by output-dir growth.
+
+    The child releases the GIL (so the async engine keeps serving progress
+    polls); a watcher thread samples the destination size against the archive's
+    known uncompressed total and emits a 0..99 percentage, snapping to 100 when
+    the process exits cleanly.
+    """
+    import subprocess, threading, time
+    dest_dir = Path(dest_dir)
+    total = _sevenzip_total_size(exe, archive_path)
+    emit(0)
+    cmd = [exe, 'x', '-y', '-bso0', '-bse0', f'-o{dest_dir}', str(archive_path)]
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    stop = threading.Event()
+    def _watch():
+        while not stop.wait(0.2):
+            if total > 0:
+                # Cap at 99 so the jump to 100 marks real completion.
+                emit(min(99, _dir_size(dest_dir) * 100 // total))
+    if total > 0:
+        threading.Thread(target=_watch, daemon=True, name='7z-progress').start()
+
+    proc.wait()
+    stop.set()
+    if proc.returncode != 0:
+        logging.warning(f"7z extraction exited {proc.returncode} for {archive_path}")
+        return False
+    emit(100)
+    return True
 
 
 class RomMClient:
@@ -5245,6 +5337,17 @@ class RetroArchInterface:
             cmd = ['snap', 'run', 'retroarch', '-L', core_path, str(rom_path)]
         else:
             cmd = [self.retroarch_executable, '-L', core_path, str(rom_path)]
+        # Force fullscreen on desktop: the user's retroarch.cfg may default to a
+        # window, which on the desktop app leaves the game floating over (and
+        # sharing input focus with) our shell. Under gamescope (Deck Gaming
+        # Mode) the compositor already fullscreens the window and the Steam
+        # session-host path shares this argv, so leave that case untouched.
+        try:
+            gamescope = self._gamescope_running()
+        except Exception:
+            gamescope = False
+        if not gamescope:
+            cmd.append('-f')
         return cmd, None
 
     @staticmethod

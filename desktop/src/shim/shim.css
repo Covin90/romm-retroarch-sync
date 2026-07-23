@@ -383,27 +383,137 @@ div[class*="v2pf-"] > div {
   pointer-events: none;
 }
 
+/* User-selectable corner (Settings ▸ Notifications, desktop only). Bottom
+   corners stack upward (column-reverse) so the newest toast is nearest the
+   screen edge, matching the top corners' feel. */
+.shim-toast-host[data-pos="top-left"] { top: 16px; left: 16px; right: auto; bottom: auto; }
+.shim-toast-host[data-pos="top-right"] { top: 16px; right: 16px; left: auto; bottom: auto; }
+.shim-toast-host[data-pos="bottom-left"] {
+  bottom: 16px; left: 16px; top: auto; right: auto; flex-direction: column-reverse;
+}
+.shim-toast-host[data-pos="bottom-right"] {
+  bottom: 16px; right: 16px; top: auto; left: auto; flex-direction: column-reverse;
+}
+
+/* RomM v2 visual language: dark glass surface, brand-purple accent rail,
+   soft elevation and rounded card corners (mirrors the tokens in index.tsx). */
 .shim-toast {
-  background: var(--shim-surface);
-  border-left: 3px solid var(--shim-accent);
-  border-radius: 4px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  position: relative;
+  background: rgba(18, 18, 30, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
   max-width: 360px;
-  padding: 10px 14px;
+  padding: 12px 14px 12px 16px;
+  overflow: hidden;
   pointer-events: auto;
+  font-family: "Motiva Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
+  animation: shimToastIn 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Brand accent rail down the leading edge. */
+.shim-toast::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 3px;
+  background: #8b74e8;
 }
 
 .shim-toast-critical {
-  border-left-color: #d94126;
+  border-color: rgba(255, 80, 80, 0.35);
+}
+.shim-toast-critical::before {
+  background: #ff5050;
 }
 
 .shim-toast-title {
   font-weight: 700;
+  font-size: 13.5px;
+  line-height: 1.3;
+  color: #ffffff;
+  letter-spacing: 0.01em;
 }
 
 .shim-toast-body {
-  color: var(--shim-muted);
-  font-size: 13px;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12.5px;
+  line-height: 1.4;
+  margin-top: 2px;
+}
+
+@keyframes shimToastIn {
+  from { opacity: 0; transform: translateY(-6px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* ── Footer button-hint legend (Deck bottom-bar equivalent) ────────────────── */
+
+.shim-legend {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 40px;
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 0 18px;
+  background: rgba(10, 10, 18, 0.86);
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  font-family: "Motiva Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
+  pointer-events: none;
+  user-select: none;
+}
+
+.shim-legend-group {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.shim-legend-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.shim-legend-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255, 255, 255, 0.35);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.shim-legend-glyph-sys {
+  color: #cfd2dc;
+  font-weight: 400;
+}
+
+.shim-legend-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.68);
+  letter-spacing: 0.01em;
 }
 
 /* ── File picker ───────────────────────────────────────────────────────── */

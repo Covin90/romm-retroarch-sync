@@ -38,6 +38,111 @@ export function registerFocusable(el: HTMLElement, handlers: FocusHandlers) {
   return () => registry.delete(el);
 }
 
+// ── Action-description legend (the desktop equivalent of Steam's bottom
+//    button-hint bar) ────────────────────────────────────────────────────────
+//
+// Every Focusable in index.tsx already declares what its buttons do via
+// on*ActionDescription / actionDescriptionMap props. ui.tsx registers those here
+// (as a live getter, so changing labels don't churn the map); the footer bar
+// walks from the current target up the ancestor chain and shows, per button, the
+// nearest ancestor that defines a label — exactly how Steam builds the Deck
+// legend.
+
+export type ActionDescs = {
+  ok?: string;         // A / cross
+  secondary?: string;  // X / square
+  options?: string;    // Y / triangle
+  activatable?: boolean; // has onActivate/onClick → A defaults to "Select"
+  canCancel?: boolean;   // has onCancelButton → B shows "Back"
+  select?: string;     // View / Select cluster
+  start?: string;      // Menu / Start cluster
+};
+
+export type Legend = {
+  ok?: string; cancel?: string; secondary?: string;
+  options?: string; select?: string; start?: string;
+};
+
+const actionRegistry = new Map<HTMLElement, () => ActionDescs>();
+
+export function registerActions(el: HTMLElement, get: () => ActionDescs) {
+  actionRegistry.set(el, get);
+  return () => actionRegistry.delete(el);
+}
+
+// Aggregate the legend for a target by walking up its Focusable ancestors,
+// taking the first ancestor that supplies each slot.
+export function computeLegend(target: HTMLElement | null): Legend {
+  const out: Legend = {};
+  let anyActivatable = false;
+  let node: HTMLElement | null = target;
+  while (node) {
+    const get = actionRegistry.get(node);
+    if (get) {
+      const d = get();
+      if (out.ok == null && d.ok) out.ok = d.ok;
+      if (out.secondary == null && d.secondary) out.secondary = d.secondary;
+      if (out.options == null && d.options) out.options = d.options;
+      if (out.cancel == null && d.canCancel) out.cancel = "Back";
+      if (out.select == null && d.select) out.select = d.select;
+      if (out.start == null && d.start) out.start = d.start;
+      if (d.activatable) anyActivatable = true;
+    }
+    node = node.parentElement;
+  }
+  if (out.ok == null && anyActivatable) out.ok = "Select";
+  return out;
+}
+
+// Subscribers (the footer) are pinged whenever the current target may have
+// changed — gamepad focus moves, mouse hover moves, focus lost.
+const legendSubs = new Set<() => void>();
+export function onLegendChange(cb: () => void) {
+  legendSubs.add(cb);
+  return () => legendSubs.delete(cb);
+}
+function notifyLegend() { legendSubs.forEach((f) => f()); }
+
+// The element the legend should describe: whatever the pointer is over in mouse
+// mode, else the gamepad-focused element.
+export function currentLegendTarget(): HTMLElement | null {
+  if (mouseMode) {
+    return hovered && document.contains(hovered) ? hovered : null;
+  }
+  const a = document.activeElement as HTMLElement | null;
+  return a && a !== document.body ? a : null;
+}
+
+// ── Controller family (drives which glyph set the footer draws) ──────────────
+export type ControllerFamily = "xbox" | "ps" | "switch" | "neutral";
+let _family: ControllerFamily = "neutral";
+const familySubs = new Set<() => void>();
+export function onControllerFamilyChange(cb: () => void) {
+  familySubs.add(cb);
+  return () => familySubs.delete(cb);
+}
+export function controllerFamily(): ControllerFamily { return _family; }
+
+function detectFamily(id: string): ControllerFamily {
+  const s = id.toLowerCase();
+  // Vendor IDs are the most reliable signal; fall back to product-name keywords.
+  if (/vendor:\s*054c|sony|dualshock|dualsense|playstation|\bps[345]\b/.test(s)) return "ps";
+  if (/vendor:\s*045e|xbox|microsoft|xinput/.test(s)) return "xbox";
+  if (/vendor:\s*057e|nintendo|switch|joy-con|joycon|pro controller/.test(s)) return "switch";
+  return "neutral";
+}
+
+function refreshFamily() {
+  let fam: ControllerFamily = "neutral";
+  try {
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    for (const p of pads) {
+      if (p && p.connected) { fam = detectFamily(p.id || ""); break; }
+    }
+  } catch { /* no gamepad API */ }
+  if (fam !== _family) { _family = fam; familySubs.forEach((f) => f()); }
+}
+
 function synthEvent(button: number, isRepeat: boolean) {
   let stopped = false;
   return {
@@ -255,7 +360,17 @@ function center(el: HTMLElement) {
 // Pick the nearest focus target in `dir` from the currently focused element.
 // Score favours alignment on the travel axis (cross-axis offset weighted
 // heavier than same-axis distance), the usual spatial-nav heuristic.
+// The content element focus left when an Up entered the top bar — restored when
+// Down comes back out, so you return to the same cover.
+let _preNavFocus: HTMLElement | null = null;
+
 function move(dir: "up" | "down" | "left" | "right", smooth = true) {
+  // Publish the travel axis so the plugin's letter-glimpse (index.tsx's
+  // _tileFocusScrub, fired from the resulting onFocus) can tell a vertical grid
+  // fly-through from ordinary horizontal row browsing — only the former should
+  // raise the Big-Picture letter overlay.
+  (window as any).__rommNavH = dir === "left" || dir === "right";
+
   const targets = focusTargets();
   if (!targets.length) return;
 
@@ -289,6 +404,17 @@ function move(dir: "up" | "down" | "left" | "right", smooth = true) {
   // instead, the same as the no-origin seed above.
   if (targets.every((t) => t !== active && active.contains(t))) {
     focusAndReveal(targets[0], false, smooth);
+    return;
+  }
+
+  // Coming back DOWN out of the top bar returns to the cover you came UP from —
+  // Steam remembers the bar's "preferred child" (the origin), and we mirror it so
+  // Down doesn't dump you on the grid's first tile. Only when that cover is still
+  // in the DOM and visible (same page); otherwise fall through to normal nav
+  // (e.g. you switched tabs, so the old cover is gone/hidden).
+  if (dir === "down" && inStickyTopBar(active) && _preNavFocus &&
+      document.contains(_preNavFocus) && isVisible(_preNavFocus)) {
+    focusAndReveal(_preNavFocus, false, smooth);
     return;
   }
 
@@ -341,7 +467,13 @@ function move(dir: "up" | "down" | "left" | "right", smooth = true) {
     // better column-aligned. On the Folders step the footer's Next sits in the
     // same column as the Browse buttons, so an Up from Next must reach the
     // Device-name field just above it, not leapfrog up the Browse column.
-    const score = Math.abs(along) * 3 + Math.abs(cross) + penalty;
+    // Deprioritize the sticky top bar on an Up move so ANY real content row
+    // above wins first — an Up must never leapfrog intervening rows straight
+    // into the bar just because a tab is better column-aligned. Larger than the
+    // misalignment penalty (1e6) so even an off-column row still beats the bar;
+    // the bar is chosen only when nothing else sits above.
+    const barPenalty = dir === "up" && inStickyTopBar(t) ? 1e9 : 0;
+    const score = Math.abs(along) * 3 + Math.abs(cross) + penalty + barPenalty;
     if (score < bestScore) { bestScore = score; best = t; }
   }
   // Entering the wizard footer from above: land on the primary button directly
@@ -356,7 +488,98 @@ function move(dir: "up" | "down" | "left" | "right", smooth = true) {
     if (primary) best = primary;
   }
 
+  // Entering the sticky top bar on an Up move, matched to the Deck in two steps.
+  // First "reachable only at scroll top": the bar is pinned above the first
+  // content row, so an Up from that row would reach it "before" the page has
+  // scrolled up to show its top — so an Up that would enter the bar first scrolls
+  // the page fully to the top; only once already there does a further Up hand
+  // focus to the bar. Then, when focus does enter the bar, ALWAYS land inside the
+  // nav tabs pill (the column-nearest tab) rather than the side clusters
+  // (RetroDECK button / user pill) — on the Deck an Up into the nav always lands
+  // on a nav tab. Skipped when the origin is itself in the bar (Left/Right along
+  // the bar is untouched).
+  // The trigger is: an Up move with no real content row above (best is null, or
+  // spatial nav could only reach the bar). Note `best` can be null even from the
+  // very first cover — the centered tabs sit up-and-to-the-side, so the
+  // side-target guard rejects them; handling the null case is what makes Up from
+  // the first cover work. When there IS a content row above, best is that row and
+  // this is skipped (normal nav). Skipped too when the origin is already in the
+  // bar (Left/Right along the bar is untouched).
+  if (dir === "up" && !inStickyTopBar(active) && (!best || inStickyTopBar(best))) {
+    const tab = navPillTarget(active);
+    if (tab) {
+      const sc = scrollParentOf(active);
+      if (sc && sc.scrollTop > STICKY_TOP_EPS) {
+        sc.scrollTo({ top: 0, behavior: smooth ? "smooth" : "auto" });
+        return;
+      }
+      // Remember the cover we're leaving so a later Down returns to it.
+      _preNavFocus = active;
+      focusAndReveal(tab, false, smooth);
+      return;
+    }
+  }
+
   if (best) focusAndReveal(best, horizontal, smooth);
+}
+
+// A sticky/fixed bar counts as "pinned to the top" when its box sits within this
+// many px of the viewport top (the nav bar is ~58px tall).
+const STICKY_TOP_MAX = 80;
+// Treat the page as at-top within this slack so a hair of residual scroll still
+// lets the bar take focus on the next Up.
+const STICKY_TOP_EPS = 4;
+// A top BAR is short; anything taller is a full-screen fixed layer (a modal /
+// menu uses position:fixed inset:0) and must NOT count as the top bar — else
+// every control inside a modal reads as "in the top bar" and the Up/Down nav
+// guards fire against the background.
+const STICKY_BAR_MAX_H = 160;
+
+// True when `el` sits inside a position:sticky/fixed element pinned to the TOP of
+// the page — the nav bar or a page header. These render above the first content
+// row, so an Up from that row would otherwise jump straight into them. Excludes
+// full-screen fixed overlays (modals) via the height cap.
+function inStickyTopBar(el: HTMLElement): boolean {
+  for (let node: HTMLElement | null = el; node; node = node.parentElement) {
+    const pos = getComputedStyle(node).position;
+    if (pos !== "sticky" && pos !== "fixed") continue;
+    const r = node.getBoundingClientRect();
+    if (r.top <= STICKY_TOP_MAX && r.height > 0 && r.height <= STICKY_BAR_MAX_H) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// The nav tabs pill lives inside the sticky top bar, marked `.shim-topnav` by
+// index.tsx. Return the FIRST focusable tab in the pill — an Up into the nav
+// always lands there, regardless of which tile you came up from, matching the
+// Deck. null if there's no pill.
+function navPillTarget(inBar: HTMLElement): HTMLElement | null {
+  let bar: HTMLElement | null = inBar;
+  for (; bar; bar = bar.parentElement) {
+    const pos = getComputedStyle(bar).position;
+    if (pos === "sticky" || pos === "fixed") break;
+  }
+  const pill = (bar ?? document).querySelector(".shim-topnav") as HTMLElement | null;
+  if (!pill) return null;
+  const tabs = (Array.from(pill.querySelectorAll(FOCUS_SELECTOR)) as HTMLElement[])
+    .filter(isVisible);
+  if (!tabs.length) return null;
+  // Land on the first tab that ISN'T the current page's (active) tab — matching
+  // the Deck (on Home, Up lands on Platforms). Fall back to the first tab.
+  return tabs.find((t) => !t.classList.contains("shim-navtab-active")) ?? tabs[0];
+}
+
+// Nearest vertically-scrollable ancestor of `el`, or null (the page scroll host).
+function scrollParentOf(el: HTMLElement): HTMLElement | null {
+  for (let node: HTMLElement | null = el.parentElement; node; node = node.parentElement) {
+    const oy = getComputedStyle(node).overflowY;
+    if ((oy === "auto" || oy === "scroll") && node.scrollHeight > node.clientHeight) {
+      return node;
+    }
+  }
+  return null;
 }
 
 // If `target` sits inside a footer-like row (horizontal Focusable using
@@ -414,6 +637,31 @@ declare global {
 // NOT the programmatic .focus()/.click() this layer uses) and hide the cursor;
 // restore both the instant the real mouse moves.
 let mouseMode = true;
+
+// Elements currently carrying Steam's gpfocus markers (see startGamepad). Kept as
+// a list so a focus change removes exactly what the previous one added.
+let _marked: HTMLElement[] = [];
+function clearFocusMarkers() {
+  for (const el of _marked) {
+    el.classList.remove("gpfocus");
+    el.classList.remove("gpfocuswithin");
+  }
+  _marked = [];
+}
+// Tag the focused leaf with `gpfocus` and it + every ancestor with
+// `gpfocuswithin`, matching what Steam does on the Deck so the plugin's
+// marker-based focus CSS lights up.
+function markGamepadFocus(leaf: HTMLElement | null) {
+  clearFocusMarkers();
+  if (!leaf || leaf === document.body) return;
+  leaf.classList.add("gpfocus");
+  const marked: HTMLElement[] = [];
+  for (let n: HTMLElement | null = leaf; n && n !== document.body; n = n.parentElement) {
+    n.classList.add("gpfocuswithin");
+    marked.push(n);
+  }
+  _marked = marked;
+}
 // The focus target currently under the mouse pointer (updated only on real
 // pointer movement). When the controller takes over, gamepad nav seeds from this
 // so mouse and pad are complementary: hover a cover with the mouse, then a D-pad
@@ -432,10 +680,18 @@ function enterGamepadMode() {
     catch { hovered.focus(); }
   }
   hovered = null;
-  if (!mouseMode) return;
+  if (!mouseMode) {
+    // Already in gamepad mode (e.g. a repeat press): the focusin fired while
+    // mouseMode was still true, or focus didn't change, so re-assert the marker.
+    markGamepadFocus(document.activeElement as HTMLElement);
+    return;
+  }
   mouseMode = false;
   document.documentElement.style.cursor = "none";
   if (document.body) document.body.style.pointerEvents = "none";
+  // The hovered.focus() above fired focusin while mouseMode was still true, so it
+  // wasn't marked — mark the now-focused element for the gamepad highlight.
+  markGamepadFocus(document.activeElement as HTMLElement);
 }
 function isEditable(el: HTMLElement) {
   const tag = el.tagName;
@@ -460,7 +716,10 @@ function enterMouseMode(e?: Event) {
   }
   // Record what the pointer is over so a later gamepad press can resume from it.
   const t = e && (e.target as HTMLElement | null);
+  const prevHovered = hovered;
   hovered = t ? (t.closest(FOCUS_SELECTOR) as HTMLElement | null) : hovered;
+  // Update the footer legend as the pointer moves between focusable controls.
+  if (hovered !== prevHovered) notifyLegend();
   if (mouseMode) return;
   mouseMode = true;
   document.documentElement.style.cursor = "";
@@ -472,10 +731,36 @@ function enterMouseMode(e?: Event) {
   // kick the caret out of a text box.
   const active = document.activeElement as HTMLElement | null;
   if (active && active !== document.body && !isEditable(active)) active.blur();
+  // Drop the gamepad focus markers so the pointer's own :hover highlight is the
+  // only selection shown once the mouse takes over.
+  clearFocusMarkers();
 }
 
 export function startGamepad() {
   window.addEventListener("mousemove", enterMouseMode, true);
+
+  // Mirror Steam's gpfocus markers. On the Deck, Steam tags the gamepad-focused
+  // Focusable AND its ancestors with `gpfocuswithin` (the leaf also with
+  // `gpfocus`), and the plugin's focus CSS (.romm-row.gpfocuswithin,
+  // .romm-*-wrap.gpfocuswithin, …) is built entirely on those markers. The shim
+  // uses plain DOM focus, so without this rows/covers/tiles never highlight under
+  // the controller. Only in gamepad mode: mouse hover has its own :hover rules,
+  // and a lingering marker after the pointer takes over would double-highlight.
+  window.addEventListener("focusin", (e) => {
+    notifyLegend();
+    if (mouseMode) return;
+    markGamepadFocus(e.target as HTMLElement);
+  }, true);
+  // Focus leaving to nowhere (blur → body, no new target) clears the markers; a
+  // real move fires a fresh focusin that re-marks.
+  window.addEventListener("focusout", (e) => {
+    if ((e as FocusEvent).relatedTarget == null) { clearFocusMarkers(); notifyLegend(); }
+  }, true);
+
+  // Keep the footer's glyph set in sync with the connected controller.
+  refreshFamily();
+  window.addEventListener("gamepadconnected", refreshFamily);
+  window.addEventListener("gamepaddisconnected", () => { refreshFamily(); notifyLegend(); });
 
   // Re-seed focus when a page/view swap strands the controller. index.tsx swaps
   // the in-library views (Settings/Stats/Cores/Downloads) by toggling `display`

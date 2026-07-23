@@ -17,7 +17,7 @@ import {
 } from "@decky/ui";
 import { callable, definePlugin, toaster, routerHook, openFilePicker, FileSelectionType } from "@decky/api";
 import { useState, useEffect, useLayoutEffect, useRef, useMemo, forwardRef, memo, cloneElement, type Ref, type ChangeEvent } from "react";
-import { FaSync, FaTrash, FaCog, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaTimesCircle, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight, FaCheckCircle, FaUsers, FaExternalLinkAlt, FaPuzzlePiece, FaBoxOpen, FaClone, FaRedo, FaClock, FaCheck, FaEllipsisH, FaGlobe, FaChevronDown, FaChartBar, FaSignOutAlt, FaSave, FaUser, FaExclamationTriangle, FaHistory } from "react-icons/fa";
+import { FaSync, FaTrash, FaCog, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaTimesCircle, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight, FaCheckCircle, FaUsers, FaExternalLinkAlt, FaPuzzlePiece, FaBoxOpen, FaClone, FaRedo, FaClock, FaCheck, FaEllipsisH, FaGlobe, FaChevronDown, FaChartBar, FaSave, FaUser, FaExclamationTriangle, FaHistory, FaPowerOff } from "react-icons/fa";
 import { BsGearFill } from "react-icons/bs";
 import { MdVerified } from "react-icons/md";
 
@@ -610,7 +610,7 @@ function useIsDownloading(romId: number): boolean {
 // is in flight, returning null when idle. Drives the cover download-ring and the
 // GameDetails button fill. Activates on either the local `active` flag or the
 // global registry, so progress is shared across the cover tile and details page.
-interface DlProgress { percent: number; speed: number; eta: number; downloaded: number; total: number; }
+interface DlProgress { percent: number; speed: number; eta: number; downloaded: number; total: number; state?: string; }
 function useDownloadProgress(romId: number, active: boolean): DlProgress | null {
   const globalActive = useIsDownloading(romId);
   const on = active || globalActive;
@@ -622,7 +622,7 @@ function useDownloadProgress(romId: number, active: boolean): DlProgress | null 
       try {
         const p = await getDownloadProgress(romId);
         if (!cancelled && p && typeof p.percent === 'number') {
-          setProg({ percent: p.percent, speed: p.speed || 0, eta: p.eta || 0, downloaded: p.downloaded || 0, total: p.total || 0 });
+          setProg({ percent: p.percent, speed: p.speed || 0, eta: p.eta || 0, downloaded: p.downloaded || 0, total: p.total || 0, state: p.state });
         }
       } catch { /* transient */ }
     };
@@ -686,8 +686,8 @@ const formatEta = (secs: number): string => {
 
 // Circular progress ring drawn around a centered glyph (used on the cover's
 // download button). `pct` null renders an empty track.
-function ProgressRing({ pct, size = 40, stroke = 3, glow = false, children }:
-  { pct: number | null; size?: number; stroke?: number; glow?: boolean; children?: any }) {
+function ProgressRing({ pct, size = 40, stroke = 3, glow = false, color = V2.brand, children }:
+  { pct: number | null; size?: number; stroke?: number; glow?: boolean; color?: string; children?: any }) {
   const r = (size - stroke) / 2;
   const c = 2 * Math.PI * r;
   const p = Math.max(0, Math.min(100, pct ?? 0));
@@ -697,11 +697,11 @@ function ProgressRing({ pct, size = 40, stroke = 3, glow = false, children }:
         {/* `glow` mode draws only the blurred arc — it's rendered behind the
             opaque button so the inner half is masked and only the outer halo shows. */}
         {!glow && <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgba(0,0,0,0.22)" strokeWidth={stroke} />}
-        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={V2.brand} strokeWidth={stroke}
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth={stroke}
           strokeDasharray={c} strokeDashoffset={c * (1 - p / 100)} strokeLinecap="round"
           style={{
-            transition: 'stroke-dashoffset 0.3s ease',
-            ...(glow ? { filter: `drop-shadow(0 0 5px ${V2.brand}) drop-shadow(0 0 3px ${V2.brand})` } : {})
+            transition: 'stroke-dashoffset 0.3s ease, stroke 0.3s ease',
+            ...(glow ? { filter: `drop-shadow(0 0 5px ${color}) drop-shadow(0 0 3px ${color})` } : {})
           }} />
       </svg>
       {children}
@@ -898,6 +898,16 @@ function _dismissVirtualKeyboard(): void {
 function _gpFocusEl(): Element | null {
   try {
     const fnc: any = (window as any).FocusNavController;
+    // Desktop shell (the @decky/* shim): there is no Steam FocusNavController —
+    // gamepad focus is plain DOM focus in this SAME document. Report the active
+    // element so callers that ask "where is focus / did the user move it" work
+    // off real focus. Without this they always saw null and, e.g., the detail
+    // page's tab-switch focus ladder could never tell the user had moved and kept
+    // yanking focus back to the subtab's first element.
+    if (!fnc) {
+      const ae = document.activeElement as Element | null;
+      return ae && ae !== document.body ? ae : null;
+    }
     // m_ActiveContext is undefined while the context is deactivated (the very
     // state the post-session restore runs in) — fall back to the last one.
     const ctx = fnc?.m_ActiveContext ?? fnc?.m_LastActiveContext ?? fnc?.m_rgAllContexts?.[0];
@@ -939,12 +949,16 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
   const [shotRatio, setShotRatio] = useState(16 / 9);
   const uriRef = useRef<string | null>(null);
   const [focused, setFocused] = useState(false);
+  const [iconDark, setIconDark] = useState(false);
   const [dl, setDl] = useState(!!game.is_downloaded);
   const [busy, setBusy] = useState<null | 'download' | 'delete' | 'launch'>(null);
   const [activeDlRomId, setActiveDlRomId] = useState<number>(game.rom_id);
-  const dlPct = useDownloadProgress(activeDlRomId, busy === 'download')?.percent ?? null;
+  const dlProgress = useDownloadProgress(activeDlRomId, busy === 'download');
+  const dlPct = dlProgress?.percent ?? null;
+  const extracting = dlProgress?.state === 'extracting';
   const globalDownloading = useIsDownloading(activeDlRomId);
   const downloading = busy === 'download' || globalDownloading;
+  const ringColor = V2.brand;
   // A batch/global download for this tile finished successfully → light the dot
   // now instead of waiting for the next list refetch.
   const wasGlobalDl = useRef(false);
@@ -1213,14 +1227,15 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
           <div style={{
             position: 'absolute', top: '7px', right: '7px', zIndex: 2,
             padding: '3px', borderRadius: '50%',
-            background: 'rgba(0,0,0,0.78)', border: '1px solid rgba(255,255,255,0.12)',
-            lineHeight: 0,
+            background: iconDark ? 'rgba(255,255,255,0.82)' : 'rgba(0,0,0,0.78)',
+            border: iconDark ? '1px solid rgba(0,0,0,0.18)' : '1px solid rgba(255,255,255,0.12)',
+            lineHeight: 0, transition: 'background 0.2s ease, border-color 0.2s ease',
           }}>
             <div style={{
               width: '22px', height: '22px', display: 'flex',
               alignItems: 'center', justifyContent: 'center', color: V2.fg,
             }}>
-              <PlatformIcon slug={game.platform_slug} size={22} />
+              <PlatformIcon slug={game.platform_slug} size={22} onTone={setIconDark} />
             </div>
           </div>
         )}
@@ -1268,8 +1283,13 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
         )}
 
         {/* GameActions overlay — gradient scrim, center primary (download/play),
-            bottom Details + Delete; revealed on hover/focus. */}
-        <div style={{
+            bottom Details + Delete; revealed on hover/focus. The reveal is
+            ALSO driven by CSS :hover (.romm-gt-actions/.romm-gt-primary/
+            .romm-gt-scrim) so the mouse can reach the buttons even when no
+            React onMouseEnter fires — on desktop the pointer often ends up
+            inside a cover without crossing its boundary (gamepad mode toggles
+            body pointer-events), which left the buttons unclickable. */}
+        <div className="romm-gt-scrim" style={{
           position: 'absolute', inset: 0, borderRadius: V2.radiusArt, pointerEvents: 'none',
           background: 'linear-gradient(to top, rgba(0,0,0,0.78) 0%, rgba(0,0,0,0) 55%)',
           opacity: focused ? 1 : 0, transition: 'opacity 0.18s ease',
@@ -1282,11 +1302,12 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
             position: 'absolute', top: '50%', left: '50%',
             transform: 'translate(-50%,-50%)', pointerEvents: 'none',
           }}>
-            <ProgressRing pct={dlPct} size={48} stroke={4} glow />
+            <ProgressRing pct={dlPct} size={48} stroke={4} glow color={ringColor} />
           </div>
         )}
         {/* Center primary (A) — emphasized white round button (RomM Play). */}
         <div
+          className="romm-gt-primary"
           onClick={(e: any) => { e.stopPropagation(); primary(); }}
           style={{
             position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
@@ -1305,17 +1326,17 @@ const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, focusRef,
               position: 'absolute', top: '50%', left: '50%',
               transform: 'translate(-50%,-50%)', pointerEvents: 'none',
             }}>
-              <ProgressRing pct={dlPct} size={48} stroke={4} />
+              <ProgressRing pct={dlPct} size={48} stroke={4} color={ringColor} />
             </div>
           )}
           {downloading
-            ? <FaDownload size={15} />
+            ? (extracting ? <FaBoxOpen size={15} /> : <FaDownload size={15} />)
             : busy === 'launch'
               ? <FaSync size={16} style={{ animation: 'spin 1s linear infinite' }} />
               : dl ? <FaPlay size={15} style={{ marginLeft: '2px' }} /> : <FaDownload size={15} />}
         </div>
         {/* Bottom row: Details (X) + Delete (Y, when downloaded) — glass buttons. */}
-        <div style={{
+        <div className="romm-gt-actions" style={{
           position: 'absolute', left: '8px', right: '8px', bottom: '8px',
           display: 'flex', justifyContent: 'space-between', alignItems: 'center',
           opacity: focused ? 1 : 0, transform: focused ? 'translateY(0)' : 'translateY(6px)',
@@ -1661,7 +1682,7 @@ function CollectionTile({ group, onOpen, focusRef, focusable }: { group: LibGrou
 // /assets/platforms/{slug}.svg (the RPlatformIcon fallback chain:
 // fsSlug.svg → fsSlug.ico → slug.svg → slug.ico). Each candidate is fetched
 // via the backend get_image RPC; falls back to a gamepad glyph if none load.
-function PlatformIcon({ slug, fsSlug, size }: { slug?: string | null; fsSlug?: string | null; size: number }) {
+function PlatformIcon({ slug, fsSlug, size, onTone }: { slug?: string | null; fsSlug?: string | null; size: number; onTone?: (dark: boolean) => void }) {
   const key = `${(fsSlug || '').toLowerCase().trim()}|${(slug || '').toLowerCase().trim()}`;
   // Resolved-icon cache: which candidate URL actually exists is unknown up
   // front, so we cache the RESOLVED data URI (or null = none) per platform key.
@@ -1694,6 +1715,35 @@ function PlatformIcon({ slug, fsSlug, size }: { slug?: string | null; fsSlug?: s
     })();
     return () => { alive = false; };
   }, [key]);
+  // Report the icon's own tone so a caller's scrim can flip for contrast (dark
+  // logo → light scrim), mirroring the screenshot-edge arrows. Average only the
+  // opaque pixels — platform SVGs are mostly transparent, so counting the empty
+  // field would wash every icon toward "light".
+  useEffect(() => {
+    if (!uri || !onTone) return;
+    let alive = true;
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const s = 24;
+        const c = document.createElement('canvas');
+        c.width = s; c.height = s;
+        const ctx = c.getContext('2d');
+        if (!ctx) return;
+        ctx.drawImage(img, 0, 0, s, s);
+        const d = ctx.getImageData(0, 0, s, s).data;
+        let lum = 0, a = 0;
+        for (let k = 0; k < d.length; k += 4) {
+          const w = d[k + 3] / 255;
+          lum += (0.2126 * d[k] + 0.7152 * d[k + 1] + 0.0722 * d[k + 2]) * w;
+          a += w;
+        }
+        if (alive) onTone(a > 4 ? lum / a < 120 : false);
+      } catch { /* tainted canvas: leave the default scrim */ }
+    };
+    img.src = uri;
+    return () => { alive = false; };
+  }, [uri]);
   if (uri) return <img src={uri} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />;
   if (failed || (!slug && !fsSlug)) return <FaGamepad size={Math.round(size * 0.75)} />;
   return null; // loading
@@ -1902,7 +1952,12 @@ function V2NavBar({ active, onTab, activeRef, chrome, onLaunchRd }:
       </div>
       <div style={{ justifySelf: 'center', display: 'flex', alignItems: 'center', gap: '10px' }}>
         <Bumper label="L1" />
-        <Focusable noFocusRing flow-children="horizontal" style={{
+        {/* shim-topnav marks the tabs pill so the desktop gamepad shim, when an
+            Up move enters the sticky top bar, always lands INSIDE this pill (the
+            column-nearest tab) rather than on the side clusters — matching the
+            Deck, where Up into the nav always lands on a nav tab. Harmless on the
+            Deck (just an extra class). */}
+        <Focusable noFocusRing className="shim-topnav" flow-children="horizontal" style={{
           position: 'relative', display: 'flex', gap: '2px', padding: '4px',
           background: V2.surface, border: `1px solid ${V2.borderStrong}`, borderRadius: V2.radiusPill,
         }}>
@@ -1921,6 +1976,7 @@ function V2NavBar({ active, onTab, activeRef, chrome, onLaunchRd }:
             const on = active === id;
             return (
               <Focusable noFocusRing key={id} ref={on && activeRef ? activeRef : undefined}
+                className={on ? 'shim-navtab-active' : undefined}
                 onActivate={() => onTab(id)} onClick={() => onTab(id)}
                 onFocus={() => setFocusedIdx(i)} onBlur={() => setFocusedIdx(null)}
                 onMouseEnter={() => setFocusedIdx(i)} onMouseLeave={() => setFocusedIdx(null)}>
@@ -1930,11 +1986,13 @@ function V2NavBar({ active, onTab, activeRef, chrome, onLaunchRd }:
                     display: 'flex', alignItems: 'center', gap: '7px', padding: '7px 18px',
                     borderRadius: V2.radiusPill, fontSize: '13.5px', cursor: 'pointer',
                     fontWeight: on ? 600 : 500, color: on ? V2.bg : V2.fg2,
-                    // Focused-but-not-active tab: tint + brand ring (the bare tint
-                    // was invisible on the Deck panel; the active tab has the
-                    // sliding indicator instead).
+                    // Focus affordance is the brand ring, shown whenever a pill is
+                    // focused — including the ALREADY-ACTIVE one, so the controller
+                    // highlight is visible on the selected tab (it rides on top of
+                    // the white sliding indicator). Inactive pills also get a tint;
+                    // the active pill's white indicator is tint enough on its own.
                     background: (!on && focusedIdx === i) ? 'rgba(255,255,255,0.10)' : 'transparent',
-                    boxShadow: (!on && focusedIdx === i) ? `inset 0 0 0 1.5px ${V2.brand}` : 'none',
+                    boxShadow: (focusedIdx === i) ? `inset 0 0 0 1.5px ${V2.brand}` : 'none',
                     transition: 'color 0.2s ease, background 0.15s ease, box-shadow 0.15s ease',
                   }}>
                   <Icon size={12} /><span>{label}</span>
@@ -2012,22 +2070,30 @@ function UserMenuRow({ icon, label, danger, disabled, onSelect }:
 function DownloadStatusRow({ romId, name }: { romId: number; name: string }) {
   const prog = useDownloadProgress(romId, true);
   const pct = Math.max(0, Math.min(100, prog?.percent ?? 0));
+  const extracting = prog?.state === 'extracting';
   const bytes = prog && prog.total > 0 ? `${fmtBytes(prog.downloaded)} / ${fmtBytes(prog.total)}` : '';
   const eta = prog ? formatEta(prog.eta) : '';
-  const sub = [bytes, eta ? `${eta} left` : ''].filter(Boolean).join('  ·  ');
+  // During extraction there's no transfer to report — surface the phase instead.
+  const sub = extracting
+    ? 'Unpacking archive…'
+    : [bytes, eta ? `${eta} left` : ''].filter(Boolean).join('  ·  ');
+  const barColor = V2.brand;
   return (
     <div style={{ padding: '10px 14px 12px' }}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: '10px', minWidth: 0 }}>
         <span style={{
-          fontSize: '13px', fontWeight: 600, color: V2.fg, minWidth: 0,
-          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-        }}>{name}</span>
+          fontSize: '13px', fontWeight: 600, color: V2.fg, minWidth: 0, display: 'inline-flex',
+          alignItems: 'center', gap: '7px', overflow: 'hidden',
+        }}>
+          {extracting && <FaBoxOpen size={12} style={{ color: V2.fgMuted, flexShrink: 0 }} />}
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
+        </span>
         <span style={{ fontSize: '11.5px', fontWeight: 600, color: V2.fgMuted, flexShrink: 0, fontVariantNumeric: 'tabular-nums' }}>
-          {prog && prog.speed > 0 ? `${formatSpeed(prog.speed)} · ` : ''}{pct}%
+          {extracting ? `Extracting… ${pct}%` : `${prog && prog.speed > 0 ? `${formatSpeed(prog.speed)} · ` : ''}${pct}%`}
         </span>
       </div>
       <div style={{ height: '4px', borderRadius: '2px', background: V2.surface, marginTop: '7px', overflow: 'hidden' }}>
-        <div style={{ height: '100%', width: `${pct}%`, background: V2.brand, borderRadius: '2px', transition: 'width 0.3s ease' }} />
+        <div style={{ height: '100%', width: `${pct}%`, background: barColor, borderRadius: '2px', transition: 'width 0.3s ease, background 0.3s ease' }} />
       </div>
       {sub && <div style={{ fontSize: '10.5px', color: V2.fgMuted, marginTop: '5px', fontVariantNumeric: 'tabular-nums' }}>{sub}</div>}
     </div>
@@ -2090,23 +2156,10 @@ function UserMenuModal({ username, role, avatar, closeModal }:
       setRefreshing(false);
     }
   };
-  const doLogout = async () => {
-    // Non-destructive logout (keeps downloaded files), matching RomM's simple
-    // logout. The wipe-data variant stays in Settings.
-    closeModal?.();
-    try {
-      const res = await logout(false);
-      if (res?.success) {
-        toaster.toast({ title: 'Logged out', body: 'Signed out of RomM. Downloaded files were kept.' });
-        Navigation.Navigate("/romm-sync-setup");
-        Navigation.CloseSideMenus();
-      } else {
-        toaster.toast({ title: 'Logout failed', body: res?.error ?? 'Unknown error' });
-      }
-    } catch (e) {
-      toaster.toast({ title: 'Logout failed', body: String(e) });
-    }
-  };
+  // Desktop shell exposes a quit bridge; the Deck build has no such object, so
+  // the Exit row only appears in the PC app. Logout lives in Settings.
+  const desktop = (window as any).__rommDesktop;
+  const doQuit = () => { closeModal?.(); try { desktop?.quit?.(); } catch { /* no-op */ } };
 
   return (
     <ModalRoot bHideCloseIcon onCancel={closeModal} onEscKeypress={closeModal}
@@ -2164,8 +2217,12 @@ function UserMenuModal({ username, role, avatar, closeModal }:
           <UserMenuRow icon={<FaDownload size={15} />}
             label={`Downloads${dlGlimpse.count > 0 ? ` (${dlGlimpse.count})` : ''}`}
             onSelect={() => go("/romm-sync-downloads")} />
-          <div style={{ height: '1px', background: V2.border, margin: '4px 4px' }} />
-          <UserMenuRow icon={<FaSignOutAlt size={15} />} label="Log out" danger onSelect={doLogout} />
+          {desktop && (
+            <>
+              <div style={{ height: '1px', background: V2.border, margin: '4px 4px' }} />
+              <UserMenuRow icon={<FaPowerOff size={15} />} label="Quit" danger onSelect={doQuit} />
+            </>
+          )}
         </Focusable>
       </Focusable>
     </ModalRoot>
@@ -2458,12 +2515,12 @@ function V2Button({ children, onClick, variant = 'tonal', color, disabled }:
 //     page background (RTag tokens); used for Delete / secondary actions.
 // `danger` is a filled-danger pill for the delete-confirm step. Pill radius
 // throughout; controller focus paints a brand ring + slight scale.
-function GameActionButton({ icon, label, onClick, variant = 'surface', accent, disabled, progress,
+function GameActionButton({ icon, label, onClick, variant = 'surface', accent, disabled, progress, progressColor,
   onOptionsButton, optionsHint, focusRef, onFocused, onBlurred }:
   {
     icon: any; label?: string; onClick: () => void;
     variant?: 'emphasized' | 'surface' | 'danger'; accent?: 'danger'; disabled?: boolean;
-    progress?: number | null; onOptionsButton?: () => void; optionsHint?: boolean;
+    progress?: number | null; progressColor?: string; onOptionsButton?: () => void; optionsHint?: boolean;
     focusRef?: React.MutableRefObject<any>;
     onFocused?: () => void; onBlurred?: () => void;
   }) {
@@ -2529,7 +2586,9 @@ function GameActionButton({ icon, label, onClick, variant = 'surface', accent, d
       {hasProgress && (
         <div style={{
           position: 'absolute', left: 0, top: 0, bottom: 0, width: `${pct}%`,
-          background: variant === 'emphasized' ? 'rgba(139,116,232,0.30)' : 'rgba(139,116,232,0.45)',
+          background: progressColor
+            ? progressColor
+            : variant === 'emphasized' ? 'rgba(139,116,232,0.30)' : 'rgba(139,116,232,0.45)',
           // Smoothly sweep the semi-transparent fill across the white button, and
           // fade it in on the first frame so the colour change is animated too.
           transition: 'width 0.45s cubic-bezier(0.22,1,0.36,1), background 0.3s ease',
@@ -3599,6 +3658,13 @@ const V2_ROW_STYLE = `
     transform: scale(1.04) !important;
     box-shadow: 0 8px 28px rgba(0,0,0,0.4), ${_RING}, 0 0 18px rgba(139,116,232,0.55) !important;
   }
+  /* Reveal the cover's action overlay on real mouse hover, not just the React
+     focused state — onMouseEnter can miss when the pointer ends up inside a
+     cover without crossing its boundary (see the overlay comment in GameTile),
+     which otherwise left the Details/Delete/Play buttons unclickable. */
+  .romm-gt-wrap:hover .romm-gt-scrim,
+  .romm-gt-wrap:hover .romm-gt-primary { opacity: 1 !important; }
+  .romm-gt-wrap:hover .romm-gt-actions { opacity: 1 !important; transform: translateY(0) !important; }
   .romm-ct-wrap:hover .romm-ct-cover, .romm-ct-wrap.gpfocuswithin .romm-ct-cover {
     transform: scale(1.04) !important;
     box-shadow: 0 8px 28px rgba(0,0,0,0.4), ${_RING}, 0 0 18px rgba(139,116,232,0.55) !important;
@@ -4250,7 +4316,15 @@ const NAV_MAINTAIN_X = { navEntryPreferPosition: 2 } as any;
 let _scrubGlimpse: ((letter: string) => void) | null = null;
 let _scrubFocusTs = 0;
 let _scrubStreak = 0;
+// The letter glimpse is for flying VERTICALLY through the alphabetized grid, so
+// only a sustained run of fast ROW-TO-ROW moves should raise it. Browsing
+// horizontally within a row must never trigger it — on a wide desktop row that's
+// a long run of quick focus moves, which is exactly what popped the overlay
+// unbidden. The shim records the axis of the last directional move on
+// window.__rommNavH; a horizontal move resets the streak. On the Deck (Steam's
+// native nav) the flag is undefined, so behaviour there is unchanged.
 function _tileFocusScrub(_el: any, label: string) {
+  if ((window as any).__rommNavH) { _scrubStreak = 0; return; }
   const now = Date.now();
   _scrubStreak = now - _scrubFocusTs < 200 ? _scrubStreak + 1 : 1;
   _scrubFocusTs = now;
@@ -4862,6 +4936,22 @@ function LibraryGamesPage() {
       if (hit) {
         // Instant: real covers slide in with the carousel, no pop-in.
         setGames(hit); setLoading(false);
+        // …then silently reconcile against the backend. The cache survives
+        // restarts (localStorage), so a game deleted off-device in a previous
+        // session would otherwise keep showing as downloaded until the 24h TTL —
+        // and launching it fails ("not downloaded"). Refetch and, if the
+        // download state (or membership) drifted, repaint from truth.
+        (async () => {
+          try {
+            const res = await getLibraryGames(mode, group.key);
+            if (!alive || !res?.success) return;
+            const fresh: LibGame[] = res.games || [];
+            const changed = fresh.length !== hit.length ||
+              fresh.some((g, i) => g.rom_id !== hit[i]?.rom_id ||
+                                   !!g.is_downloaded !== !!hit[i]?.is_downloaded);
+            if (changed) { libCacheSet(ck, fresh); setGames(fresh); }
+          } catch { /* offline / transient — keep the cached paint */ }
+        })();
       } else {
         setLoading(true);
         try {
@@ -4884,6 +4974,18 @@ function LibraryGamesPage() {
       }
     })();
     return () => { alive = false; };
+  }, [group?.key]);
+
+  // Repaint from cache when a download/delete/refresh elsewhere flips a game's
+  // state (libCacheSetDownloaded → _broadcastLibRefresh). Without this, a
+  // launch-failure self-heal or a delete on another surface wouldn't update the
+  // tiles mounted here until the group was re-entered.
+  useEffect(() => {
+    if (!group) return;
+    const ck = cacheKey(group.key);
+    const l = () => { const list = _libGamesCache.get(ck); if (list) setGames(list); };
+    _libRefreshListeners.add(l);
+    return () => { _libRefreshListeners.delete(l); };
   }, [group?.key]);
 
   // Once games load (initial entry or after L1/R1 paging), drop focus onto the
@@ -5735,21 +5837,26 @@ function AchievementsTab({ achievements }: { achievements: Achievement[] }) {
       <Focusable noFocusRing style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
         {achievements.filter(isVisible).map((a, i) => {
           const src = a.earned ? a.badge_url : a.badge_url_lock;
+          // Dim LOCKED rows via their contents, not the Focusable itself: the
+          // desktop shim reads an inline opacity<1 on a Focusable as the
+          // "disabled control" signal and strips its tabindex, which made locked
+          // rows unreachable by the controller (Down dead-ended at the filters).
+          const dim = a.earned ? 1 : 0.55;
           return (
             <Focusable noFocusRing key={a.ra_id ?? i} onActivate={() => { }} className="romm-row ach-fade" style={{
               display: 'grid', gridTemplateColumns: '52px 1fr auto', gap: '14px', alignItems: 'center',
-              padding: '10px 14px', borderRadius: V2.radiusMd, opacity: a.earned ? 1 : 0.55,
+              padding: '10px 14px', borderRadius: V2.radiusMd,
               '--ach-i': Math.min(i, 12) + 2,
             } as any}>
-              <div style={{ width: '52px', height: '52px', borderRadius: '8px', overflow: 'hidden', background: V2.coverPlaceholder, flexShrink: 0 }}>
+              <div style={{ width: '52px', height: '52px', borderRadius: '8px', overflow: 'hidden', background: V2.coverPlaceholder, flexShrink: 0, opacity: dim }}>
                 {src && <img src={src} alt={a.title} loading="lazy" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
                   onError={(e) => { (e.target as HTMLImageElement).style.visibility = 'hidden'; }} />}
               </div>
-              <div style={{ minWidth: 0 }}>
+              <div style={{ minWidth: 0, opacity: dim }}>
                 <div style={{ fontSize: '13px', fontWeight: 600, color: V2.fg }}>{a.title}</div>
                 <div style={{ fontSize: '11.5px', color: V2.fgMuted, marginTop: '2px', lineHeight: 1.4 }}>{a.description}</div>
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px', whiteSpace: 'nowrap' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px', whiteSpace: 'nowrap', opacity: dim }}>
                 <div style={{ fontSize: '12px', fontWeight: 700, color: V2.fg2, fontVariantNumeric: 'tabular-nums' }}>{a.points} pts</div>
                 {a.type && <span style={typeTagStyle(a.type)}>{typeLabel(a.type)}</span>}
               </div>
@@ -6269,7 +6376,14 @@ async function runLaunch(romId: number, gameName: string, disc: string | null,
   try {
     const r = await launchGameSmart(romId, disc, siblingRomId ?? null);
     if (r?.success) toaster.toast({ title: 'Launching', body: label || gameName });
-    else toaster.toast({ title: 'Launch failed', body: r?.message || 'Error' });
+    else {
+      toaster.toast({ title: 'Launch failed', body: r?.message || 'Error' });
+      // Self-heal a stale "downloaded" tile: if launch failed because the files
+      // aren't actually there (deleted off-device in a prior session, cache not
+      // yet reconciled), flip every cached surface back to not-downloaded so the
+      // cover offers Download instead of a Play that keeps failing.
+      if (/not downloaded/i.test(r?.message || '')) libCacheSetDownloaded(romId, false);
+    }
   } catch (e) {
     toaster.toast({ title: 'Launch failed', body: String(e) });
   } finally {
@@ -6418,6 +6532,7 @@ function GameDetailPage() {
   const [tab, setTab] = useState('overview');
   const dlProg = useDownloadProgress(game?.rom_id ?? -1, busy === 'download');
   const dlPct = dlProg?.percent ?? null;
+  const extracting = dlProg?.state === 'extracting';
   const globalDownloading = useIsDownloading(game?.rom_id ?? -1);
   const downloading = busy === 'download' || globalDownloading;
   const smoothPct = useSmoothNumber(dlPct, downloading);
@@ -6707,10 +6822,12 @@ function GameDetailPage() {
               <GameActionButton variant="emphasized" focusRef={ctaRef} disabled={!!busy || downloading} onClick={doDownload}
                 progress={downloading ? (dlPct ?? 0) : undefined}
                 label={downloading
-                  ? (dlPct != null ? `Downloading… ${smoothPct}%` : 'Downloading…')
+                  ? (extracting ? (dlPct != null ? `Extracting… ${dlPct}%` : 'Extracting…')
+                     : dlPct != null ? `Downloading… ${smoothPct}%` : 'Downloading…')
                   : 'Download'}
                 icon={downloading
-                  ? <FaSync size={15} style={{ animation: 'spin 1s linear infinite' }} />
+                  ? (extracting ? <FaBoxOpen size={15} />
+                     : <FaSync size={15} style={{ animation: 'spin 1s linear infinite' }} />)
                   : <FaDownload size={15} />} />
             ) : !confirmDelete ? (
               <>
@@ -7584,10 +7701,13 @@ function V2Segment({ options, value, onChange, disabled }:
                 position: 'relative', zIndex: 1, padding: '5px 16px', borderRadius: V2.radiusPill,
                 fontSize: '12.5px', textAlign: 'center', cursor: disabled ? 'default' : 'pointer',
                 fontWeight: on ? 600 : 500, color: on ? V2.bg : V2.fg2,
-                // Focus affordance is a pill-shaped tint (matches the shape),
-                // not a rectangular ring.
+                // Focus affordance: a brand ring shown on whichever option is
+                // focused — including the already-active one, so the controller
+                // can tell where the selection landed (it rides on the white
+                // indicator). Inactive options also get a tint.
                 background: (!on && focusedIdx === i) ? 'rgba(255,255,255,0.10)' : 'transparent',
-                transition: 'color 0.2s ease, background 0.15s ease',
+                boxShadow: (focusedIdx === i) ? `inset 0 0 0 1.5px ${V2.brand}` : 'none',
+                transition: 'color 0.2s ease, background 0.15s ease, box-shadow 0.15s ease',
               }}>
               {label}
             </div>
@@ -7669,6 +7789,20 @@ function SettingsPage() {
   const [serverInfo, setServerInfo] = useState<string>('');
   const [rdDetected, setRdDetected] = useState<boolean>(false);
   const [rdButton, setRdButton] = useState<boolean>(false);
+
+  // Desktop-only: which screen corner notification toasts appear in. Persisted
+  // in localStorage and read by the shim's ToastHost; the Deck build has no
+  // __rommDesktop object so this section never renders there.
+  const isDesktop = !!(window as any).__rommDesktop;
+  const [toastPos, setToastPos] = useState<string>(() => {
+    try { return localStorage.getItem('romm:toastPos') || 'top-right'; }
+    catch { return 'top-right'; }
+  });
+  const handleToastPos = (pos: string) => {
+    setToastPos(pos);
+    try { localStorage.setItem('romm:toastPos', pos); } catch { /* no storage */ }
+    try { window.dispatchEvent(new Event('romm:toastpos')); } catch { /* ignore */ }
+  };
 
   useEffect(() => {
     (async () => {
@@ -7975,6 +8109,35 @@ function SettingsPage() {
             onClick={() => handleRdButtonToggle(!rdButton)}
             right={<V2Switch checked={rdButton} />}
           />
+        </V2SettingsSection>
+      )}
+
+      {isDesktop && (
+        <V2SettingsSection title="Notifications">
+          <div style={{
+            display: 'flex', flexDirection: 'column', gap: '12px', padding: '16px',
+            borderRadius: V2.radiusCard, background: V2.surface, border: `1px solid ${V2.border}`,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
+              <FaInfoCircle size={16} style={{ color: V2.fgMuted, flexShrink: 0 }} />
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0 }}>
+                <span style={{ fontSize: '14px', fontWeight: 600 }}>Overlay position</span>
+                <span style={{ fontSize: '12px', color: V2.fgMuted }}>
+                  Which screen corner pop-up notifications appear in.
+                </span>
+              </div>
+            </div>
+            <div style={{ alignSelf: 'flex-start' }}>
+              <V2Segment
+                options={[
+                  { id: 'top-left', label: 'Top left' },
+                  { id: 'top-right', label: 'Top right' },
+                  { id: 'bottom-left', label: 'Bottom left' },
+                  { id: 'bottom-right', label: 'Bottom right' },
+                ]}
+                value={toastPos} onChange={handleToastPos} />
+            </div>
+          </div>
         </V2SettingsSection>
       )}
 
@@ -8944,6 +9107,8 @@ async function cleanupRommShortcuts(): Promise<number | null> {
 // Run this when the shortcut store is ready (e.g. on Settings open), not only
 // at plugin load, where GetAllShortcuts can still be empty.
 async function reconcileRommTile(): Promise<number | null> {
+  // Desktop has no Steam client — the shortcut/tile feature doesn't apply.
+  if ((window as any).__rommDesktop) return null;
   const appId = (await cleanupRommShortcuts()) ?? (await findRommShortcut());
   if (appId == null) return null;
   _rommAppId = appId;
@@ -9010,6 +9175,9 @@ async function ensureRommArtwork(appId: number) {
 // store never reported ready (e.g. a user with zero non-Steam shortcuts, where
 // the empty store is legitimate and creating cannot duplicate anything).
 async function addRommShortcut(force = false): Promise<number | null> {
+  // Desktop has no Steam client — never attempt to create a shortcut (this is
+  // where the "Steam shortcuts API unavailable" toast came from).
+  if ((window as any).__rommDesktop) return null;
   try {
     // Never create while the shortcut store is empty/unloaded: the existing
     // RomM tile may simply not be visible yet, and AddShortcut here is exactly

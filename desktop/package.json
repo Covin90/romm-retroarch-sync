@@ -3,12 +3,15 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Desktop Linux client — reuses the Decky plugin's React UI via a @decky/* shim",
+  "description": "Desktop client (Linux + Windows) — reuses the Decky plugin's React UI via a @decky/* shim, shelled in Electron",
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "electron": "npm run build && electron .",
+    "electron:dev": "ROMM_URL=http://127.0.0.1:5173 ROMM_PORT=8723 electron ."
   },
   "dependencies": {
     "react": "^18.3.1",
@@ -20,6 +23,7 @@
     "@types/react": "18.3.3",
     "@types/react-dom": "18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
+    "electron": "^33.4.11",
     "typescript": "^5.6.2",
     "vite": "^5.4.0"
   }

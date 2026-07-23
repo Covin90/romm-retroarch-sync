@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import { callable } from "./shim/api";
 import { seedFocus, startGamepad } from "./shim/gamepad";
 import { ModalHost, ToastHost } from "./shim/overlays";
+import { FooterLegend } from "./shim/footer";
 import { Navigation, matchRoute, useRoutePath, useRouteRegistry } from "./shim/router";
 import "./shim/shim.css";
 
@@ -63,7 +64,9 @@ function App() {
       } catch {
         dest = SETUP_ROUTE; // backend unreachable → send to setup, not a blank
       }
-      if (!cancelled) Navigation.Navigate(dest);
+      // Replace, not push: the bare "/" boot entry must not linger under the
+      // landing page, or B at the library root pops to "/" and remounts.
+      if (!cancelled) Navigation.NavigateReplace(dest);
     })();
     return () => { cancelled = true; };
   }, [route, path]);
@@ -73,6 +76,7 @@ function App() {
       {route ? route.component() : null}
       <ModalHost />
       <ToastHost />
+      <FooterLegend />
     </div>
   );
 }

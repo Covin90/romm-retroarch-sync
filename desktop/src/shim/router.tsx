@@ -35,15 +35,41 @@ export const routerHook = {
   },
 };
 
-export function navigate(to: string) {
+// Our own navigation depth. The desktop app IS the library — there is no Steam
+// shell underneath it — so backing out past the first entry (what the plugin
+// does at the library root via navExitPlugin) must be a no-op, not a real
+// window.history.back() that walks off the app's only route and remounts the
+// whole tree. Inner library pages push VIEWS, not routes, so this stack usually
+// stays at depth 1 and root-B correctly does nothing.
+const navStack: string[] = [window.location.pathname];
+
+export function navigate(to: string, opts?: { replace?: boolean }) {
   if (to === window.location.pathname) return;
-  window.history.pushState({}, "", to);
+  if (opts?.replace) {
+    // Swap the current entry instead of stacking on top — used for the boot
+    // landing hop off the bare "/" load so the library becomes the history
+    // floor. Otherwise "/" sits underneath and B at the library root pops to
+    // it, which matches no route and remounts the whole tree.
+    window.history.replaceState({}, "", to);
+    navStack[navStack.length - 1] = to;
+  } else {
+    window.history.pushState({}, "", to);
+    navStack.push(to);
+  }
   notifyPath();
+}
+
+function navigateBack() {
+  if (navStack.length <= 1) return; // at the root — nowhere to exit to
+  navStack.pop();
+  window.history.back();
 }
 
 export const Navigation = {
   Navigate: (path: string) => navigate(path),
-  NavigateBack: () => window.history.back(),
+  // Replace-nav for the boot landing hop (see App): keeps "/" out of history.
+  NavigateReplace: (path: string) => navigate(path, { replace: true }),
+  NavigateBack: () => navigateBack(),
   NavigateToExternalWeb: (url: string) =>
     window.open(url, "_blank", "noopener,noreferrer"),
   // No side menus on desktop — the plugin calls this defensively before
