@@ -17,7 +17,7 @@ import {
 } from "@decky/ui";
 import { callable, definePlugin, toaster, routerHook, openFilePicker, FileSelectionType } from "@decky/api";
 import { useState, useEffect, useLayoutEffect, useRef, useMemo, forwardRef, memo, cloneElement, type Ref, type ChangeEvent } from "react";
-import { FaSync, FaTrash, FaCog, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaTimesCircle, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight, FaCheckCircle, FaUsers, FaExternalLinkAlt, FaPuzzlePiece, FaBoxOpen, FaClone, FaRedo, FaClock, FaCheck, FaEllipsisH, FaGlobe, FaChevronDown, FaChartBar, FaSave, FaUser, FaExclamationTriangle, FaHistory, FaPowerOff } from "react-icons/fa";
+import { FaSync, FaTrash, FaCog, FaGithub, FaBug, FaUndo, FaCopy, FaGamepad, FaBookmark, FaHome, FaSearch, FaTimes, FaTimesCircle, FaDownload, FaPlay, FaInfoCircle, FaRegClock, FaLayerGroup, FaChevronLeft, FaChevronRight, FaCheckCircle, FaUsers, FaExternalLinkAlt, FaPuzzlePiece, FaBoxOpen, FaClone, FaRedo, FaClock, FaCheck, FaEllipsisH, FaGlobe, FaChevronDown, FaChartBar, FaSave, FaUser, FaExclamationTriangle, FaHistory, FaPowerOff, FaCloudUploadAlt } from "react-icons/fa";
 import { BsGearFill } from "react-icons/bs";
 import { MdVerified } from "react-icons/md";
 
@@ -44,6 +44,7 @@ const saveConfig = callable<[string, string, string, string, string, string, str
 const testRommConnection = callable<[string, string, string], any>("test_connection");
 const pairDevice = callable<[string, string], any>("pair_device");
 const getSaveHistory = callable<[number], any>("get_save_history");
+const getPendingUploads = callable<[], any>("get_pending_uploads");
 const getSaveScreenshot = callable<[number, number, string], any>("get_save_screenshot");
 const restoreSaveVersion = callable<[number, number, string, boolean], any>("restore_save_version");
 // Game Browser
@@ -540,6 +541,39 @@ function useQueuedDownloads(): { romId: number; name: string }[] {
     return () => { _dlListeners.delete(l); };
   }, []);
   return v;
+}
+
+interface PendingUpload {
+  game: string;
+  type: 'saves' | 'states';
+  emulator?: string | null;
+  modified: number;
+  files: { name: string; path: string; modified: number; size: number }[];
+}
+
+// The itemized upload queue for the Downloads page: local saves/states waiting
+// to push on reconnect. Backed by get_pending_uploads (which groups by game,
+// same drift test as the pending_saves count). Read-only — the sync engine
+// flushes these automatically on connect; this only surfaces WHAT is waiting.
+// Polls slowly, and only while there's actually something pending (the offline
+// banner's pending_saves count tells us when to look), so an online, idle Deck
+// never hits the backend for this.
+function usePendingUploads(pendingCount: number): PendingUpload[] {
+  const [items, setItems] = useState<PendingUpload[]>([]);
+  useEffect(() => {
+    if (!pendingCount) { setItems([]); return; }
+    let alive = true;
+    const load = async () => {
+      try {
+        const res = await getPendingUploads();
+        if (alive && Array.isArray(res)) setItems(res as PendingUpload[]);
+      } catch { /* transient */ }
+    };
+    load();
+    const iv = setInterval(load, 5000);
+    return () => { alive = false; clearInterval(iv); };
+  }, [pendingCount]);
+  return items;
 }
 
 // Lightweight aggregate for the top-bar glimpse (the user pill's avatar ring):
@@ -3196,9 +3230,11 @@ const checkForNotifications = async () => {
       if (conn && conn !== 'connecting') {
         const isOff = conn === 'offline_cached' || conn === 'disconnected';
         if (_prevConn === 'online' && isOff) {
-          const noNet = st?.unreachable_reason === 'no_network';
+          const r = st?.unreachable_reason;
+          const noNet = r === 'no_network' || r === 'airplane_mode';
           toaster.toast({
-            title: noNet ? 'No internet connection' : "Can't reach RomM server",
+            title: r === 'airplane_mode' ? 'Airplane mode is on'
+              : noNet ? 'No internet connection' : "Can't reach RomM server",
             body: noNet
               ? 'Showing your downloaded games — saves sync when you’re back online.'
               : 'The server isn’t responding — showing your downloaded games.',
@@ -4576,8 +4612,19 @@ function OfflineBanner({ status }: { status: any }) {
   // Distinguish "the Deck has no internet" from "the Deck is online but the
   // RomM server isn't responding" — same offline browse experience, but the
   // cause (and what the user should check) is different.
-  const noNetwork = status?.unreachable_reason === 'no_network';
+  const reason = status?.unreachable_reason;
+  const airplane = reason === 'airplane_mode';
+  // 'airplane_mode' and 'no_network' share the "device has no connectivity"
+  // experience; only the remedy copy differs (toggle airplane vs. join a
+  // network). 'server_unreachable' is the device-online-but-server-down case.
+  const noNetwork = airplane || reason === 'no_network';
   const pending = status?.pending_saves || 0;
+
+  // Short title fragment + remedy sentence for the no-connectivity cases.
+  const netTitle = airplane ? 'Airplane mode is on' : 'No internet connection';
+  const netRemedy = airplane
+    ? 'Turn off airplane mode to browse your library and sync saves.'
+    : 'Connect to a network to browse your library and sync saves.';
 
   let dot = V2.warning, title = '', detail = '';
   if (conn === 'connecting') {
@@ -4587,16 +4634,16 @@ function OfflineBanner({ status }: { status: any }) {
   } else if (conn === 'offline_cached') {
     dot = V2.warning;
     title = noNetwork
-      ? 'No internet connection — showing your downloaded games'
+      ? `${netTitle} — showing your downloaded games`
       : "Can't reach your RomM server — showing your downloaded games";
     detail = noNetwork
-      ? 'Only games saved on this device are shown. Your full library and saves sync when you’re back online.'
+      ? `Only games saved on this device are shown. ${netRemedy} Your full library and saves sync when you’re back online.`
       : 'The server isn’t responding. Only games saved on this device are shown; everything syncs once it’s reachable.';
   } else { // 'disconnected' — no cached library to show
     dot = V2.danger;
-    title = noNetwork ? 'No internet connection' : "Can't reach your RomM server";
+    title = noNetwork ? netTitle : "Can't reach your RomM server";
     detail = noNetwork
-      ? 'Connect to the internet to browse your library and sync saves.'
+      ? netRemedy
       : 'Your device is online but the RomM server isn’t responding. Check that it’s running and reachable.';
   }
 
@@ -7373,6 +7420,9 @@ function DownloadsPage() {
   const activeDls = useActiveDownloads();
   const queued = useQueuedDownloads();
   const status = useServiceStatus();
+  const pendingCount = status?.pending_saves || 0;
+  const pendingUploads = usePendingUploads(pendingCount);
+  const offline = !!status?.unreachable_reason;
   const syncingCols = ((status?.collections || []) as any[]).filter((c) => c.sync_state === 'syncing');
   const activeCount = activeDls.length + syncingCols.length;
 
@@ -7457,6 +7507,52 @@ function DownloadsPage() {
                 padding: '9px 14px', fontSize: '11.5px', color: V2.fgMuted,
                 borderTop: `1px solid ${V2.border}`,
               }}>and {queued.length - 12} more…</div>
+            )}
+          </V2StatsSectionBox>
+        )}
+
+        {pendingUploads.length > 0 && (
+          <V2StatsSectionBox
+            title={`Waiting to upload (${pendingUploads.length})`}
+            icon={<FaCloudUploadAlt size={14} />}>
+            <div style={{
+              padding: '9px 14px', fontSize: '11.5px', color: V2.fgMuted,
+              borderBottom: `1px solid ${V2.border}`,
+            }}>
+              {offline
+                ? 'These saves will sync automatically when you’re back online.'
+                : 'These local changes will sync on the next pass.'}
+            </div>
+            {pendingUploads.slice(0, 12).map((p, i) => {
+              const slots = p.files.length;
+              return (
+                <div key={`${p.game}-${p.type}`} style={{
+                  display: 'flex', alignItems: 'center', gap: '10px', padding: '9px 14px',
+                  borderTop: i > 0 ? `1px solid ${V2.border}` : 'none',
+                }}>
+                  <div style={{ flexShrink: 0, color: V2.fgMuted, display: 'flex' }}>
+                    <FaCloudUploadAlt size={13} />
+                  </div>
+                  <div style={{ flex: '1 1 auto', minWidth: 0 }}>
+                    <div style={{
+                      fontSize: '12.5px', fontWeight: 600, color: V2.fg,
+                      whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                    }}>{p.game}</div>
+                    <div style={{ fontSize: '10.5px', color: V2.fgMuted, marginTop: '1px' }}>
+                      {p.type === 'states' ? 'Save state' : 'Save'}
+                      {slots > 1 ? ` · ${slots} files` : ''}
+                      {p.emulator ? ` · ${p.emulator}` : ''}
+                    </div>
+                  </div>
+                  <div style={{ flexShrink: 0, fontSize: '10.5px', color: V2.fgMuted }}>Waiting</div>
+                </div>
+              );
+            })}
+            {pendingUploads.length > 12 && (
+              <div style={{
+                padding: '9px 14px', fontSize: '11.5px', color: V2.fgMuted,
+                borderTop: `1px solid ${V2.border}`,
+              }}>and {pendingUploads.length - 12} more…</div>
             )}
           </V2StatsSectionBox>
         )}
@@ -9352,6 +9448,12 @@ export default definePlugin(() => {
   try {
     window.addEventListener('offline', onNetOffline);
     window.addEventListener('online', onNetOnline);
+    // Push the CURRENT connectivity state on mount. The online/offline events
+    // only fire on a TRANSITION, so a plugin that loads while the Deck is
+    // already offline (e.g. wifi not connected to any network) would never
+    // inform the backend — leaving _device_online at None and mislabeling the
+    // outage as 'server_unreachable' instead of 'no_network'. Seed it here.
+    notifyNetworkState(navigator.onLine).catch(() => { }).finally(() => refreshStatusNow());
   } catch (e) { console.error('[RomM] net listeners', e); }
 
   // Just self-updated? Reopen the home page — the reload dropped the user out of

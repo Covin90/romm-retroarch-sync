@@ -6702,6 +6702,54 @@ class AutoSyncManager:
             return name[:-len('.state.auto')]
         return Path(name).stem
 
+    def list_pending_saves(self):
+        """Itemized list of local save/state files waiting to UPLOAD on reconnect.
+
+        Same drift test as count_pending_saves() (current (size, mtime) differs
+        from the last-synced baseline) but returns the details the UI needs to
+        render the upload queue, grouped by game. Each item:
+            { 'game', 'type' ('saves'|'states'), 'emulator', 'files': [
+                { 'name', 'path', 'modified', 'size' }, ... ],
+              'modified' (newest file's mtime) }
+        Newest-changed game first. Best-effort: returns [] on any failure.
+        """
+        try:
+            by_game = {}
+            save_files = self.retroarch.get_save_files() or {}
+            for bucket in ('saves', 'states'):
+                for entry in save_files.get(bucket, []):
+                    path = entry.get('path')
+                    if not path:
+                        continue
+                    try:
+                        st = Path(path).stat()
+                    except Exception:
+                        continue
+                    fp = (st.st_size, st.st_mtime)
+                    if self.last_uploaded.get(str(path)) == fp:
+                        continue  # already synced — not pending
+                    game = self._game_key_for_save(path)
+                    key = (game, bucket)
+                    g = by_game.setdefault(key, {
+                        'game': game,
+                        'type': bucket,
+                        'emulator': entry.get('retroarch_emulator'),
+                        'files': [],
+                        'modified': 0.0,
+                    })
+                    g['files'].append({
+                        'name': entry.get('name') or Path(path).name,
+                        'path': str(path),
+                        'modified': st.st_mtime,
+                        'size': st.st_size,
+                    })
+                    if st.st_mtime > g['modified']:
+                        g['modified'] = st.st_mtime
+            return sorted(by_game.values(), key=lambda g: g['modified'], reverse=True)
+        except Exception as e:
+            logging.debug(f"list_pending_saves failed: {e}")
+            return []
+
     def count_pending_saves(self):
         """Number of distinct GAMES with local save/state changes waiting to
         UPLOAD on reconnect.
@@ -6714,21 +6762,9 @@ class AutoSyncManager:
         the offline sync-queue indicator. Best-effort: returns 0 on any failure.
         """
         try:
-            pending_games = set()
-            save_files = self.retroarch.get_save_files() or {}
-            for bucket in ('saves', 'states'):
-                for entry in save_files.get(bucket, []):
-                    path = entry.get('path')
-                    if not path:
-                        continue
-                    try:
-                        st = Path(path).stat()
-                    except Exception:
-                        continue
-                    fp = (st.st_size, st.st_mtime)
-                    if self.last_uploaded.get(str(path)) != fp:
-                        pending_games.add(self._game_key_for_save(path))
-            return len(pending_games)
+            # A game with both a pending save AND a pending state is one game to
+            # the user, so collapse the (game, bucket) groups back to games.
+            return len({g['game'] for g in self.list_pending_saves()})
         except Exception as e:
             logging.debug(f"count_pending_saves failed: {e}")
             return 0

@@ -92,3 +92,5 @@ releases/
 # Claude Code
 .claude/
 .romm-ref/
+
+node_modules/

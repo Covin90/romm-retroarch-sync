@@ -8,6 +8,7 @@ import re
 import sys
 import threading
 import time
+import subprocess
 import os
 import ctypes
 from datetime import datetime, timezone
@@ -606,6 +607,91 @@ class Plugin:
             logging.debug(f"notify_network_state error: {e}")
             return {'success': False}
 
+    # Cache the last rfkill probe so a 1.5s status poll while offline doesn't
+    # spawn a subprocess on every tick. (result, monotonic_ts).
+    _radio_probe_cache: tuple = (None, 0.0)
+
+    def _wifi_radio_blocked(self):
+        """Best-effort: is the wifi radio switched OFF (airplane mode / radio
+        soft-or-hard block) as opposed to on-but-not-associated?
+
+        Returns True if blocked, False if the radio is up, None if we can't
+        tell (no tooling, parse failure). Only meaningful when the device is
+        already known to be offline — it separates 'airplane_mode' from a
+        'no_network' where wifi is on but joined to nothing. Cached ~3s.
+
+        Shared by the Deck plugin (always Linux) and the desktop app (Linux via
+        rfkill, Windows via netsh), so it dispatches on the platform.
+        """
+        cached, ts = Plugin._radio_probe_cache
+        if time.monotonic() - ts < 3.0:
+            return cached
+        try:
+            if sys.platform.startswith('win'):
+                result = self._wifi_radio_blocked_windows()
+            else:
+                result = self._wifi_radio_blocked_rfkill()
+        except Exception as e:
+            logging.debug(f"radio probe failed: {e}")
+            result = None
+        Plugin._radio_probe_cache = (result, time.monotonic())
+        return result
+
+    def _wifi_radio_blocked_rfkill(self):
+        """Linux radio state via rfkill. See _wifi_radio_blocked."""
+        # -r raw, -n no headings: "<type> <soft> <hard>" per line.
+        out = subprocess.run(
+            ['rfkill', '--output', 'TYPE,SOFT,HARD', '-rn'],
+            capture_output=True, text=True, timeout=2,
+        )
+        if out.returncode != 0:
+            return None
+        for line in out.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 3 and parts[0] in ('wlan', 'wifi'):
+                # Blocked if either soft or hard block is engaged.
+                return 'blocked' in (parts[1], parts[2])
+        return None
+
+    def _wifi_radio_blocked_windows(self):
+        """Windows radio state, locale-independent.
+
+        Primary signal is the registry value Windows itself uses to track the
+        airplane-mode master switch:
+
+            HKLM\\SYSTEM\\CurrentControlSet\\Control\\RadioManagement
+                \\SystemRadioState
+
+        a REG_BINARY that is 0 when radios are enabled and non-zero when
+        airplane mode is on. Reading it via the stdlib `winreg` needs no native
+        dependency, no subprocess, and — crucially — no parsing of localized
+        text, so it works the same on every Windows language. A non-zero value
+        ⇒ blocked (True); zero ⇒ up (False); if the key is missing or
+        unreadable we return None and the caller falls back to 'no_network'.
+        """
+        try:
+            import winreg
+        except Exception:
+            return None
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SYSTEM\CurrentControlSet\Control\RadioManagement\SystemRadioState",
+            ) as key:
+                val, _ = winreg.QueryValueEx(key, "")  # default value
+        except FileNotFoundError:
+            return None
+        except OSError as e:
+            logging.debug(f"SystemRadioState read failed: {e}")
+            return None
+        # REG_BINARY comes back as bytes; older/edge cases may return an int.
+        if isinstance(val, (bytes, bytearray)):
+            return any(val)
+        try:
+            return bool(int(val))
+        except (TypeError, ValueError):
+            return None
+
     def _persist_snapshot(self):
         """Write-through the live library to disk so a cold start can hydrate it
         offline. Called after every successful fetch. Best-effort: never raises
@@ -973,6 +1059,20 @@ class Plugin:
             logging.debug(f"_count_pending_saves failed: {e}")
         return 0
 
+    async def get_pending_uploads(self):
+        """Itemized list of local saves/states waiting to upload on reconnect.
+
+        Backs the Downloads page's read-only upload queue. Groups by game, so it
+        lines up with the pending_saves count in get_service_status. Best-effort:
+        empty list when auto-sync isn't up or anything goes wrong.
+        """
+        try:
+            if self._auto_sync and hasattr(self._auto_sync, 'list_pending_saves'):
+                return self._auto_sync.list_pending_saves()
+        except Exception as e:
+            logging.debug(f"get_pending_uploads failed: {e}")
+        return []
+
     async def get_service_status(self):
         """Build and return current sync status directly from live object state."""
         try:
@@ -1009,7 +1109,13 @@ class Plugin:
                 # "can't reach the server". If the device itself reported no
                 # network it's 'no_network'; otherwise the device has a network
                 # but the RomM server isn't answering ('server_unreachable').
-                reason = 'no_network' if self._device_online is False else 'server_unreachable'
+                if self._device_online is False:
+                    # No connectivity — split "radio off (airplane / wifi
+                    # disabled)" from "radio on but joined to no network" so
+                    # the UI can tell the user what to actually toggle.
+                    reason = 'airplane_mode' if self._wifi_radio_blocked() else 'no_network'
+                else:
+                    reason = 'server_unreachable'
                 has_library = bool(self._available_games)
                 if not self._connection_attempted:
                     conn_state = 'connecting'
@@ -1017,11 +1123,13 @@ class Plugin:
                     reason = None
                 elif has_library:
                     conn_state = 'offline_cached'
-                    msg = ("No internet connection" if reason == 'no_network'
+                    msg = ("Airplane mode is on" if reason == 'airplane_mode'
+                           else "No internet connection" if reason == 'no_network'
                            else "Can't reach your RomM server")
                 else:
                     conn_state = 'disconnected'
-                    msg = ("No internet connection" if reason == 'no_network'
+                    msg = ("Airplane mode is on" if reason == 'airplane_mode'
+                           else "No internet connection" if reason == 'no_network'
                            else "Can't reach your RomM server")
                 return {
                     'status':                  'running',
