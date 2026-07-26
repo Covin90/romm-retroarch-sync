@@ -10,8 +10,8 @@
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
-    "electron": "npm run build && electron .",
-    "electron:dev": "ROMM_URL=http://127.0.0.1:5173 ROMM_PORT=8723 electron ."
+    "electron": "npm run build && node electron/launch.cjs",
+    "electron:dev": "node electron/launch.cjs --dev"
   },
   "dependencies": {
     "react": "^18.3.1",

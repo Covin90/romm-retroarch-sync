@@ -9,10 +9,17 @@ import { resolve } from "path";
 export default defineConfig({
   plugins: [react()],
   resolve: {
-    alias: {
-      "@decky/ui": resolve(__dirname, "src/shim/ui.tsx"),
-      "@decky/api": resolve(__dirname, "src/shim/api.tsx"),
-    },
+    alias: [
+      { find: "@decky/ui", replacement: resolve(__dirname, "src/shim/ui.tsx") },
+      { find: "@decky/api", replacement: resolve(__dirname, "src/shim/api.tsx") },
+      // decky_plugin/src/index.tsx lives outside this root and there is no
+      // node_modules next to it, so Node resolution walks past desktop/ and
+      // never finds react/react-icons. Pin them to ours.
+      { find: /^react$/, replacement: resolve(__dirname, "node_modules/react") },
+      { find: /^react-dom$/, replacement: resolve(__dirname, "node_modules/react-dom") },
+      { find: /^react\/jsx-runtime$/, replacement: resolve(__dirname, "node_modules/react/jsx-runtime") },
+      { find: /^react-icons\//, replacement: resolve(__dirname, "node_modules/react-icons") + "/" },
+    ],
   },
   server: {
     port: 5173,
