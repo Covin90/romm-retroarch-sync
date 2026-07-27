@@ -60,6 +60,44 @@ cp "$PROJECT_ROOT"/src/*.py "$APPDIR/usr/bin/"
 # the pin from requirements.txt.
 ENGINE_SRC="${LUDO_ENGINE:-$HOME/ludo/engine/romm_sync_engine}"
 if [ -d "$ENGINE_SRC" ]; then
+    # A local checkout is whatever you happen to have on disk, which is not
+    # necessarily the commit this repo pins. Shipping that silently would put
+    # unreviewed (or uncommitted) engine code into a release, so verify it
+    # matches requirements.txt first. Set ALLOW_DIRTY_ENGINE=1 for dev builds.
+    ENGINE_PIN=$(grep -oE '@[0-9a-f]{7,40}#subdirectory=engine' \
+        "$PROJECT_ROOT/requirements.txt" | head -1 | sed 's/^@//; s/#.*//')
+    ENGINE_REPO=$(cd "$ENGINE_SRC" && git rev-parse --show-toplevel 2>/dev/null || true)
+
+    if [ -z "$ENGINE_REPO" ]; then
+        echo "⚠️  $ENGINE_SRC is not a git checkout — cannot verify against the pin"
+        [ "${ALLOW_DIRTY_ENGINE:-0}" = "1" ] || {
+            echo "❌ Refusing to bundle an unverifiable engine."
+            echo "   Set ALLOW_DIRTY_ENGINE=1 to build anyway (dev builds only)."
+            exit 1; }
+    else
+        ENGINE_HEAD=$(git -C "$ENGINE_REPO" rev-parse HEAD)
+        ENGINE_DIRTY=$(git -C "$ENGINE_REPO" status --porcelain -- engine | wc -l)
+
+        if [ "$ENGINE_DIRTY" -ne 0 ]; then
+            echo "⚠️  Engine checkout has $ENGINE_DIRTY uncommitted change(s) under engine/"
+            [ "${ALLOW_DIRTY_ENGINE:-0}" = "1" ] || {
+                echo "❌ Refusing to ship uncommitted engine code."
+                echo "   Commit them in $ENGINE_REPO, or set ALLOW_DIRTY_ENGINE=1."
+                exit 1; }
+        fi
+
+        if [ -n "$ENGINE_PIN" ] && [ "${ENGINE_HEAD#$ENGINE_PIN}" = "$ENGINE_HEAD" ]; then
+            echo "⚠️  Engine checkout is at ${ENGINE_HEAD:0:7}, but requirements.txt pins $ENGINE_PIN"
+            [ "${ALLOW_DIRTY_ENGINE:-0}" = "1" ] || {
+                echo "❌ Refusing to ship an engine that differs from the pin."
+                echo "   Bump the pin in requirements.txt, check out $ENGINE_PIN,"
+                echo "   or set ALLOW_DIRTY_ENGINE=1 (dev builds only)."
+                exit 1; }
+        elif [ -n "$ENGINE_PIN" ]; then
+            echo "✅ Engine checkout matches pinned $ENGINE_PIN"
+        fi
+    fi
+
     echo "📦 Bundling engine from $ENGINE_SRC"
     cp -r "$ENGINE_SRC" "$APPDIR/usr/bin/"
     rm -rf "$APPDIR/usr/bin/romm_sync_engine/__pycache__"
