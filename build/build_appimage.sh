@@ -53,6 +53,23 @@ find "$APPDIR" -name ".git*" -type f -delete 2>/dev/null || true
 # Copy application
 echo "📋 Copying application files..."
 cp "$PROJECT_ROOT"/src/*.py "$APPDIR/usr/bin/"
+
+# Vendor the shared sync engine. It lives in the Ludo repo now, so it is no
+# longer picked up by the src/*.py copy above. Prefer a local checkout (fast,
+# works offline, matches what you are developing against); otherwise resolve
+# the pin from requirements.txt.
+ENGINE_SRC="${LUDO_ENGINE:-$HOME/ludo/engine/romm_sync_engine}"
+if [ -d "$ENGINE_SRC" ]; then
+    echo "📦 Bundling engine from $ENGINE_SRC"
+    cp -r "$ENGINE_SRC" "$APPDIR/usr/bin/"
+    rm -rf "$APPDIR/usr/bin/romm_sync_engine/__pycache__"
+else
+    echo "📦 No local engine checkout; installing pinned romm-sync-engine..."
+    pip install --quiet --target "$APPDIR/usr/bin" \
+        --no-deps -r <(grep '^romm-sync-engine' "$PROJECT_ROOT/requirements.txt") \
+        || { echo "❌ Failed to bundle romm-sync-engine"; exit 1; }
+fi
+[ -d "$APPDIR/usr/bin/romm_sync_engine" ] || { echo "❌ romm_sync_engine missing from AppDir"; exit 1; }
 echo "✅ All Python modules bundled"
 
 # Copy Decky plugin if it exists

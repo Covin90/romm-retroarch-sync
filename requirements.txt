@@ -1,9 +1,17 @@
 # Core dependencies for RomM-RetroArch Sync
-requests>=2.28.0
-watchdog>=3.0.0
-cryptography>=3.4.8
-Pillow>=10.0.0
-psutil>=5.9.0
+#
+# The sync engine now lives in the Ludo repo and is shared by both frontends.
+# It pulls in requests / watchdog / cryptography / Pillow / psutil / py7zr
+# itself, so they are no longer listed here.
+#
+# Pinned to a specific commit: bumping it is an explicit, reviewable change.
+# NOTE: github.com/Covin90/ludo is currently private, so installing this way
+# needs an authenticated git (`gh auth setup-git`, or a PAT in the URL).
+romm-sync-engine @ git+https://github.com/Covin90/ludo@354fa67#subdirectory=engine
+
+# For local development, prefer an editable install pointed at your checkout so
+# engine edits are picked up by both apps immediately, with no reinstall:
+#   pip install -e ~/ludo/engine
 
 # GTK4 and GObject bindings (system-provided, listed for reference)
 # PyGObject>=3.42.0

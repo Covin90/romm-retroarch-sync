@@ -504,7 +504,7 @@ except ValueError:
 
 # Custom exception for download cancellation
 
-from sync_core import *
+from romm_sync_engine.sync_core import *
 
 class TrayIcon:
     """Cross-desktop tray icon using subprocess for AppIndicator"""

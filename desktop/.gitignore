@@ -1,6 +1,0 @@
-node_modules
-dist
-*.local
-.vite
-.venv
-__pycache__
