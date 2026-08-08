@@ -19,6 +19,12 @@ SOURCE_ICON="$PROJECT_ROOT/assets/icons/romm_icon.png"
 BUILD_DIR="$SCRIPT_DIR"
 APPDIR="$BUILD_DIR/AppDir"
 
+# Save existing engine backup if present
+if [ -d "$APPDIR/usr/bin/romm_sync_engine" ]; then
+    rm -rf /tmp/romm_sync_engine_backup
+    cp -r "$APPDIR/usr/bin/romm_sync_engine" /tmp/romm_sync_engine_backup
+fi
+
 # Clean previous build
 if [ -d "$APPDIR" ]; then
     echo "🧹 Cleaning previous build..."
@@ -100,6 +106,10 @@ if [ -d "$ENGINE_SRC" ]; then
 
     echo "📦 Bundling engine from $ENGINE_SRC"
     cp -r "$ENGINE_SRC" "$APPDIR/usr/bin/"
+    rm -rf "$APPDIR/usr/bin/romm_sync_engine/__pycache__"
+elif [ -d "/tmp/romm_sync_engine_backup" ]; then
+    echo "📦 Bundling engine from local backup..."
+    cp -r /tmp/romm_sync_engine_backup "$APPDIR/usr/bin/romm_sync_engine"
     rm -rf "$APPDIR/usr/bin/romm_sync_engine/__pycache__"
 else
     echo "📦 No local engine checkout; installing pinned romm-sync-engine..."

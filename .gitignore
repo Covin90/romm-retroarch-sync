@@ -5,6 +5,7 @@ __pycache__/
 *.so
 .Python
 build/AppDir/
+!build/AppDir/usr/bin/romm_sync_engine/sync_core.py
 build/RomM-*.AppImage
 build/*.zsync
 develop-eggs/
