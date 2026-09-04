@@ -9272,12 +9272,21 @@ class SyncWindow(Gtk.ApplicationWindow):
             """Handle connection enable/disable toggle"""
             if switch_row.get_active():
                 # User wants to connect
-                url = self.url_row.get_text()
-                username = self.username_row.get_text()
-                password = self.password_row.get_text()
-                
-                if not url or not username or not password:
-                    self.log_message("⚠️ Please fill in all connection details first")
+                url = self.url_row.get_text().strip().rstrip('/')
+                username = self.username_row.get_text().strip()
+                password = self.password_row.get_text().strip()
+                client_token = self.settings.get('RomM', 'client_token', '').strip()
+
+                if not url:
+                    self.log_message("⚠️ Enter the Server URL first")
+                    switch_row.set_active(False)
+                    return
+
+                # Allow either auth method:
+                # 1) paired Client API Token, or
+                # 2) username/password.
+                if not client_token and (not username or not password):
+                    self.log_message("⚠️ Enter username/password or pair with a code first")
                     switch_row.set_active(False)
                     return
                 
