@@ -504,6 +504,11 @@ except ValueError:
 
 # Custom exception for download cancellation
 
+# Add local build AppDir to sys.path if romm_sync_engine is present there
+_local_engine = Path(__file__).parent.parent / 'build' / 'AppDir' / 'usr' / 'bin'
+if _local_engine.exists() and str(_local_engine) not in sys.path:
+    sys.path.insert(0, str(_local_engine))
+
 from romm_sync_engine.sync_core import *
 
 class TrayIcon:
@@ -9878,6 +9883,75 @@ class SyncWindow(Gtk.ApplicationWindow):
 
         config_group.add(bios_expander)
 
+        # Platform Core Overrides settings
+        cores_expander = Adw.ExpanderRow()
+        cores_expander.set_title("Platform Core Overrides")
+        cores_expander.set_subtitle("Customize RetroArch core selection per platform")
+
+        # Gather platform names from available games + common platforms
+        platforms_to_show = {
+            "Sega Saturn", "Sony PlayStation", "Sony PlayStation 2",
+            "Nintendo 64", "Super Nintendo Entertainment System",
+            "Nintendo Entertainment System", "Game Boy Advance",
+            "Sega Genesis", "Nintendo GameCube", "Nintendo DS", "Sega Dreamcast"
+        }
+        if hasattr(self, 'available_games') and self.available_games:
+            for g in self.available_games:
+                p_name = g.get('platform')
+                if p_name:
+                    platforms_to_show.add(p_name)
+
+        available_cores = self.retroarch.get_available_cores() if hasattr(self, 'retroarch') and self.retroarch else {}
+        sorted_cores = sorted(available_cores.keys())
+
+        for p_name in sorted(platforms_to_show):
+            row = Adw.ActionRow()
+            row.set_title(p_name)
+
+            curr_override = self.retroarch.get_core_override(p_name) if hasattr(self, 'retroarch') else ''
+            res_info = self.retroarch.describe_core_resolution(p_name) if hasattr(self, 'retroarch') and hasattr(self.retroarch, 'describe_core_resolution') else {}
+            resolved_core = res_info.get('resolved_core', 'None')
+
+            if curr_override:
+                row.set_subtitle(f"Override: {curr_override}")
+            elif resolved_core:
+                row.set_subtitle(f"Auto: {resolved_core}")
+            else:
+                row.set_subtitle("Auto: None")
+
+            combo = Gtk.ComboBoxText()
+            combo.set_valign(Gtk.Align.CENTER)
+            combo.append_text("Auto (Default)")
+
+            active_idx = 0
+            for idx, c_name in enumerate(sorted_cores, start=1):
+                combo.append_text(c_name)
+                if curr_override and c_name == curr_override:
+                    active_idx = idx
+
+            combo.set_active(active_idx)
+
+            def make_on_change(platform=p_name, action_row=row):
+                def on_combo_changed(widget):
+                    selected = widget.get_active_text()
+                    if selected == "Auto (Default)" or not selected:
+                        self.retroarch.set_core_override(platform, None)
+                        res = self.retroarch.describe_core_resolution(platform)
+                        autocore = res.get('resolved_core', 'None')
+                        action_row.set_subtitle(f"Auto: {autocore}")
+                        self.log_message(f"Cleared core override for {platform} (reverted to Auto: {autocore})")
+                    else:
+                        self.retroarch.set_core_override(platform, selected)
+                        action_row.set_subtitle(f"Override: {selected}")
+                        self.log_message(f"Set core override for {platform}: {selected}")
+                return on_combo_changed
+
+            combo.connect("changed", make_on_change(p_name, row))
+            row.add_suffix(combo)
+            cores_expander.add_row(row)
+
+        config_group.add(cores_expander)
+
         # Advanced Tools
         advanced_group = Adw.PreferencesGroup()
         advanced_group.set_title("Advanced Tools")
@@ -11294,18 +11368,84 @@ class SyncWindow(Gtk.ApplicationWindow):
                 self._show_missing_core_dialog(f"{game.get('name', 'Unknown')} - {disc_filename}", platform_name)
 
     def _show_missing_core_dialog(self, game_name, platform_name):
-        """Show a dialog informing the user that no RetroArch core is installed for the platform"""
+        """Show a dialog informing the user that no RetroArch core is installed for the platform,
+        and allow selecting an installed core as an override."""
         platform_display = platform_name if platform_name else "this platform"
+        available_cores = self.retroarch.get_available_cores() if hasattr(self, 'retroarch') and self.retroarch else {}
 
-        dialog = Adw.AlertDialog.new(
-            "RetroArch Core Not Found",
-            f"Cannot launch '{game_name}' because no RetroArch core is installed for {platform_display}.\n\n"
-            f"Please install a compatible RetroArch core for {platform_display} and try again."
+        if not available_cores:
+            dialog = Adw.AlertDialog.new(
+                "RetroArch Core Not Found",
+                f"Cannot launch '{game_name}' because no RetroArch core is installed for {platform_display}.\n\n"
+                f"Please install a compatible RetroArch core for {platform_display} and try again."
+            )
+            dialog.add_response("ok", "OK")
+            dialog.set_default_response("ok")
+            dialog.set_close_response("ok")
+            dialog.present(self)
+            return
+
+        # We have installed cores on the system; allow user to select one to assign as override.
+        dialog = Gtk.Dialog(
+            title="RetroArch Core Not Found",
+            transient_for=self,
+            modal=True
         )
-        dialog.add_response("ok", "OK")
-        dialog.set_default_response("ok")
-        dialog.set_close_response("ok")
-        dialog.present(self)
+        dialog.set_default_size(480, 250)
+
+        content_area = dialog.get_content_area()
+        content_area.set_margin_top(16)
+        content_area.set_margin_bottom(16)
+        content_area.set_margin_start(16)
+        content_area.set_margin_end(16)
+        content_area.set_spacing(12)
+
+        heading = Gtk.Label()
+        heading.set_markup(f"<b>No default core matched for {html.escape(platform_display)}</b>")
+        heading.set_halign(Gtk.Align.START)
+        content_area.append(heading)
+
+        desc = Gtk.Label()
+        desc.set_text(f"Cannot launch '{game_name}'. Select one of your installed RetroArch cores to use for {platform_display}:")
+        desc.set_wrap(True)
+        desc.set_halign(Gtk.Align.START)
+        content_area.append(desc)
+
+        combo = Gtk.ComboBoxText()
+        sorted_cores = sorted(available_cores.keys())
+        current_override = self.retroarch.get_core_override(platform_name) if hasattr(self.retroarch, 'get_core_override') else ''
+
+        default_idx = 0
+        for i, c_name in enumerate(sorted_cores):
+            combo.append_text(c_name)
+            if c_name == current_override:
+                default_idx = i
+        combo.set_active(default_idx)
+        content_area.append(combo)
+
+        button_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        button_box.set_halign(Gtk.Align.END)
+        button_box.set_margin_top(12)
+
+        cancel_btn = Gtk.Button(label="Cancel")
+        cancel_btn.connect("clicked", lambda b: dialog.destroy())
+        button_box.append(cancel_btn)
+
+        assign_btn = Gtk.Button(label="Assign Core & Save")
+        assign_btn.add_css_class("suggested-action")
+
+        def on_assign_clicked(btn):
+            sel_core = combo.get_active_text()
+            if sel_core and platform_name:
+                self.retroarch.set_core_override(platform_name, sel_core)
+                self.log_message(f"✅ Set custom core override for {platform_name}: {sel_core}")
+            dialog.destroy()
+
+        assign_btn.connect("clicked", on_assign_clicked)
+        button_box.append(assign_btn)
+        content_area.append(button_box)
+
+        dialog.present()
 
     def on_window_close_request(self, _window):
         """Overrides the default window close action.
